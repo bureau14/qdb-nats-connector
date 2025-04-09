@@ -13,7 +13,11 @@ case $(uname) in
         ;;
 esac
 
-# Build qdb_rest
+# Necessary because we do the checkout on the "host" machine while run build
+# inside a docker container.
+git config --global --add safe.directory '*'
+
+# Build qdb_nats_connector
 (
     pushd ${BASE_DIR}
     ${GO} build -x -v -o qdb_nats_connector$SUFFIX

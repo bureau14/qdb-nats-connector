@@ -25,3 +25,19 @@ go.work.sum
 .env
 
 qdb-nats-connector
+qdb_nats_connector
+
+# Where we extract our qdb archives
+qdb/
+
+# Test specific
+cluster_private.key
+cluster_public.key
+insecure/
+secure/
+user_private.key
+users.cfg
+
+# Datatbase log file
+*.out.txt
+*.err.txt

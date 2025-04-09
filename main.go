@@ -4,12 +4,11 @@ import (
 	"flag"
 	"fmt"
 
-	 "os"
 	log "github.com/sirupsen/logrus"
+	"os"
 
 	"github.com/bureau14/qdb-nats-connector/connector"
 )
-
 
 var usageStr = `
 Usage: qdb-nats-connector [options]

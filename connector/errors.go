@@ -1,6 +1,5 @@
 package connector
 
-
 import (
 	"fmt"
 )
@@ -17,8 +16,8 @@ type (
 	}
 
 	APIError struct {
-		ErrorCode ErrorCode `json:"error_code"`
-		Description string `json:"description"`
+		ErrorCode   ErrorCode `json:"error_code"`
+		Description string    `json:"description"`
 	}
 
 	ErrorCode uint16

@@ -7,7 +7,7 @@ import (
 )
 
 type Connector struct {
-	Options Options
+	Options  Options
 	NatsConn *nats.Conn
 }
 

@@ -1,6 +1,5 @@
 package connector
 
-
 import (
 	"flag"
 
@@ -16,7 +15,7 @@ type Options struct {
 func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Options, error) {
 	opts := &Options{}
 	var (
-		showHelp               bool
+		showHelp bool
 	)
 
 	fs.BoolVar(&showHelp, "h", false, "Show this message.")
@@ -43,8 +42,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 	return opts, nil
 }
 
-
-func ValidateOptions(opts *Options) (error) {
+func ValidateOptions(opts *Options) error {
 	if opts.NatsTopic == "" {
 		return ErrNoTopicProvided
 	}

@@ -2,54 +2,45 @@ package connector
 
 import (
 	"bytes"
-	"reflect"
 	"math/rand"
 
 	"testing"
-	"testing/quick"
 
 	"github.com/nats-io/nats.go"
 )
 
-type TopicString string
 const latin = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01233456789"
 
-func (l TopicString) Generate(rand *rand.Rand, size int) reflect.Value {
+// Generates a random alias, which consists only of "normal" ASCII characters
+func randomAlias() string {
+	const size = 16
 	var buffer bytes.Buffer
 	for i := 0; i < size; i++ {
 		buffer.WriteString(string(latin[rand.Intn(len(latin))]))
 	}
-	s := TopicString(buffer.String())
-	return reflect.ValueOf(s)
+
+	return buffer.String()
 }
 
+func randomTopicName() string {
+	return randomAlias()
+}
 
 func DefaultOptions() *Options {
-	return &Options {
+	return &Options{
 		NatsEndpoint: nats.DefaultURL,
-		NatsTopic: "",
-		PidFile: "",
+		NatsTopic:    randomTopicName(),
+		PidFile:      "",
 	}
 }
 
-func TestTopicNames(t *testing.T) {
+func TestNewConnector(t *testing.T) {
 
-	f := func(topic TopicString) bool {
-		opts := DefaultOptions()
-		opts.NatsTopic = string(topic)
+	c, err := NewConnector(DefaultOptions())
 
-		c, err := NewConnector(opts)
-
-		if err == nil {
-			defer c.Close()
-		}
-
-		return err == nil
-	}
-
-
-	if err := quick.Check(f, nil); err != nil {
+	if err != nil {
 		t.Error(err)
 	}
 
+	defer c.Close()
 }

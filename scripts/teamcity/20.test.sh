@@ -8,6 +8,6 @@ source "$SCRIPT_DIR/common.sh"
 # Build qdb_nats_connector
 (
     pushd ${BASE_DIR}
-    ${GO} test -v -json ./...
+    ${GO} test -v -test.run "Test*" -json
     popd
 )

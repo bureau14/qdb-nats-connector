@@ -41,12 +41,12 @@ GOPATH=${GOPATH:-}
 
 if [[ -z "${GOROOT}" ]]
 then
-    echo "GOROOT environment variable is expect to be set"
+    echo "GOROOT environment variable is expected to be set"
 fi
 
 if [[ -z "${GOPATH}" ]]
 then
-    echo "GOPATH environment variable is expect to be set"
+    echo "GOPATH environment variable is expected to be set"
 fi
 
 LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}

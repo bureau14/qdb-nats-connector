@@ -16,6 +16,24 @@ echo "QDB_API_DIR: ${QDB_API_DIR}"
 echo "QDB_LIB_DIR: ${QDB_LIB_DIR}"
 
 ##
+# Utility functions for teamcity
+tc_build_problem() {
+    echo -n '##'
+    echo "teamcity[buildProblem description='$1']"
+}
+
+tc_open_block() {
+    echo -n '##'
+    echo "teamcity[blockOpened name='$1']"
+}
+
+tc_close_block() {
+    echo -n '##'
+    echo "teamcity[blockClosed name='$1']"
+}
+
+
+##
 # Validation of the GOROOT and GOPATH env vars
 
 GOROOT=${GOROOT:-}
@@ -96,3 +114,7 @@ export BASE_DIR="${BASE_DIR}"
 export GOROOT="${GOROOT}"
 export GOPATH="${GOPATH}"
 export GO="${GO}"
+
+export -f tc_build_problem
+export -f tc_open_block
+export -f tc_close_block

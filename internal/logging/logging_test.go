@@ -17,7 +17,7 @@ func TestSetup(t *testing.T) {
 func TestSetupDefault(t *testing.T) {
 	// Test default setup with metadata
 	SetupDefault("test-version", "test-instance")
-	
+
 	// Log a test message to verify it works
 	slog.Info("test message", "test_key", "test_value")
 }
@@ -35,12 +35,12 @@ func TestLogLevelFromEnv(t *testing.T) {
 		{"invalid", slog.LevelInfo}, // default
 		{"", slog.LevelInfo},        // default
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.envValue, func(t *testing.T) {
 			oldValue := os.Getenv("LOG_LEVEL")
 			defer os.Setenv("LOG_LEVEL", oldValue)
-			
+
 			os.Setenv("LOG_LEVEL", tt.envValue)
 			level := getLogLevel()
 			if level != tt.expected {
@@ -62,12 +62,12 @@ func TestLogFormatFromEnv(t *testing.T) {
 		{"invalid", "invalid"},
 		{"", "json"}, // default
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.envValue, func(t *testing.T) {
 			oldValue := os.Getenv("LOG_FORMAT")
 			defer os.Setenv("LOG_FORMAT", oldValue)
-			
+
 			os.Setenv("LOG_FORMAT", tt.envValue)
 			format := getLogFormat()
 			if format != tt.expected {

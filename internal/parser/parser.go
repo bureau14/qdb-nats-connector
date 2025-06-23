@@ -9,7 +9,7 @@ package parser
 
 import (
 	"log/slog"
-	
+
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
@@ -41,10 +41,10 @@ func (p *Parser) Parse(data []byte) (map[string]interface{}, error) {
 	if len(data) == 0 {
 		return nil, errors.NewParsingFailedError("parser", errors.NewInvalidConfigError("parser", "empty message data"))
 	}
-	
+
 	// TODO: Implement actual parsing logic with plugins
 	slog.Debug("Parsing message data", "data_len", len(data))
-	
+
 	// Placeholder - return empty map for now
 	return map[string]interface{}{}, nil
 }

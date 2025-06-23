@@ -9,7 +9,7 @@ package sink
 
 import (
 	"log/slog"
-	
+
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
@@ -53,14 +53,14 @@ func (s *Sink) Write(data map[string]interface{}) error {
 	if data == nil {
 		return errors.NewInvalidConfigError("sink", "nil data provided")
 	}
-	
+
 	if len(data) == 0 {
 		return errors.NewInvalidConfigError("sink", "empty data provided")
 	}
-	
+
 	// TODO: Implement actual QuasarDB write logic
 	slog.Debug("Writing data to QuasarDB", "data_keys", len(data))
-	
+
 	// Placeholder - simulate successful write for now
 	return nil
 }

@@ -11,7 +11,7 @@ import (
 	"log/slog"
 
 	"github.com/nats-io/nats.go"
-	
+
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
@@ -55,7 +55,9 @@ func NewSource(opts Options) (*Source, error) {
 // - Two-phase shutdown (drain then close) maximizes reliability
 func (s *Source) Close() {
 	slog.Info("Draining NATS source")
-	s.NatsConn.Drain()
+	if err := s.NatsConn.Drain(); err != nil {
+		slog.Error("Failed to drain NATS connection", "error", err)
+	}
 
 	slog.Info("Closing NATS source")
 	s.NatsConn.Close()

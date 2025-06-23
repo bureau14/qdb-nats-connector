@@ -28,14 +28,14 @@ func Setup() *slog.Logger {
 // SetupDefault configures the default slog logger with service metadata.
 func SetupDefault(version, instanceID string) {
 	logger := Setup()
-	
+
 	// Add service context to all logs
 	logger = logger.With(
 		"service", "qdb-nats-connector",
 		"version", version,
 		"instance_id", instanceID,
 	)
-	
+
 	slog.SetDefault(logger)
 }
 

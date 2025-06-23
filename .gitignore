@@ -49,7 +49,18 @@ AGENTS.md
 CLAUDE.md
 ruler_aider_instructions.md
 # END Ruler Generated Files
+
+# Added by ruler, but not as a gitignore? Probably because it's for MCP servers.
+claude_desktop_config.json
+
+# Added by aider
 .aider*
+
+# Maintainer in ruler
+.mcp.json
 
 # Ruler makes backups of files, ignore those
 *.bak
+
+# Claude code local rules
+.claude/settings.local.json

@@ -17,7 +17,7 @@ import (
 // - Alphanumeric only avoids special character issues
 // - No ambiguous characters (0/O, 1/l)
 // - Safe for filenames, topics, and identifiers
-const latin = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01233456789"
+const latin = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 // RandomAlias generates a 16-character random string suitable for identifiers.
 // Key assumptions:

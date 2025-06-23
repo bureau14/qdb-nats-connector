@@ -37,3 +37,13 @@ scripts/           # automation
 direnv exec . go test -v ./...                          # Run full test suite
 direnv exec . go test -v ./... -run '<TestNamePattern>' # Run individual or prefixed tests
 ```
+
+## Validation
+
+**ALWAYS** lint and validate changes after making changes to code by executing from the project root:
+
+* `direnv exec . go fmt ./...`
+* `direnv exec . go vet ./...`
+* `direnv exec . staticcheck ./...`
+* `direnv exec . ineffassign ./...`
+* `direnv exec . golangci-lint run ./...`

@@ -49,7 +49,6 @@ var (
 	ErrNoTopicProvided = fmt.Errorf("no topic provided")
 )
 
-
 // Error formats the API error for logging and display.
 // Decision rationale:
 // - Consistent prefix identifies connector errors
@@ -87,4 +86,3 @@ func (err *connectorError) Error() string {
 	}
 	return fmt.Sprintf("qdb-nats-connector: %s", err.message)
 }
-

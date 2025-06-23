@@ -129,9 +129,9 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 // Decision rationale:
 // - Minimal validation here, components validate their own requirements
 // - Early failure on missing topic prevents cryptic downstream errors
-func ValidateOptions(opts *Options) error {
+func ValidateOptions(opts *Options) *ConnectorError {
 	if opts.sourceOptions.Topic == "" {
-		return ErrNoTopicProvided
+		return NewNoTopicProvidedError("options.go")
 	}
 
 	return nil

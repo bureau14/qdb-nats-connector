@@ -5,7 +5,6 @@ go 1.24
 require (
 	github.com/bureau14/qdb-api-go/v3 v3.14.1
 	github.com/nats-io/nats.go v1.41.0
-	github.com/sirupsen/logrus v1.9.3
 )
 
 // For development purposes only

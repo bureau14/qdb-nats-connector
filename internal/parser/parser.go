@@ -8,7 +8,9 @@
 package parser
 
 import (
-	log "github.com/sirupsen/logrus"
+	"log/slog"
+	
+	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
 // Parser orchestrates message transformation through configured parser plugins.
@@ -29,6 +31,20 @@ type Parser struct {
 // - Plugin loading happens once at startup
 // - Runtime parsing avoids plugin lookup overhead
 func NewParser() (*Parser, error) {
-	log.Info("Initializing new parser")
+	slog.Info("Initializing new parser")
 	return &Parser{}, nil
+}
+
+// Parse transforms raw message data into structured format.
+// This is a placeholder implementation that will be expanded with plugin loading.
+func (p *Parser) Parse(data []byte) (map[string]interface{}, error) {
+	if len(data) == 0 {
+		return nil, errors.NewParsingFailedError("parser", errors.NewInvalidConfigError("parser", "empty message data"))
+	}
+	
+	// TODO: Implement actual parsing logic with plugins
+	slog.Debug("Parsing message data", "data_len", len(data))
+	
+	// Placeholder - return empty map for now
+	return map[string]interface{}{}, nil
 }

@@ -8,7 +8,9 @@
 package sink
 
 import (
-	log "github.com/sirupsen/logrus"
+	"log/slog"
+	
+	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
 // Sink manages the QuasarDB client connection and write operations.
@@ -29,7 +31,7 @@ type Sink struct {
 // - Higher parallelism increases memory usage
 // - Larger buffers improve throughput but increase latency
 func NewSink(opts Options) (*Sink, error) {
-	log.Info("Initializing new sink")
+	slog.Info("Initializing new sink")
 
 	return &Sink{Options: opts}, nil
 }
@@ -42,5 +44,23 @@ func NewSink(opts Options) (*Sink, error) {
 // - Graceful shutdown prevents data loss
 // - No error return as shutdown is best-effort
 func (s *Sink) Close() {
-	log.Info("Closing sink")
+	slog.Info("Closing sink")
+}
+
+// Write persists structured data to QuasarDB.
+// This is a placeholder implementation that will be expanded with actual QuasarDB integration.
+func (s *Sink) Write(data map[string]interface{}) error {
+	if data == nil {
+		return errors.NewInvalidConfigError("sink", "nil data provided")
+	}
+	
+	if len(data) == 0 {
+		return errors.NewInvalidConfigError("sink", "empty data provided")
+	}
+	
+	// TODO: Implement actual QuasarDB write logic
+	slog.Debug("Writing data to QuasarDB", "data_keys", len(data))
+	
+	// Placeholder - simulate successful write for now
+	return nil
 }

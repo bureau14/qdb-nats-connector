@@ -1,10 +1,11 @@
 package connector
 
 import (
+	"log/slog"
+
 	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
-	log "github.com/sirupsen/logrus"
 )
 
 // Connector orchestrates the source, parser, and sink.
@@ -43,23 +44,22 @@ type Connector struct {
 //	defer conn.Close()
 func NewConnector(opts *Options) (*Connector, error) {
 	// Validate options before attempting to create components
-	err := ValidateOptions(opts)
-	if err != nil {
-		log.WithFields(log.Fields{"Options": opts, "err": err}).Error("Options not valid")
-		return nil, err
+	if validationErr := ValidateOptions(opts); validationErr != nil {
+		slog.Error("Options not valid", "options", opts, "error", validationErr)
+		return nil, validationErr
 	}
 
 	// Create source using a provider that builds options from the connector's config
 	srcOpts := source.FromOptionsProvider(opts)
 	src, err := source.NewSource(srcOpts)
 	if err != nil {
-		log.WithFields(log.Fields{"Options": opts, "err": err}).Error("Failed to create source")
+		slog.Error("Failed to create source", "options", opts, "error", err)
 		return nil, err
 	}
 
 	par, err := parser.NewParser()
 	if err != nil {
-		log.WithFields(log.Fields{"err": err}).Error("Failed to create parser")
+		slog.Error("Failed to create parser", "error", err)
 		src.Close()
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func NewConnector(opts *Options) (*Connector, error) {
 	snkOpts := sink.FromOptionsProvider(opts)
 	snk, err := sink.NewSink(snkOpts)
 	if err != nil {
-		log.WithFields(log.Fields{"Options": snkOpts, "err": err}).Error("Failed to create sink")
+		slog.Error("Failed to create sink", "options", snkOpts, "error", err)
 		src.Close()
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func NewConnector(opts *Options) (*Connector, error) {
 // - Component Close() methods are idempotent
 // - Close() methods handle nil receivers gracefully
 func (c *Connector) Close() {
-	log.Info("Closing connector")
+	slog.Info("Closing connector")
 	c.Source.Close()
 	c.Sink.Close()
 }

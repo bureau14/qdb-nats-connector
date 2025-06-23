@@ -8,8 +8,11 @@
 package source
 
 import (
+	"log/slog"
+
 	"github.com/nats-io/nats.go"
-	log "github.com/sirupsen/logrus"
+	
+	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
 // Source manages the NATS client connection and subscription lifecycle.
@@ -31,14 +34,14 @@ type Source struct {
 // - Synchronous connection blocks startup but ensures valid config
 // - Automatic reconnection adds minimal overhead
 func NewSource(opts Options) (*Source, error) {
-	log.WithFields(log.Fields{"NatsEndpoint": opts.Endpoint}).Info("Establishing connection with NATS endpoint")
+	slog.Info("Establishing connection with NATS endpoint", "nats_endpoint", opts.Endpoint)
 	nc, err := nats.Connect(opts.Endpoint)
 	if err != nil {
-		log.WithFields(log.Fields{"NatsEndpoint": opts.Endpoint, "err": err}).Error("Error while establishing connection")
-		return nil, err
+		slog.Error("Error while establishing connection", "nats_endpoint", opts.Endpoint, "error", err)
+		return nil, errors.NewConnectionFailedError("source", opts.Endpoint, err)
 	}
 
-	log.WithFields(log.Fields{"Topic": opts.Topic}).Info("Subscribing to topic")
+	slog.Info("Connected to NATS endpoint", "topic", opts.Topic)
 	return &Source{NatsConn: nc, Options: opts}, nil
 }
 
@@ -51,10 +54,10 @@ func NewSource(opts Options) (*Source, error) {
 // - Drain ensures no message loss during shutdown
 // - Two-phase shutdown (drain then close) maximizes reliability
 func (s *Source) Close() {
-	log.Info("Draining NATS source")
+	slog.Info("Draining NATS source")
 	s.NatsConn.Drain()
 
-	log.Info("Closing NATS source")
+	slog.Info("Closing NATS source")
 	s.NatsConn.Close()
 }
 
@@ -67,11 +70,11 @@ func (s *Source) Close() {
 // - The NATS connection has been established and is healthy.
 // - The provided handler is safe for concurrent execution.
 func (s *Source) Subscribe(handler nats.MsgHandler) error {
-	log.WithFields(log.Fields{"Topic": s.Options.Topic}).Info("Subscribing to topic")
+	slog.Info("Subscribing to topic", "topic", s.Options.Topic)
 	_, err := s.NatsConn.Subscribe(s.Options.Topic, handler)
 	if err != nil {
-		log.WithFields(log.Fields{"err": err, "topic": s.Options.Topic}).Error("Failed to subscribe to topic")
-		return err
+		slog.Error("Failed to subscribe to topic", "error", err, "topic", s.Options.Topic)
+		return errors.NewSubscriptionFailedError("source", s.Options.Topic, err)
 	}
 	return nil
 }

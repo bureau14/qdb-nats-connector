@@ -6,12 +6,11 @@ package main
 import (
 	"flag"
 	"fmt"
-
+	"log/slog"
 	"os"
 
-	log "github.com/sirupsen/logrus"
-
 	"github.com/bureau14/qdb-nats-connector/connector"
+	"github.com/bureau14/qdb-nats-connector/internal/logging"
 )
 
 var usageStr = `
@@ -56,44 +55,55 @@ func usage() {
 // - Sets debug logging by default for troubleshooting production issues
 // - Defers connector.Close() to ensure clean shutdown on any exit path
 func main() {
-
 	exe := "qdb-nats-connector"
+
+	// Setup structured logging
+	logging.SetupDefault("dev", getInstanceID())
 
 	// Create a FlagSet and sets the usage
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
 	fs.Usage = usage
 
-	log.SetOutput(os.Stdout)
-	log.SetLevel(log.DebugLevel)
-
 	// Configure the options from the flags/config file
 	opts, err := connector.ConfigureOptions(fs, os.Args[1:], fs.Usage)
 
 	if err != nil {
-		log.WithFields(log.Fields{"err": err}).Panic("Unable to parse options")
+		slog.Error("Unable to parse options", "error", err)
+		os.Exit(1)
 	}
 
-	log.WithFields(log.Fields{"options": opts}).Info("Parsed configuration options")
+	slog.Info("Parsed configuration options", "options", opts)
 
 	c, err := connector.NewConnector(opts)
 
 	if err != nil {
-		log.WithFields(log.Fields{"err": err, "connector": c}).Panic("Unable to launch NATS connector")
+		slog.Error("Unable to launch NATS connector", "error", err, "connector", c)
+		os.Exit(1)
 	}
 	defer c.Close()
 
-	log.WithFields(log.Fields{"err": err}).Debug("Connected to NATS, invoking nc.Subscribe()")
+	slog.Debug("Connected to NATS, invoking nc.Subscribe()")
 
 	// Simple Async Subscriber
 	// nc.Subscribe("foo", func(m *nats.Msg) {
 	// 	fmt.Printf("Received a message: %s\n", string(m.Data))
 	// })
 
-	// log.Debug("Invoked subscribe")
+	// slog.Debug("Invoked subscribe")
 
-	// log.Debug("Draining")
+	// slog.Debug("Draining")
 	// nc.Drain()
 
-	// log.Debug("Closing")
+	// slog.Debug("Closing")
 	// nc.Close()
+}
+
+// getInstanceID returns a unique identifier for this instance.
+// In production, this could be pulled from EC2 metadata or environment.
+func getInstanceID() string {
+	if id := os.Getenv("INSTANCE_ID"); id != "" {
+		return id
+	}
+	hostname, _ := os.Hostname()
+	return hostname
 }

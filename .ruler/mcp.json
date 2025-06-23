@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+        "sequential-thinking": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-sequential-thinking"
+            ]
+        },
+        "git": {
+            "command": "python3",
+            "args": ["-m", "mcp_server_git"]
+        }
+    }
+}

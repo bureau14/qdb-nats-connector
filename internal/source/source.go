@@ -75,4 +75,3 @@ func (s *Source) Subscribe(handler nats.MsgHandler) error {
 	}
 	return nil
 }
-

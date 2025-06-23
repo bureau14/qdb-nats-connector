@@ -41,7 +41,7 @@ type Options struct {
 //	           sink.WithClusterUri("qdb://127.0.0.1:2836"),
 //	         )
 func NewOptions(opts ...Option) Options {
-	defComp := qdb.CompBest           // take address of a var, not a const
+	defComp := qdb.CompBest // take address of a var, not a const
 	options := Options{
 		Compression: &defComp,
 	}

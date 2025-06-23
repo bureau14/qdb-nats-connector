@@ -30,7 +30,7 @@ type Options struct {
 	//
 	// - Endpoint
 	// - Topic
-	sourceOptions source.Options `json:"source_options"`
+	sourceOptions source.Options
 
 	// All QuasarDB‐sink flags
 	//
@@ -46,7 +46,7 @@ type Options struct {
 	// - Compression
 	// - ClientMaxParallelism
 	// - ClientMaxInBufSize
-	sinkOptions sink.Options `json:"sink_options"`
+	sinkOptions sink.Options
 }
 
 var (
@@ -65,12 +65,14 @@ var (
 // - Performance flags use pointers to distinguish unset from zero
 // Usage example:
 // opts, err := ConfigureOptions(flag.CommandLine, os.Args[1:], usage)
-// if err != nil {
-//     log.Fatal(err)
-// }
-// if opts == nil {
-//     return // help was requested
-// }
+//
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	if opts == nil {
+//	    return // help was requested
+//	}
 func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Options, error) {
 	opts := &Options{}
 	var (

@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
+	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
@@ -24,28 +25,10 @@ import (
 type Options struct {
 	PidFile string `json:"pid"`
 
-	// All QuasarDB-source flags
-	//
-	// Embeds:
-	//
-	// - Endpoint
-	// - Topic
+	// sourceOptions contains NATS connection settings including endpoint and topic.
 	sourceOptions source.Options
 
-	// All QuasarDB‐sink flags
-	//
-	// Embeds:
-	//
-	// - ClusterUri
-	// - ClusterPublicKeyFile
-	// - ClusterPublicKey
-	// - UserSecurityFile
-	// - UserName
-	// - UserSecret
-	// - Encryption
-	// - Compression
-	// - ClientMaxParallelism
-	// - ClientMaxInBufSize
+	// sinkOptions contains QuasarDB connection and performance settings.
 	sinkOptions sink.Options
 }
 
@@ -64,12 +47,11 @@ var (
 // - Custom flag.Value implementations for type-safe parsing
 // - Performance flags use pointers to distinguish unset from zero
 // Usage example:
-// opts, err := ConfigureOptions(flag.CommandLine, os.Args[1:], usage)
 //
+//	opts, err := ConfigureOptions(flag.CommandLine, os.Args[1:], usage)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//
 //	if opts == nil {
 //	    return // help was requested
 //	}
@@ -101,7 +83,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 	// Encryption (custom flag.Value)
 	fs.Var(&encryptionFlag{dst: &opts.sinkOptions.Encryption}, "qdb-encryption", "QuasarDB sink encryption (none|aes)")
 
-	// Performance‐tuning flags
+	// Performance-tuning flags
 	var pm uint
 	fs.UintVar(&pm, "qdb-client-max-parallelism", 0, "QuasarDB sink max parallelism")
 	opts.sinkOptions.ClientMaxParallelism = &pm
@@ -129,9 +111,9 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 // Decision rationale:
 // - Minimal validation here, components validate their own requirements
 // - Early failure on missing topic prevents cryptic downstream errors
-func ValidateOptions(opts *Options) *ConnectorError {
+func ValidateOptions(opts *Options) *errors.ConnectorError {
 	if opts.sourceOptions.Topic == "" {
-		return NewNoTopicProvidedError("options.go")
+		return errors.NewNoTopicProvidedError("connector")
 	}
 
 	return nil
@@ -170,7 +152,7 @@ func (f *compressionFlag) String() string {
 		return ""
 	}
 
-	b, _ := json.Marshal(*f.dst) // numeric JSON representation, identical to fmt behaviour
+	b, _ := json.Marshal(*f.dst) // numeric JSON representation
 	return string(b)
 }
 func (f *compressionFlag) Set(val string) error {
@@ -226,7 +208,7 @@ func parseCompression(val string) (qdb.Compression, error) {
 	case "best":
 		return qdb.CompBest, nil
 	default:
-		return qdb.CompNone, fmt.Errorf("invalid compression value: %s (valid values: none, fast, speed, best)", val)
+		return qdb.CompNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid compression value: %s (valid values: none, fast, speed, best)", val))
 	}
 }
 
@@ -244,6 +226,6 @@ func parseEncryption(val string) (qdb.Encryption, error) {
 	case "aes":
 		return qdb.EncryptAES, nil
 	default:
-		return qdb.EncryptNone, fmt.Errorf("invalid encryption value: %s (valid values: none, aes)", val)
+		return qdb.EncryptNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid encryption value: %s (valid values: none, aes)", val))
 	}
 }

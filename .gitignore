@@ -41,3 +41,15 @@ users.cfg
 # Datatbase log file
 *.out.txt
 *.err.txt
+
+
+# START Ruler Generated Files
+.aider.conf.yml
+AGENTS.md
+CLAUDE.md
+ruler_aider_instructions.md
+# END Ruler Generated Files
+.aider*
+
+# Ruler makes backups of files, ignore those
+*.bak

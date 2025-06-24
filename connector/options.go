@@ -152,7 +152,7 @@ func (f *compressionFlag) String() string {
 		return ""
 	}
 
-	b, _ := json.Marshal(*f.dst) // numeric JSON representation
+	b, _ := json.Marshal(*f.dst)
 	return string(b)
 }
 func (f *compressionFlag) Set(val string) error {

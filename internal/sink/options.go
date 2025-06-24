@@ -30,6 +30,11 @@ type Options struct {
 
 	ClientMaxParallelism *uint
 	ClientMaxInBufSize   *uint
+
+	// Worker pool configuration
+	NumWriters    int `json:"num_writers"`
+	QueueSize     int `json:"queue_size"`
+	RetryAttempts int `json:"retry_attempts"`
 }
 
 // NewOptions creates a new Options object and serves as the entrypoint for the
@@ -39,11 +44,15 @@ type Options struct {
 //
 //	opts := sink.NewOptions(
 //	           sink.WithClusterUri("qdb://127.0.0.1:2836"),
+//	           sink.WithNumWriters(4),
 //	         )
 func NewOptions(opts ...Option) Options {
-	defComp := qdb.CompBest // take address of a var, not a const
+	defComp := qdb.CompBest
 	options := Options{
-		Compression: &defComp,
+		Compression:   &defComp,
+		NumWriters:    4,
+		QueueSize:     100,
+		RetryAttempts: 3,
 	}
 	for _, opt := range opts {
 		options = opt(options)
@@ -52,6 +61,9 @@ func NewOptions(opts ...Option) Options {
 }
 
 // WithClusterUri configures the QuasarDB cluster uri for the sink.
+// Key assumptions:
+// - URI format follows qdb:// scheme (e.g., qdb://host:port)
+// - Connection validation happens during sink initialization
 func WithClusterUri(uri string) Option {
 	return func(o Options) Options {
 		o.ClusterUri = uri
@@ -60,6 +72,9 @@ func WithClusterUri(uri string) Option {
 }
 
 // WithClusterPublicKeyFile sets the cluster public key file path.
+// Key assumptions:
+// - File path is absolute or relative to working directory
+// - File contains valid QuasarDB cluster public key
 func WithClusterPublicKeyFile(file string) Option {
 	return func(o Options) Options {
 		o.ClusterPublicKeyFile = file
@@ -67,7 +82,10 @@ func WithClusterPublicKeyFile(file string) Option {
 	}
 }
 
-// WithClusterPublicKey sets the cluster public key content.
+// WithClusterPublicKey sets the cluster public key content directly.
+// Decision rationale:
+// - Alternative to WithClusterPublicKeyFile for embedded key content
+// - Useful for containerized deployments with secret injection
 func WithClusterPublicKey(key string) Option {
 	return func(o Options) Options {
 		o.ClusterPublicKey = key
@@ -131,6 +149,48 @@ func WithClientMaxInBufSize(size uint) Option {
 	}
 }
 
+// WithNumWriters sets the number of writer workers.
+// Decision rationale:
+// - Controls parallelism for QuasarDB write operations
+// - Each worker maintains dedicated connection handle
+// Performance trade-offs:
+// - More workers increase memory usage but improve throughput
+// - Optimal value depends on QuasarDB cluster capacity
+func WithNumWriters(num int) Option {
+	return func(o Options) Options {
+		o.NumWriters = num
+		return o
+	}
+}
+
+// WithQueueSize sets the queue size for buffering messages.
+// Decision rationale:
+// - Provides backpressure control for incoming NATS messages
+// - Larger queue handles traffic spikes but uses more memory
+// Performance trade-offs:
+// - Smaller queue fails fast on overload but may drop messages
+// - Larger queue smooths traffic but increases memory usage
+func WithQueueSize(size int) Option {
+	return func(o Options) Options {
+		o.QueueSize = size
+		return o
+	}
+}
+
+// WithRetryAttempts sets the maximum number of retry attempts.
+// Decision rationale:
+// - Handles transient QuasarDB errors (async pipeline full, network issues)
+// - Exponential backoff prevents overwhelming downstream systems
+// Performance trade-offs:
+// - More retries increase resilience but delay error reporting
+// - Fewer retries fail fast but may drop data on transient issues
+func WithRetryAttempts(attempts int) Option {
+	return func(o Options) Options {
+		o.RetryAttempts = attempts
+		return o
+	}
+}
+
 // OptionsProvider defines an interface for providing sink options.
 // This allows decoupling the connector's options from the sink's options,
 // making the configuration scalable.
@@ -150,6 +210,7 @@ type OptionsProvider interface {
 // - Uses the builder pattern to construct the Options object.
 // - Checks for nil pointers on optional values to avoid panics.
 func FromOptionsProvider(p OptionsProvider) Options {
+	// Build base options with required fields
 	opts := []Option{
 		WithClusterUri(p.ClusterUri()),
 		WithClusterPublicKeyFile(p.ClusterPublicKeyFile()),
@@ -157,6 +218,8 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithEncryption(p.Encryption()),
 		WithCompression(p.Compression()),
 	}
+
+	// Use Go 1.21+ slice operations for conditional appends
 	if p.ClientMaxParallelism() != nil {
 		opts = append(opts, WithClientMaxParallelism(*p.ClientMaxParallelism()))
 	}

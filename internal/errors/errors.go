@@ -45,6 +45,10 @@ const (
 	ErrCodeParsingFailed
 	// ErrCodeWriteFailed indicates QuasarDB write operation failure
 	ErrCodeWriteFailed
+	// ErrCodeQueueFull indicates sink queue is at capacity
+	ErrCodeQueueFull
+	// ErrCodeMaxRetriesExceeded indicates retry limit reached
+	ErrCodeMaxRetriesExceeded
 	// ErrCodeUnexpectedError indicates unhandled system-level errors
 	ErrCodeUnexpectedError
 )
@@ -72,7 +76,7 @@ func NewNoTopicProvidedError(component string) *ConnectorError {
 		Code:      ErrCodeNoTopicProvided,
 		Component: component,
 		Message:   "no topic provided",
-		Metadata:  map[string]interface{}{},
+		Metadata:  make(map[string]interface{}),
 	}
 }
 
@@ -87,7 +91,7 @@ func NewInvalidConfigError(component string, message string) *ConnectorError {
 		Code:      ErrCodeInvalidConfig,
 		Component: component,
 		Message:   fmt.Sprintf("invalid configuration: %s", message),
-		Metadata:  map[string]interface{}{},
+		Metadata:  make(map[string]interface{}),
 	}
 }
 
@@ -138,7 +142,7 @@ func NewParsingFailedError(component string, err error) *ConnectorError {
 		Component: component,
 		Message:   "failed to parse message",
 		Wrapped:   err,
-		Metadata:  map[string]interface{}{},
+		Metadata:  make(map[string]interface{}),
 	}
 }
 
@@ -155,7 +159,37 @@ func NewWriteFailedError(component string, err error) *ConnectorError {
 		Component: component,
 		Message:   "failed to write data",
 		Wrapped:   err,
-		Metadata:  map[string]interface{}{},
+		Metadata:  make(map[string]interface{}),
+	}
+}
+
+// NewQueueFullError creates an error for sink queue capacity reached.
+// Decision rationale:
+// - Queue full indicates backpressure from downstream systems
+// - Queue depth metadata helps with capacity planning
+// Key assumptions:
+// - Queue depth represents current number of pending messages
+func NewQueueFullError(component string, queueDepth int) *ConnectorError {
+	return &ConnectorError{
+		Code:      ErrCodeQueueFull,
+		Component: component,
+		Message:   "sink queue is full",
+		Metadata:  map[string]interface{}{"queue_depth": queueDepth},
+	}
+}
+
+// NewMaxRetriesExceededError creates an error for retry limit reached.
+// Decision rationale:
+// - Retry exhaustion indicates persistent downstream issues
+// - Attempt count metadata helps tune retry configuration
+// Key assumptions:
+// - Max attempts represents the configured retry limit
+func NewMaxRetriesExceededError(component string, maxAttempts int) *ConnectorError {
+	return &ConnectorError{
+		Code:      ErrCodeMaxRetriesExceeded,
+		Component: component,
+		Message:   fmt.Sprintf("maximum retry attempts exceeded (%d)", maxAttempts),
+		Metadata:  map[string]interface{}{"max_attempts": maxAttempts},
 	}
 }
 
@@ -172,6 +206,6 @@ func NewUnexpectedError(component string, message string, err error) *ConnectorE
 		Component: component,
 		Message:   fmt.Sprintf("unexpected error: %s", message),
 		Wrapped:   err,
-		Metadata:  map[string]interface{}{},
+		Metadata:  make(map[string]interface{}),
 	}
 }

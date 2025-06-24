@@ -1,14 +1,31 @@
+// Package connector orchestrates the NATS-to-QuasarDB data pipeline.
+// This package bridges NATS messaging with QuasarDB time series storage through
+// a pluggable parser architecture that enables flexible message transformation.
+// Decision rationale:
+// - Public API package allows external usage and testing
+// - Component orchestration centralizes lifecycle management
+// - Signal handling enables graceful shutdown in production deployments
 package connector
 
 import (
+	"context"
 	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
+	"github.com/nats-io/nats.go"
 )
 
-// Connector orchestrates the source, parser, and sink.
+// Connector orchestrates the NATS source, message parser, and QuasarDB sink.
+// Key assumptions:
+// - Components are initialized in dependency order during NewConnector
+// - Each component manages its own connection lifecycle
+// - Connector handles graceful shutdown coordination between components
 type Connector struct {
 	Source *source.Source
 	Parser *parser.Parser
@@ -78,6 +95,72 @@ func NewConnector(opts *Options) (*Connector, error) {
 		Parser: par,
 		Sink:   snk,
 	}, nil
+}
+
+// Run starts the connector and blocks until an error occurs or shutdown.
+// Decision rationale:
+// - Single method to start all connector operations
+// - Integrates NATS subscription with parsing and sink pipeline
+// - Handles message processing errors gracefully without stopping
+// Performance trade-offs:
+// - Each NATS message handled in separate goroutine (via NATS async)
+// - Non-blocking sink writes prevent message handler stalls
+func (c *Connector) Run() error {
+	return c.RunWithContext(context.Background())
+}
+
+// RunWithContext starts the connector with context support for cancellation.
+// Decision rationale:
+// - Context enables graceful shutdown and cancellation
+// - Signal handling for production deployments
+// - Maintains backward compatibility through Run() method
+func (c *Connector) RunWithContext(ctx context.Context) error {
+	slog.Info("Starting connector")
+
+	// Define message handler that processes NATS messages
+	handler := func(msg *nats.Msg) {
+		// Parse the message
+		tables, err := c.Parser.Parse(msg.Data)
+		if err != nil {
+			slog.Error("Failed to parse message", "subject", msg.Subject, "error", err)
+			return
+		}
+
+		// Skip empty results
+		if len(tables) == 0 {
+			slog.Debug("Parser returned no tables", "subject", msg.Subject)
+			return
+		}
+
+		// Write to sink
+		if err := c.Sink.Write(tables); err != nil {
+			slog.Error("Failed to write to sink", "subject", msg.Subject, "num_tables", len(tables), "error", err)
+			return
+		}
+
+		slog.Debug("Message processed successfully", "subject", msg.Subject, "num_tables", len(tables))
+	}
+
+	// Subscribe to NATS with our handler
+	if err := c.Source.Subscribe(handler); err != nil {
+		return errors.NewSubscriptionFailedError("connector", "unknown", err)
+	}
+
+	slog.Info("Connector running, processing messages...")
+
+	// Set up signal handling for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Wait for context cancellation or interrupt signal
+	select {
+	case <-ctx.Done():
+		slog.Info("Context cancelled, shutting down")
+		return ctx.Err()
+	case sig := <-sigCh:
+		slog.Info("Received signal, shutting down", "signal", sig)
+		return nil
+	}
 }
 
 // Close gracefully shuts down the connector's components.

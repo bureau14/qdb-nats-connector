@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -41,7 +42,7 @@ General Options:
 // - Exit code 0 indicates help was requested, not an error
 // - Direct printf to stdout for standard help display convention
 func usage() {
-	fmt.Printf("%s\n", usageStr)
+	fmt.Println(usageStr)
 	os.Exit(0)
 }
 
@@ -82,18 +83,14 @@ func main() {
 	}
 	defer c.Close()
 
-	slog.Debug("Connected to NATS, invoking nc.Subscribe()")
+	slog.Info("Starting connector")
 
-	// Simple Async Subscriber
-	// nc.Subscribe("foo", func(m *nats.Msg) {
-	// 	fmt.Printf("Received a message: %s\n", string(m.Data))
-	// })
+	// Create root context for the application
+	ctx := context.Background()
 
-	// slog.Debug("Invoked subscribe")
-
-	// slog.Debug("Draining")
-	// nc.Drain()
-
-	// slog.Debug("Closing")
-	// nc.Close()
+	// Run the connector with context - this blocks until error or shutdown
+	if err := c.RunWithContext(ctx); err != nil && err != context.Canceled {
+		slog.Error("Connector failed", "error", err)
+		os.Exit(1)
+	}
 }

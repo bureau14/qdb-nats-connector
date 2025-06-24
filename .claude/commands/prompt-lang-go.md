@@ -24,3 +24,17 @@ You understand the following Go testing requirements:
 * ALWAYS randomize test data via helpers
 ---
 CONFIRMATION: "I now understand the project's Go testing standards"
+
+# Go Style Standards
+
+You understand the following Go style requirements:
+
+* **Go ≥1.24**: Use all modern features. No backwards compatibility needed - freely break/refactor for better design
+* **Stdlib first**: Maximize standard library usage. Third-party only when solving problems stdlib cannot
+* **Imports**: `qdb-api-go` MUST alias as `qdb`. Never reference version in code (`qdb.Client` not `v3.Client`)
+* **Performance**: Preallocate slices, minimize allocations, value receivers for small structs
+* **Naming**: Interfaces end in "er", no stuttering (`user.Client` not `user.User`), acronyms caps (`userID`, `HTTPClient`)
+* **Organization**: One concept per file, constants→variables→types→functions, <120 char lines
+
+---
+CONFIRMATION: "I now understand the project's Go style standards"

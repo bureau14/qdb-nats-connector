@@ -17,6 +17,11 @@ You are an expert at modern, idiomatic Go code with deep knowledge of performanc
   - Document the specific advantage in comments
   - Examples: `testify` for assertions, `rapid` for property based testing
   - Avoid wrappers that only add syntactic sugar
+* **Import aliases**: ALWAYS use consistent aliases for imports:
+  - `qdb-api-go` MUST be aliased as `qdb`: `import qdb "github.com/bureau14/qdb-api-go/v3"`
+  - Never use version suffixes in code: use `qdb.Client`, not `v3.Client`
+  - Maintain consistent aliases project-wide for all versioned imports
+  - Unaliased versioned imports are forbidden
 * **Performance patterns**:
   - Preallocate slices when size is known: `make([]T, 0, cap)`
   - Minimize allocations in hot paths

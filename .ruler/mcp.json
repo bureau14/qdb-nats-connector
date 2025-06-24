@@ -10,6 +10,9 @@
         "git": {
             "command": "python3",
             "args": ["-m", "mcp_server_git"]
+        },
+        "gopls": {
+            "command": "mcp-gopls"
         }
     }
 }

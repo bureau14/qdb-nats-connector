@@ -58,7 +58,7 @@ func main() {
 	exe := "qdb-nats-connector"
 
 	// Setup structured logging
-	logging.SetupDefault("dev", getInstanceID())
+	logging.SetupDefault("exe", exe)
 
 	// Create a FlagSet and sets the usage
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
@@ -96,14 +96,4 @@ func main() {
 
 	// slog.Debug("Closing")
 	// nc.Close()
-}
-
-// getInstanceID returns a unique identifier for this instance.
-// In production, this could be pulled from EC2 metadata or environment.
-func getInstanceID() string {
-	if id := os.Getenv("INSTANCE_ID"); id != "" {
-		return id
-	}
-	hostname, _ := os.Hostname()
-	return hostname
 }

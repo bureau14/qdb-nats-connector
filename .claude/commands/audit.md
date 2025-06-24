@@ -62,7 +62,7 @@ Focus: Modernize code structure and naming for clarity.
   - Constants → variables → types → functions
   - Line length < 120 chars
 * Naming:
-  - Interfaces: verb + "er" (Reader, Closer)
+  - Interfaces: verb + "er" (Reader, Subscriber)
   - No stuttering: user.User → user.Client
   - Acronyms: userID, HTTPClient
 

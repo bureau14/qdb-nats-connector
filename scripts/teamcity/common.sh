@@ -110,6 +110,22 @@ echo "GO: ${GO}"
 
 ${GO} version
 
+##
+# Initialize Go workspace if needed for local development
+if [[ ! -f "${BASE_DIR}/go.work" ]]; then
+    echo "No go.work found, checking for local qdb-api-go..."
+    if [[ -d "${BASE_DIR}/../qdb-api-go" ]]; then
+        echo "Found ../qdb-api-go, initializing Go workspace..."
+        cd "${BASE_DIR}" && ${GO} work init . ../qdb-api-go
+        echo "Go workspace initialized successfully"
+    else
+        echo "Error: ../qdb-api-go directory not found. Expected qdb-api-go to be checked out alongside qdb-nats-connector."
+        exit 1
+    fi
+else
+    echo "Go workspace already exists: ${BASE_DIR}/go.work"
+fi
+
 export BASE_DIR="${BASE_DIR}"
 export GOROOT="${GOROOT}"
 export GOPATH="${GOPATH}"

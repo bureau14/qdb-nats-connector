@@ -9,9 +9,6 @@ require (
 	github.com/nats-io/nats.go v1.41.0
 )
 
-// For development purposes only
-replace github.com/bureau14/qdb-api-go/v3 => ../qdb-api-go
-
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect

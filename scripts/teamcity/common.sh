@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+
+set -eu
+
+##
+# Define default commands/variables
+REALPATH=$(command -v realpath)
+SCRIPT_DIR="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+BASE_DIR=$(${REALPATH} "${SCRIPT_DIR}/../../")
+QDB_API_DIR=$(${REALPATH} "${BASE_DIR}/qdb/")
+QDB_LIB_DIR=$(${REALPATH} "${QDB_API_DIR}/lib/")
+
+echo "SCRIPT_DIR: ${SCRIPT_DIR}"
+echo "BASE_DIR: ${BASE_DIR}"
+echo "QDB_API_DIR: ${QDB_API_DIR}"
+echo "QDB_LIB_DIR: ${QDB_LIB_DIR}"
+
+##
+# Utility functions for teamcity
+tc_build_problem() {
+    echo -n '##'
+    echo "teamcity[buildProblem description='$1']"
+}
+
+tc_open_block() {
+    echo -n '##'
+    echo "teamcity[blockOpened name='$1']"
+}
+
+tc_close_block() {
+    echo -n '##'
+    echo "teamcity[blockClosed name='$1']"
+}
+
+
+##
+# Validation of the GOROOT and GOPATH env vars
+
+GOROOT=${GOROOT:-}
+GOPATH=${GOPATH:-}
+
+if [[ -z "${GOROOT}" ]]
+then
+    echo "GOROOT environment variable is expected to be set"
+fi
+
+if [[ -z "${GOPATH}" ]]
+then
+    echo "GOPATH environment variable is expected to be set"
+fi
+
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
+DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH:-}
+CGO_CFLAGS=${CGO_CFLAGS:-}
+CGO_LDFLAGS=${CGO_LDFLAGS:-}
+
+##
+# Add QuasarDB's library path to LD_LIBRARY_PATH since we dynamically
+# link libqdb_api.so/dylib
+
+case $(uname) in
+    Linux | FreeBSD )
+        export LD_LIBRARY_PATH="${QDB_LIB_DIR}:${LD_LIBRARY_PATH}"
+        echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+        ;;
+
+    Darwin )
+        export DYLD_LIBRARY_PATH="${QDB_LIB_DIR}:${DYLD_LIBRARY_PATH}"
+        export CGO_CFLAGS="$CGO_CFLAGS -I${QDB_API_DIR}/include"
+        export CGO_LDFLAGS="$CGO_LDFLAGS -L${QDB_LIB_DIR} -Wl,-rpath -Wl,${QDB_LIB_DIR}"
+        echo "DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}"
+        echo "CGO_CFLAGS=${CGO_CFLAGS}"
+        echo "CGO_LDFLAGS=${CGO_LDFLAGS}"
+       ;;
+
+    MINGW* )
+
+        echo "Adding GCC to path"
+        export PATH="/c/mingw64/bin:${PATH}"
+        export PATH="${QDB_LIB_DIR}:${PATH}"
+        export PATH="${QDB_API_DIR}/bin:${PATH}"
+        echo "PATH: ${PATH}"
+        ;;
+
+    * )
+        echo "Unable to probe environment"
+        exit -1
+        ;;
+esac
+
+##
+# Validate installation of qdb/ base directory
+GO=""
+if [[ -z "${GOROOT}" ]]
+then
+    GO=$(command -v go)
+else
+    GO=$(${REALPATH} "${GOROOT}/bin/go")
+fi
+
+if [[ ! -x "${GO}" ]]
+then
+    echo "Executable not found: ${GO}"
+    exit 1
+fi
+
+echo "GOROOT: ${GOROOT}"
+echo "GOPATH: ${GOPATH}"
+echo "GO: ${GO}"
+
+${GO} version
+
+##
+# Initialize Go workspace if needed for local development
+if [[ ! -f "${BASE_DIR}/go.work" ]]; then
+    echo "No go.work found, checking for local qdb-api-go..."
+    if [[ -d "${BASE_DIR}/../qdb-api-go" ]]; then
+        echo "Found ../qdb-api-go, initializing Go workspace..."
+        cd "${BASE_DIR}" && ${GO} work init . ../qdb-api-go
+        echo "Go workspace initialized successfully"
+    else
+        echo "Error: ../qdb-api-go directory not found. Expected qdb-api-go to be checked out alongside qdb-nats-connector."
+        exit 1
+    fi
+else
+    echo "Go workspace already exists: ${BASE_DIR}/go.work"
+fi
+
+export BASE_DIR="${BASE_DIR}"
+export GOROOT="${GOROOT}"
+export GOPATH="${GOPATH}"
+export GO="${GO}"
+
+export -f tc_build_problem
+export -f tc_open_block
+export -f tc_close_block

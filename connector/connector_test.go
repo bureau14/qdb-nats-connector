@@ -6,6 +6,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/require"
 )
 
 // DefaultOptions creates Options suitable for testing.
@@ -34,9 +35,7 @@ func TestNewConnector(t *testing.T) {
 
 	c, err := NewConnector(DefaultOptions())
 
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	defer c.Close()
 }

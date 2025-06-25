@@ -4,14 +4,15 @@ import (
 	"log/slog"
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSetup(t *testing.T) {
 	// Test default setup
 	logger := Setup()
-	if logger == nil {
-		t.Error("Setup should return a non-nil logger")
-	}
+	require.NotNil(t, logger, "Setup should return a non-nil logger")
 }
 
 func TestSetupDefault(t *testing.T) {
@@ -43,9 +44,7 @@ func TestLogLevelFromEnv(t *testing.T) {
 
 			os.Setenv("LOG_LEVEL", tt.envValue)
 			level := getLogLevel()
-			if level != tt.expected {
-				t.Errorf("Expected log level %v, got %v", tt.expected, level)
-			}
+			assert.Equal(t, tt.expected, level)
 		})
 	}
 }
@@ -70,9 +69,7 @@ func TestLogFormatFromEnv(t *testing.T) {
 
 			os.Setenv("LOG_FORMAT", tt.envValue)
 			format := getLogFormat()
-			if format != tt.expected {
-				t.Errorf("Expected log format %v, got %v", tt.expected, format)
-			}
+			assert.Equal(t, tt.expected, format)
 		})
 	}
 }

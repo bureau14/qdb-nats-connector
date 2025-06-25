@@ -3,6 +3,8 @@ package errors
 import (
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestConnectorError_Error verifies the structured error message formatting.
@@ -11,9 +13,7 @@ func TestConnectorError_Error(t *testing.T) {
 	err := NewConnectionFailedError("test-component", "localhost:4222", errors.New("connection refused"))
 
 	expected := "[test-component] failed to connect to localhost:4222 (code: 1002)"
-	if err.Error() != expected {
-		t.Errorf("Expected error message %q, got %q", expected, err.Error())
-	}
+	assert.Equal(t, expected, err.Error())
 }
 
 // TestConnectorError_Unwrap verifies error chain traversal functionality.
@@ -22,9 +22,7 @@ func TestConnectorError_Unwrap(t *testing.T) {
 	originalErr := errors.New("original error")
 	connErr := NewConnectionFailedError("test", "localhost", originalErr)
 
-	if connErr.Unwrap() != originalErr {
-		t.Error("Unwrap() should return the original wrapped error")
-	}
+	assert.Equal(t, originalErr, connErr.Unwrap())
 }
 
 // TestErrorConstructors validates that all error constructor functions
@@ -56,12 +54,8 @@ func TestErrorConstructors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.constructor()
-			if err.Code != tt.expectedCode {
-				t.Errorf("Expected error code %d, got %d", tt.expectedCode, err.Code)
-			}
-			if err.Component != "test" {
-				t.Errorf("Expected component 'test', got '%s'", err.Component)
-			}
+			assert.Equal(t, tt.expectedCode, err.Code)
+			assert.Equal(t, "test", err.Component)
 		})
 	}
 }

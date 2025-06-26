@@ -13,10 +13,10 @@ import (
 // can be used interchangeably through the Parser interface.
 func TestParserInterface(t *testing.T) {
 	tests := []struct {
-		name      string
-		parser    Parser
-		msg       *nats.Msg
-		wantErr   bool
+		name        string
+		parser      Parser
+		msg         *nats.Msg
+		wantErr     bool
 		errContains string
 	}{
 		{
@@ -29,10 +29,10 @@ func TestParserInterface(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:   "NoopParser with nil message",
-			parser: &NoopParser{},
-			msg:    nil,
-			wantErr: true,
+			name:        "NoopParser with nil message",
+			parser:      &NoopParser{},
+			msg:         nil,
+			wantErr:     true,
 			errContains: "failed to parse message",
 		},
 		{
@@ -42,7 +42,7 @@ func TestParserInterface(t *testing.T) {
 				Subject: "test.topic",
 				Data:    []byte{},
 			},
-			wantErr: true,
+			wantErr:     true,
 			errContains: "failed to parse message",
 		},
 		{
@@ -132,7 +132,7 @@ func TestCustomParserImplementation(t *testing.T) {
 	}
 	table, err := qdb.NewWriterTable("test_table", columns)
 	require.NoError(t, err)
-	
+
 	mock := &mockParser{
 		returnTables: []qdb.WriterTable{table},
 		returnError:  nil,
@@ -144,7 +144,7 @@ func TestCustomParserImplementation(t *testing.T) {
 	// Use it through the interface
 	var p Parser = mock
 	tables, err := p.Parse(&nats.Msg{Data: []byte("test")})
-	
+
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
 	// WriterTable fields are mostly unexported, so we just verify we got a table back

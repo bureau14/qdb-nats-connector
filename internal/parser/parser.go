@@ -32,11 +32,7 @@
 package parser
 
 import (
-	"fmt"
-	"log/slog"
-
 	qdb "github.com/bureau14/qdb-api-go/v3"
-	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/nats-io/nats.go"
 )
 
@@ -77,4 +73,3 @@ type Parser interface {
 	// - Parse errors should not cause connector shutdown
 	Parse(msg *nats.Msg) ([]qdb.WriterTable, error)
 }
-

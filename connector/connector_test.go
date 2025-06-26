@@ -42,7 +42,7 @@ func DefaultOptions() *Options {
 // Decision rationale:
 // - Tests the happy path of connector creation when all services are available
 // - Gracefully handles service unavailability for testing in environments without QuasarDB
-func TestNewConnector(t *testing.T) {
+func TestConnectorNewConnectorWhenValidOptionsShoulCreateConnector(t *testing.T) {
 	// Create JsonParser
 	jsonParser, err := parser.NewJsonParser()
 	require.NoError(t, err)
@@ -66,7 +66,7 @@ func TestNewConnector(t *testing.T) {
 // Decision rationale:
 // - Tests parameter validation for required parser interface
 // - Ensures proper error handling for nil parser
-func TestNewConnector_NilParser(t *testing.T) {
+func TestConnectorNewConnectorWhenNilParserShouldReturnError(t *testing.T) {
 	c, err := NewConnector(DefaultOptions(), nil)
 
 	require.Error(t, err)
@@ -78,7 +78,7 @@ func TestNewConnector_NilParser(t *testing.T) {
 // Decision rationale:
 // - Tests that options validation still works with valid parser
 // - Ensures proper error precedence
-func TestNewConnector_ValidParserInvalidOptions(t *testing.T) {
+func TestConnectorNewConnectorWhenInvalidOptionsShouldReturnError(t *testing.T) {
 	// Create JsonParser
 	jsonParser, err := parser.NewJsonParser()
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestNewConnector_ValidParserInvalidOptions(t *testing.T) {
 // Decision rationale:
 // - Tests defensive programming against nil pointer dereference
 // - Ensures proper error handling for invalid parameters
-func TestNewConnector_NilOptions(t *testing.T) {
+func TestConnectorNewConnectorWhenNilOptionsShouldPanic(t *testing.T) {
 	// Create JsonParser
 	jsonParser, err := parser.NewJsonParser()
 	require.NoError(t, err)

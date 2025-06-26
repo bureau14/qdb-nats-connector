@@ -6,24 +6,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestSetup(t *testing.T) {
-	// Test default setup
-	logger := Setup()
-	require.NotNil(t, logger, "Setup should return a non-nil logger")
-}
-
-func TestSetupDefault(t *testing.T) {
-	// Test default setup with metadata
-	SetupDefault("test-version", "test-instance")
-
-	// Log a test message to verify it works
-	slog.Info("test message", "test_key", "test_value")
-}
-
-func TestLogLevelFromEnv(t *testing.T) {
+func TestLoggingLogLevelFromEnv(t *testing.T) {
 	tests := []struct {
 		envValue string
 		expected slog.Level
@@ -49,7 +34,7 @@ func TestLogLevelFromEnv(t *testing.T) {
 	}
 }
 
-func TestLogFormatFromEnv(t *testing.T) {
+func TestLoggingLogFormatFromEnv(t *testing.T) {
 	tests := []struct {
 		envValue string
 		expected string

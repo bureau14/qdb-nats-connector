@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
@@ -17,12 +19,17 @@ import (
 
 // JsonParser: flat JSON→QDB timeseries, rejects nested objects
 type JsonParser struct {
+	// DefaultTable: fallback table name when no mapping matches
+	DefaultTable string
+	// SubjectToTable: maps NATS subjects to QDB table names
+	// Example: {"sensors.*": "sensor_data", "logs.*": "application_logs"}
+	SubjectToTable map[string]string
 }
 
 // Compile-time check that JsonParser implements the Parser interface
 var _ Parser = (*JsonParser)(nil)
 
-// NewJsonParser creates JSON→QDB parser.
+// NewJsonParser creates JSON→QDB parser with default table mapping.
 // Returns:
 //
 //	*JsonParser: flat JSON transformer
@@ -32,8 +39,29 @@ var _ Parser = (*JsonParser)(nil)
 //
 //	NewJsonParser() // → parser, nil
 func NewJsonParser() (*JsonParser, error) {
-	slog.Info("Initializing JSON parser")
-	return &JsonParser{}, nil
+	return NewJsonParserWithConfig("foobar", nil)
+}
+
+// NewJsonParserWithConfig creates JSON→QDB parser with custom table mapping.
+// Args:
+//
+//	defaultTable: string - fallback table name
+//	subjectMapping: map[string]string - subject pattern → table name
+//
+// Returns:
+//
+//	*JsonParser: configured parser
+//	error: never fails (interface consistency)
+//
+// Example:
+//
+//	NewJsonParserWithConfig("data", map[string]string{"sensors.*": "sensor_data"})
+func NewJsonParserWithConfig(defaultTable string, subjectMapping map[string]string) (*JsonParser, error) {
+	slog.Info("Initializing JSON parser", "default_table", defaultTable, "subject_mappings", len(subjectMapping))
+	return &JsonParser{
+		DefaultTable:   defaultTable,
+		SubjectToTable: subjectMapping,
+	}, nil
 }
 
 // Parse converts JSON msg→QDB tables.
@@ -67,18 +95,13 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("empty JSON object"))
 	}
 
-	// TODO: CRITICAL - Table name is hardcoded to "foobar" for initial implementation.
-	// This MUST be made configurable before production use.
-	// Proposed implementation:
-	// 1. Add tableMapping configuration to JsonParser struct
-	// 2. Match msg.Subject against configured patterns (e.g., "sensors.*" -> "sensor_data")
-	// 3. Fall back to defaultTable if no pattern matches
-	// 4. Consider allowing table name from message headers for dynamic routing
-	tableName := "foobar" // HARDCODED - See TODO above
+	// Determine table name: check subject mapping, then headers, then default
+	tableName := jp.getTableName(msg)
 
 	// 2. Check structure & 3. Map types: validate flat, convert types
-	var columns []qdb.WriterColumn
-	var values []interface{}
+	// Preallocate slices with known capacity for better performance
+	columns := make([]qdb.WriterColumn, 0, len(jsonData))
+	values := make([]interface{}, 0, len(jsonData))
 
 	for key, value := range jsonData {
 		// Skip null values
@@ -153,16 +176,15 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	// Set timestamp for single row
 	table.SetIndex([]time.Time{time.Now()})
 
-	// TODO: Implement column data population once QuasarDB API usage is clarified.
-	// Current implementation:
-	// - Correctly parses JSON and creates table structure
-	// - Validates data types and creates appropriate columns
-	// - Sets timestamps for rows
-	// Missing:
-	// - Actual data population into ColumnData fields
-	// - This requires understanding the complex QuasarDB Writer API
-	// Note: values slice contains the parsed data ready for insertion
-	_ = values // Suppress unused variable warning - will be used for data population
+	// 5. Column data population: QuasarDB API investigation needed
+	// TODO: Implement actual column data population once QuasarDB Writer API is clarified.
+	// The WriterTable creation and column definition is complete, but the actual data
+	// population requires understanding the correct API methods (SetData, direct field access, etc.)
+	// Current candidates for implementation:
+	// - table.SetData(columnIndex, values[columnIndex]) for each column
+	// - Direct field access if fields are exported (table.Blobs[i], table.Doubles[i])
+	// - Batch data setting with table.SetDatas(allColumnData)
+	_ = values // Suppress unused variable warning - contains parsed data ready for insertion
 
 	slog.Debug("Successfully parsed JSON message",
 		"table", tableName,
@@ -170,4 +192,48 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		"subject", msg.Subject)
 
 	return []qdb.WriterTable{table}, nil
+}
+
+// getTableName determines table name using subject mapping, headers, or default.
+// Args:
+//
+//	msg: *nats.Msg - NATS message with subject and headers
+//
+// Returns:
+//
+//	string: table name to use
+//
+// Example:
+//
+//	getTableName(msg) // → "sensor_data"
+func (jp *JsonParser) getTableName(msg *nats.Msg) string {
+	// 1. Check explicit table name in message headers
+	if tableName := msg.Header.Get("qdb-table"); tableName != "" {
+		return tableName
+	}
+
+	// 2. Match subject against configured patterns
+	if jp.SubjectToTable != nil {
+		for pattern, tableName := range jp.SubjectToTable {
+			if matched, _ := filepath.Match(pattern, msg.Subject); matched {
+				return tableName
+			}
+		}
+	}
+
+	// 3. Try simple prefix matching as fallback
+	if jp.SubjectToTable != nil {
+		for pattern, tableName := range jp.SubjectToTable {
+			// Remove wildcard and check prefix
+			if strings.HasSuffix(pattern, ".*") {
+				prefix := strings.TrimSuffix(pattern, ".*")
+				if strings.HasPrefix(msg.Subject, prefix) {
+					return tableName
+				}
+			}
+		}
+	}
+
+	// 4. Fall back to default table name
+	return jp.DefaultTable
 }

@@ -7,6 +7,7 @@ package sink
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -260,7 +261,56 @@ func (w *worker) pushTables(tables []*qdb.WriterTable) error {
 // Out: bool - true for retry
 // Ex: isRetryable(pipelineFull) → true
 func (w *worker) isRetryable(err error) bool {
-	// TODO: Implement proper error classification based on qdb-api-go error types
+	if err == nil {
+		return false
+	}
+
+	errStr := strings.ToLower(err.Error())
+
+	// Non-retryable errors (permanent failures)
+	nonRetryablePatterns := []string{
+		"authentication",
+		"authorization",
+		"permission denied",
+		"invalid credentials",
+		"invalid table",
+		"invalid column",
+		"schema mismatch",
+		"invalid data type",
+		"malformed",
+		"invalid handle",
+		"quota exceeded",
+		"storage full",
+	}
+
+	for _, pattern := range nonRetryablePatterns {
+		if strings.Contains(errStr, pattern) {
+			return false
+		}
+	}
+
+	// Retryable errors (transient failures)
+	retryablePatterns := []string{
+		"timeout",
+		"connection",
+		"network",
+		"pipeline full",
+		"busy",
+		"overloaded",
+		"throttled",
+		"unavailable",
+		"temporary",
+		"retry",
+	}
+
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
+		}
+	}
+
+	// Default to retryable for unknown errors to be conservative
+	// This prevents permanent failures from unknown error types
 	return true
 }
 

@@ -7,28 +7,28 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestConnectorError_Error verifies the structured error message formatting.
+// TestErrorsConnectorErrorWhenFormattingShouldReturnStructuredMessage verifies the structured error message formatting.
 // Ensures consistent format for log parsing and monitoring systems.
-func TestConnectorError_Error(t *testing.T) {
+func TestErrorsConnectorErrorWhenFormattingShouldReturnStructuredMessage(t *testing.T) {
 	err := NewConnectionFailedError("test-component", "localhost:4222", errors.New("connection refused"))
 
 	expected := "[test-component] failed to connect to localhost:4222 (code: 1002)"
 	assert.Equal(t, expected, err.Error())
 }
 
-// TestConnectorError_Unwrap verifies error chain traversal functionality.
+// TestErrorsConnectorErrorWhenUnwrappingShouldReturnOriginalError verifies error chain traversal functionality.
 // Critical for errors.Is() and errors.As() standard library compatibility.
-func TestConnectorError_Unwrap(t *testing.T) {
+func TestErrorsConnectorErrorWhenUnwrappingShouldReturnOriginalError(t *testing.T) {
 	originalErr := errors.New("original error")
 	connErr := NewConnectionFailedError("test", "localhost", originalErr)
 
 	assert.Equal(t, originalErr, connErr.Unwrap())
 }
 
-// TestErrorConstructors validates that all error constructor functions
+// TestErrorsConstructorsWhenCreatingErrorsShouldHaveCorrectCodes validates that all error constructor functions
 // create properly formatted ConnectorError instances with correct codes.
 // This ensures error codes remain stable for programmatic error handling.
-func TestErrorConstructors(t *testing.T) {
+func TestErrorsConstructorsWhenCreatingErrorsShouldHaveCorrectCodes(t *testing.T) {
 	tests := []struct {
 		name         string
 		constructor  func() *ConnectorError

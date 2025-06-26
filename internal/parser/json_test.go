@@ -16,13 +16,13 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 )
 
-func TestNewJsonParser(t *testing.T) {
+func TestParserJsonNewParserShouldReturnValidParser(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 	require.NotNil(t, parser)
 }
 
-func TestJsonParser_Parse_NilMessage(t *testing.T) {
+func TestParserJsonParseWhenNilMessageShouldReturnError(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -38,7 +38,7 @@ func TestJsonParser_Parse_NilMessage(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse message")
 }
 
-func TestJsonParser_Parse_EmptyMessage(t *testing.T) {
+func TestParserJsonParseWhenEmptyMessageShouldReturnError(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -58,7 +58,7 @@ func TestJsonParser_Parse_EmptyMessage(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse message")
 }
 
-func TestJsonParser_Parse_InvalidJSON(t *testing.T) {
+func TestParserJsonParseWhenInvalidJsonShouldReturnError(t *testing.T) {
 	tests := []struct {
 		name string
 		data string
@@ -95,7 +95,7 @@ func TestJsonParser_Parse_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestJsonParser_Parse_EmptyJSON(t *testing.T) {
+func TestParserJsonParseWhenEmptyJsonShouldReturnError(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -115,7 +115,7 @@ func TestJsonParser_Parse_EmptyJSON(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse message")
 }
 
-func TestJsonParser_Parse_NestedObjectsAndArrays(t *testing.T) {
+func TestParserJsonParseWhenNestedDataShouldReturnError(t *testing.T) {
 	tests := []struct {
 		name string
 		data string
@@ -150,7 +150,7 @@ func TestJsonParser_Parse_NestedObjectsAndArrays(t *testing.T) {
 	}
 }
 
-func TestJsonParser_Parse_ValidTypes(t *testing.T) {
+func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 	tests := []struct {
 		name         string
 		jsonData     map[string]interface{}
@@ -232,7 +232,7 @@ func TestJsonParser_Parse_ValidTypes(t *testing.T) {
 	}
 }
 
-func TestJsonParser_Parse_NullValues(t *testing.T) {
+func TestParserJsonParseWhenNullValuesShouldSkipOrError(t *testing.T) {
 	tests := []struct {
 		name            string
 		jsonData        map[string]interface{}
@@ -299,7 +299,7 @@ func TestJsonParser_Parse_NullValues(t *testing.T) {
 	}
 }
 
-func TestJsonParser_Parse_SpecialNumbers(t *testing.T) {
+func TestParserJsonParseWhenSpecialNumbersShouldSucceed(t *testing.T) {
 	tests := []struct {
 		name    string
 		value   interface{}
@@ -350,7 +350,7 @@ func TestJsonParser_Parse_SpecialNumbers(t *testing.T) {
 }
 
 // Property-based testing with rapid
-func TestJsonParser_Parse_PropertyBased_StringValues(t *testing.T) {
+func TestParserJsonParsePropertyBasedStringValues(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -382,7 +382,7 @@ func TestJsonParser_Parse_PropertyBased_StringValues(t *testing.T) {
 	})
 }
 
-func TestJsonParser_Parse_PropertyBased_NumericValues(t *testing.T) {
+func TestParserJsonParsePropertyBasedNumericValues(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -419,7 +419,7 @@ func TestJsonParser_Parse_PropertyBased_NumericValues(t *testing.T) {
 	})
 }
 
-func TestJsonParser_Parse_PropertyBased_BooleanValues(t *testing.T) {
+func TestParserJsonParsePropertyBasedBooleanValues(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -451,7 +451,7 @@ func TestJsonParser_Parse_PropertyBased_BooleanValues(t *testing.T) {
 	})
 }
 
-func TestJsonParser_Parse_PropertyBased_MixedValidTypes(t *testing.T) {
+func TestParserJsonParsePropertyBasedMixedValidTypes(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -499,7 +499,7 @@ func TestJsonParser_Parse_PropertyBased_MixedValidTypes(t *testing.T) {
 	})
 }
 
-func TestJsonParser_Parse_PropertyBased_InvalidJSONFuzz(t *testing.T) {
+func TestParserJsonParsePropertyBasedInvalidJsonFuzz(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -539,7 +539,7 @@ func TestJsonParser_Parse_PropertyBased_InvalidJSONFuzz(t *testing.T) {
 	})
 }
 
-func TestJsonParser_Parse_TableNameConsistency(t *testing.T) {
+func TestParserJsonParseWhenValidJsonShouldHaveConsistentTableName(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -570,7 +570,7 @@ func TestJsonParser_Parse_TableNameConsistency(t *testing.T) {
 	}
 }
 
-func TestJsonParser_Parse_LargeValidJSON(t *testing.T) {
+func TestParserJsonParseWhenLargeValidJsonShouldSucceed(t *testing.T) {
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
@@ -608,7 +608,7 @@ func TestJsonParser_Parse_LargeValidJSON(t *testing.T) {
 	assert.NotNil(t, table)
 }
 
-func TestJsonParser_Parse_UnicodeAndSpecialChars(t *testing.T) {
+func TestParserJsonParseWhenUnicodeAndSpecialCharsShouldSucceed(t *testing.T) {
 	tests := []struct {
 		name     string
 		jsonData map[string]interface{}

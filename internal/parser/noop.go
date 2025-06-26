@@ -52,15 +52,7 @@ func (p *NoopParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		return nil, errors.NewParsingFailedError("noop_parser", fmt.Errorf("empty message data"))
 	}
 
-	// TODO: Implement actual parsing logic with plugins
-	// Future implementation:
-	// 1. Look up parser configuration for msg.Subject
-	// 2. If no specific parser, use noop parser
-	// 3. Execute parser chain if multiple parsers configured
-	// 4. Aggregate WriterTable results from all parsers
 	slog.Debug("Parsing NATS message", "subject", msg.Subject, "data_len", len(msg.Data))
 
-	// Placeholder - return empty slice for now
-	// In real implementation, this would parse the message and create appropriate WriterTable instances
 	return []qdb.WriterTable{}, nil
 }

@@ -11,7 +11,7 @@ import (
 
 // TestParserInterface ensures that different parser implementations
 // can be used interchangeably through the Parser interface.
-func TestParserInterface(t *testing.T) {
+func TestParserInterfaceWhenUsingDifferentParsersShouldWorkPolymorphically(t *testing.T) {
 	tests := []struct {
 		name        string
 		parser      Parser
@@ -79,7 +79,7 @@ func TestParserInterface(t *testing.T) {
 }
 
 // TestParserPolymorphism demonstrates that parsers can be swapped at runtime.
-func TestParserPolymorphism(t *testing.T) {
+func TestParserPolymorphismWhenSwappingParsersShouldWorkAtRuntime(t *testing.T) {
 	msg := &nats.Msg{
 		Subject: "test.topic",
 		Data:    []byte(`{"temperature": 23.5}`),
@@ -122,7 +122,7 @@ func (m *mockParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 }
 
 // TestCustomParserImplementation shows how custom parsers can implement the interface.
-func TestCustomParserImplementation(t *testing.T) {
+func TestParserCustomImplementationWhenImplementingInterfaceShouldWork(t *testing.T) {
 	// Create a mock parser with predefined behavior
 	columns := []qdb.WriterColumn{
 		{

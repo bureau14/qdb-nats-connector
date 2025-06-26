@@ -16,7 +16,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 )
 
-func TestNewSource(t *testing.T) {
+func TestSourceNewSourceWhenValidOptionsShouldCreateSource(t *testing.T) {
 	tests := []struct {
 		name        string
 		opts        Options
@@ -85,7 +85,7 @@ func TestNewSource(t *testing.T) {
 	}
 }
 
-func TestSource_Subscribe(t *testing.T) {
+func TestSourceSubscribeWhenValidHandlerShouldReceiveMessages(t *testing.T) {
 	tests := []struct {
 		name         string
 		setupSource  func(t *testing.T) *Source
@@ -231,7 +231,7 @@ func TestSource_Subscribe(t *testing.T) {
 	}
 }
 
-func TestSource_Close(t *testing.T) {
+func TestSourceCloseWhenActiveShouldCloseConnection(t *testing.T) {
 	tests := []struct {
 		name        string
 		setupSource func(t *testing.T) *Source
@@ -298,7 +298,7 @@ func TestSource_Close(t *testing.T) {
 	}
 }
 
-func TestSource_Close_Idempotent(t *testing.T) {
+func TestSourceCloseWhenCalledMultipleTimesShouldBeIdempotent(t *testing.T) {
 	source, err := NewSource(Options{
 		Endpoint: nats.DefaultURL,
 		Topic:    util.RandomTopicName(),
@@ -314,7 +314,7 @@ func TestSource_Close_Idempotent(t *testing.T) {
 	assert.True(t, source.NatsConn.IsClosed())
 }
 
-func TestSource_Close_DrainBehavior(t *testing.T) {
+func TestSourceCloseWhenDrainingShouldWaitForMessages(t *testing.T) {
 	topic := util.RandomTopicName()
 	source, err := NewSource(Options{
 		Endpoint: nats.DefaultURL,
@@ -350,7 +350,7 @@ func TestSource_Close_DrainBehavior(t *testing.T) {
 	assert.True(t, source.NatsConn.IsClosed())
 }
 
-func TestSource_ConcurrentOperations(t *testing.T) {
+func TestSourceConcurrentOperationsWhenCallingCloseShouldBeSafe(t *testing.T) {
 	source, err := NewSource(Options{
 		Endpoint: nats.DefaultURL,
 		Topic:    util.RandomTopicName(),
@@ -380,7 +380,7 @@ type testProvider struct {
 func (p *testProvider) Endpoint() string { return p.endpoint }
 func (p *testProvider) Topic() string    { return p.topic }
 
-func TestOptionsProvider(t *testing.T) {
+func TestSourceOptionsProviderWhenConvertingShouldCreateOptions(t *testing.T) {
 	provider := &testProvider{
 		endpoint: nats.DefaultURL,
 		topic:    util.RandomTopicName(),
@@ -392,7 +392,7 @@ func TestOptionsProvider(t *testing.T) {
 	assert.Equal(t, provider.topic, opts.Topic)
 }
 
-func TestFunctionalOptions(t *testing.T) {
+func TestSourceFunctionalOptionsWhenBuildingShouldApplySettings(t *testing.T) {
 	endpoint := "nats://custom:4222"
 	topic := util.RandomTopicName()
 
@@ -405,7 +405,7 @@ func TestFunctionalOptions(t *testing.T) {
 	assert.Equal(t, topic, opts.Topic)
 }
 
-func TestOptionsValidation(t *testing.T) {
+func TestSourceOptionsValidationWhenValidOptionsShouldSucceed(t *testing.T) {
 	tests := []struct {
 		name    string
 		opts    Options
@@ -452,7 +452,7 @@ func TestOptionsValidation(t *testing.T) {
 	}
 }
 
-func TestSource_ConnectionRecovery(t *testing.T) {
+func TestSourceConnectionRecoveryWhenReconnectingShouldReceiveMessages(t *testing.T) {
 	topic := util.RandomTopicName()
 
 	source, err := NewSource(Options{
@@ -501,7 +501,7 @@ func TestSource_ConnectionRecovery(t *testing.T) {
 	assert.Equal(t, int32(2), atomic.LoadInt32(&receivedCount))
 }
 
-func TestSource_HandlerPanic(t *testing.T) {
+func TestSourceHandlerPanicWhenHandlerPanicsShouldRecover(t *testing.T) {
 	source, err := NewSource(Options{
 		Endpoint: nats.DefaultURL,
 		Topic:    util.RandomTopicName(),
@@ -533,7 +533,7 @@ func TestSource_HandlerPanic(t *testing.T) {
 	assert.True(t, source.NatsConn.IsConnected())
 }
 
-func TestSource_MessageContext(t *testing.T) {
+func TestSourceMessageContextWhenReceivingMessageShouldHaveContext(t *testing.T) {
 	topic := util.RandomTopicName()
 	source, err := NewSource(Options{
 		Endpoint: nats.DefaultURL,
@@ -575,7 +575,7 @@ func TestSource_MessageContext(t *testing.T) {
 	assert.Equal(t, testData, receivedMsg.Data)
 }
 
-func TestSource_CloseTimeout(t *testing.T) {
+func TestSourceCloseTimeoutWhenSlowHandlerShouldCompleteWithinTimeout(t *testing.T) {
 	source, err := NewSource(Options{
 		Endpoint: nats.DefaultURL,
 		Topic:    util.RandomTopicName(),
@@ -612,7 +612,7 @@ func TestSource_CloseTimeout(t *testing.T) {
 	assert.True(t, source.NatsConn.IsClosed())
 }
 
-func TestSource_ErrorMetadata(t *testing.T) {
+func TestSourceErrorMetadataWhenErrorOccursShouldIncludeMetadata(t *testing.T) {
 	tests := []struct {
 		name            string
 		setupAndExecute func(t *testing.T) error
@@ -675,7 +675,7 @@ func TestSource_ErrorMetadata(t *testing.T) {
 	}
 }
 
-func TestSource_ErrorWrapping(t *testing.T) {
+func TestSourceErrorWrappingWhenErrorOccursShouldWrapUnderlyingError(t *testing.T) {
 	tests := []struct {
 		name            string
 		setupAndExecute func(t *testing.T) error
@@ -726,7 +726,7 @@ func TestSource_ErrorWrapping(t *testing.T) {
 	}
 }
 
-func TestSource_ErrorFormatting(t *testing.T) {
+func TestSourceErrorFormattingWhenErrorOccursShouldHaveConsistentFormat(t *testing.T) {
 	tests := []struct {
 		name            string
 		setupAndExecute func(t *testing.T) error

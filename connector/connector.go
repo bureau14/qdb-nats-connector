@@ -1,10 +1,7 @@
-// Package connector orchestrates the NATS-to-QuasarDB data pipeline.
-// This package bridges NATS messaging with QuasarDB time series storage through
-// a pluggable parser architecture that enables flexible message transformation.
-// Decision rationale:
-// - Public API package allows external usage and testing
-// - Component orchestration centralizes lifecycle management
-// - Signal handling enables graceful shutdown in production deployments
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package connector: NATS→QuasarDB pipeline orchestrator
+// Types: Connector, Options
+// Ex: connector.NewConnector(opts, parser).Run() → data flows
 package connector
 
 import (
@@ -22,63 +19,44 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Connector orchestrates the NATS source, message parser, and QuasarDB sink.
-// Key assumptions:
-// - Components are initialized in dependency order during NewConnector
-// - Each component manages its own connection lifecycle
-// - Connector handles graceful shutdown coordination between components
+// Connector: NATS→QDB pipeline orchestrator, handles source/parser/sink lifecycle
 type Connector struct {
 	Source *source.Source
 	Parser parser.Parser
 	Sink   *sink.Sink
 }
 
-// NewConnector creates and initializes a new Connector with a message parser.
+// NewConnector creates NATS→QDB pipeline.
+// Args:
 //
-// This function orchestrates the creation of source, parser, and sink components,
-// handling proper resource cleanup on any initialization failure.
+//	opts: *Options - endpoints & credentials
+//	p: Parser - message transformer
 //
-// Decision rationale:
-// - Options are validated first to fail fast on invalid configuration
-// - Parser interface allows for different parser implementations (JSON, CSV, etc.)
-// - Components are created in dependency order: source -> parser -> sink
-// - Each component failure triggers cleanup of previously created components
+// Returns:
 //
-// Key assumptions:
-// - The provided Options have been populated with valid endpoints
-// - Parser implementation is properly initialized and ready for message processing
-// - Network connectivity to NATS and QuasarDB endpoints is available
-// - Component initialization is synchronous and blocking
+//	*Connector: pipeline orchestrator
+//	error: validation/connection fails
 //
-// Usage example:
+// Example:
 //
-//	jsonParser, err := parser.NewJsonParser()
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	opts := &Options{
-//	    NatsEndpoint: "nats://localhost:4222",
-//	    NatsTopic:    "my.topic",
-//	    QdbEndpoint:  "qdb://localhost:2836",
-//	}
-//	conn, err := NewConnector(opts, jsonParser)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer conn.Close()
+//	NewConnector(opts, jsonParser) // → connector, nil
 func NewConnector(opts *Options, p parser.Parser) (*Connector, error) {
-	// Validate options before attempting to create components
+	// Approach: validate→create in order, cleanup on fail
+	// 1. Validate config - fail fast
+	// 2. Create source - NATS connection
+	// 3. Create sink - QDB connection
+
+	// 1. Validate: opts & parser required
 	if validationErr := ValidateOptions(opts); validationErr != nil {
 		slog.Error("Options not valid", "options", opts, "error", validationErr)
 		return nil, validationErr
 	}
 
-	// Validate parser parameter
 	if p == nil {
 		return nil, errors.NewInvalidConfigError("connector", "parser cannot be nil")
 	}
 
-	// Create source using a provider that builds options from the connector's config
+	// 2. Create source: NATS subscriber
 	srcOpts := source.FromOptionsProvider(opts)
 	src, err := source.NewSource(srcOpts)
 	if err != nil {
@@ -86,7 +64,7 @@ func NewConnector(opts *Options, p parser.Parser) (*Connector, error) {
 		return nil, err
 	}
 
-	// Create sink using a provider that builds options from the connector's config
+	// 3. Create sink: QDB writer with cleanup
 	snkOpts := sink.FromOptionsProvider(opts)
 	snk, err := sink.NewSink(snkOpts)
 	if err != nil {
@@ -102,24 +80,25 @@ func NewConnector(opts *Options, p parser.Parser) (*Connector, error) {
 	}, nil
 }
 
-// Run starts the connector and blocks until an error occurs or shutdown.
-// Decision rationale:
-// - Single method to start all connector operations
-// - Integrates NATS subscription with parsing and sink pipeline
-// - Handles message processing errors gracefully without stopping
-// Performance trade-offs:
-// - Each NATS message handled in separate goroutine (via NATS async)
-// - Non-blocking sink writes prevent message handler stalls
+// Run starts connector & blocks until shutdown.
+// Out: error - subscription failure
+// Ex: Run() → nil
 func (c *Connector) Run() error {
 	return c.RunWithContext(context.Background())
 }
 
-// RunWithContext starts the connector with context support for cancellation.
-// Decision rationale:
-// - Context enables graceful shutdown and cancellation
-// - Signal handling for production deployments
-// - Maintains backward compatibility through Run() method
-// - Message handler is decoupled for better testability and maintainability
+// RunWithContext runs connector with cancellation.
+// Args:
+//
+//	ctx: context.Context - cancellation context
+//
+// Returns:
+//
+//	error: subscription/context errors
+//
+// Example:
+//
+//	RunWithContext(ctx) // blocks until SIGINT/cancel
 func (c *Connector) RunWithContext(ctx context.Context) error {
 	slog.Info("Starting connector")
 
@@ -145,36 +124,32 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 	}
 }
 
-// handleMessage processes individual NATS messages through the parser pipeline.
-// Decision rationale:
-// - Separate method improves testability and code organization
-// - Passes full NATS message to parser for access to subject and metadata
-// - Logs errors but continues processing to maintain pipeline resilience
-// - Skips empty parsing results to avoid unnecessary sink operations
-// Performance trade-offs:
-// - Method call overhead is minimal compared to parsing and I/O operations
-// - Error handling and logging add minimal latency
+// handleMessage parses NATS msg→QDB tables
+// In: msg *nats.Msg - raw message
+// Approach: parse→convert→write, skip ∅
+// 1. Parse msg - get tables
+// 2. Convert to pointers - sink needs []*Table
+// 3. Write to QDB - log errors & continue
 func (c *Connector) handleMessage(msg *nats.Msg) {
-	// Parse the NATS message using the configured parser
+	// 1. Parse msg: extract timeseries data
 	tables, err := c.Parser.Parse(msg)
 	if err != nil {
 		slog.Error("Failed to parse message", "subject", msg.Subject, "error", err)
 		return
 	}
 
-	// Skip empty results
 	if len(tables) == 0 {
 		slog.Debug("Parser returned no tables", "subject", msg.Subject)
 		return
 	}
 
-	// Convert []qdb.WriterTable to []*qdb.WriterTable for sink compatibility
+	// 2. Convert to pointers: []Table→[]*Table
 	writerTables := make([]*qdb.WriterTable, len(tables))
 	for i := range tables {
 		writerTables[i] = &tables[i]
 	}
 
-	// Write to sink
+	// 3. Write to QDB: errors logged, not fatal
 	if err := c.Sink.Write(writerTables); err != nil {
 		slog.Error("Failed to write to sink", "subject", msg.Subject, "num_tables", len(tables), "error", err)
 		return
@@ -183,14 +158,8 @@ func (c *Connector) handleMessage(msg *nats.Msg) {
 	slog.Debug("Message processed successfully", "subject", msg.Subject, "num_tables", len(tables))
 }
 
-// Close gracefully shuts down the connector's components.
-//
-// Components are closed in reverse initialization order to ensure
-// clean shutdown without data loss.
-//
-// Key assumptions:
-// - Component Close() methods are idempotent
-// - Close() methods handle nil receivers gracefully
+// Close shuts down source→sink order.
+// Ex: Close() → components closed
 func (c *Connector) Close() {
 	slog.Info("Closing connector")
 	c.Source.Close()

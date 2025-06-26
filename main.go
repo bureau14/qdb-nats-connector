@@ -1,6 +1,7 @@
-// Package main provides the entry point for the qdb-nats-connector application.
-// This connector bridges NATS messaging with QuasarDB time series storage,
-// enabling real-time data ingestion from NATS topics into QuasarDB tables.
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package main: NATS→QuasarDB connector entry point
+// Types: none
+// Ex: ./qdb-nats-connector -n host:4222 -t topic → connector runs
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/parser"
 )
 
+// usageStr: CLI help text with all connector options
 var usageStr = `
 Usage: qdb-nats-connector [options]
 
@@ -38,24 +40,20 @@ General Options:
     -h, --help                       Show this message
 `
 
-// usage prints the CLI usage instructions and exits with status code 0.
-// Decision rationale:
-// - Exit code 0 indicates help was requested, not an error
-// - Direct printf to stdout for standard help display convention
+// usage prints CLI help & exits
+// Out: exit(0)
+// Ex: usage() → help text printed
 func usage() {
 	fmt.Println(usageStr)
 	os.Exit(0)
 }
 
-// main initializes and runs the NATS to QuasarDB connector.
-// Key assumptions:
-// - CLI arguments take precedence over any config files
-// - Panics on critical errors as this is a long-running service
-// - Connector manages its own lifecycle including reconnection logic
-// Decision rationale:
-// - Uses panic for unrecoverable startup errors (config parsing, connector creation)
-// - Sets debug logging by default for troubleshooting production issues
-// - Defers connector.Close() to ensure clean shutdown on any exit path
+// main runs NATS→QDB connector
+// Approach: parse CLI→create parser→run connector
+// 1. Parse options - CLI>config precedence
+// 2. Create JSON parser - default parser
+// 3. Run connector - blocks until shutdown
+// Ex: main() → connector runs until SIGINT
 func main() {
 	exe := "qdb-nats-connector"
 
@@ -66,7 +64,7 @@ func main() {
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
 	fs.Usage = usage
 
-	// Configure the options from the flags/config file
+	// 1. Parse options: CLI overrides config files
 	opts, err := connector.ConfigureOptions(fs, os.Args[1:], fs.Usage)
 
 	if err != nil {
@@ -76,7 +74,7 @@ func main() {
 
 	slog.Info("Parsed configuration options", "options", opts)
 
-	// Create JSON parser
+	// 2. Create JSON parser: default format handler
 	jsonParser, err := parser.NewJsonParser()
 	if err != nil {
 		slog.Error("Unable to create JSON parser", "error", err)
@@ -96,7 +94,7 @@ func main() {
 	// Create root context for the application
 	ctx := context.Background()
 
-	// Run the connector with context - this blocks until error or shutdown
+	// 3. Run connector: blocks until shutdown|error
 	if err := c.RunWithContext(ctx); err != nil && err != context.Canceled {
 		slog.Error("Connector failed", "error", err)
 		os.Exit(1)

@@ -1,40 +1,7 @@
-// Package parser implements JSON message parsing for the NATS-QuasarDB connector.
-//
-// JsonParser Overview:
-// The JsonParser provides a specialized parser for transforming JSON-formatted
-// NATS messages into QuasarDB time series data. It enforces a simple, flat
-// JSON structure to ensure predictable column mappings and efficient processing.
-//
-// Limitations:
-// - Only single-depth JSON objects are supported (no nested objects or arrays)
-// - JSON arrays at the root level are not supported
-// - Null values are skipped and not written to QuasarDB
-// - Maximum JSON size limited by NATS message size (default 1MB)
-//
-// Type Mapping:
-//
-//	JSON Type    | QuasarDB Type | Notes
-//	-------------|---------------|----------------------------------
-//	string       | Blob          | UTF-8 encoded bytes
-//	number       | Double        | All numbers converted to float64
-//	boolean      | Blob          | Stored as "true" or "false"
-//	null         | (skipped)     | Not written to database
-//	object/array | (error)       | Nested structures not supported
-//
-// Example Input/Output:
-//
-//	Input JSON:
-//	{
-//	  "temperature": 23.5,
-//	  "location": "sensor-01",
-//	  "active": true,
-//	  "metadata": null
-//	}
-//
-//	Output: WriterTable with 3 columns (metadata skipped):
-//	- temperature (Double): 23.5
-//	- location (Blob): "sensor-01"
-//	- active (Blob): "true"
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package parser: message transformation pipeline
+// Types: Parser, JsonParser, NoopParser
+// Ex: parser.NewJsonParser().Parse(msg) → []WriterTable
 package parser
 
 import (
@@ -48,107 +15,40 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// JsonParser transforms JSON messages into QuasarDB writer tables.
-//
-// JsonParser implements the Parser interface with a strict JSON-to-timeseries
-// mapping with the following behavior:
-// - Validates JSON structure before processing
-// - Rejects nested objects and arrays to maintain flat column structure
-// - Preserves JSON key names as QuasarDB column names
-// - Applies consistent type mappings for predictable schema
-//
-// Thread Safety:
-// JsonParser methods are thread-safe and can be called concurrently.
-// Each Parse call operates on independent data structures.
-//
-// Future Configuration:
-// The parser will support configuration for:
-// - Dynamic table name mapping based on NATS subject
-// - Column type overrides for specific fields
-// - Custom timestamp extraction from JSON fields
-// - Batch size and write buffering options
+// JsonParser: flat JSON→QDB timeseries, rejects nested objects
 type JsonParser struct {
-	// TODO: IMPORTANT - Table name is currently hardcoded to "foobar".
-	// This must be made configurable based on NATS subject or parser config.
-	// Proposed config structure:
-	// tableMapping map[string]string  // subject -> table name
-	// defaultTable string             // fallback table name
-	// columnTypes map[string]qdb.TsColumnType // override default type mappings
 }
 
 // Compile-time check that JsonParser implements the Parser interface
 var _ Parser = (*JsonParser)(nil)
 
-// NewJsonParser creates a new JSON parser instance.
+// NewJsonParser creates JSON→QDB parser.
+// Returns:
 //
-// NewJsonParser initializes a JsonParser ready to transform JSON messages.
-// In the current implementation, it uses default settings with a hardcoded
-// table name. Future versions will accept configuration options.
+//	*JsonParser: flat JSON transformer
+//	error: never fails (interface consistency)
 //
-// Example usage:
+// Example:
 //
-//	parser, err := NewJsonParser()
-//	if err != nil {
-//	    return fmt.Errorf("failed to create JSON parser: %w", err)
-//	}
-//
-//	// Use parser in connector
-//	connector := NewConnector(opts, parser)
-//
-// Future enhancement:
-//
-//	config := &JsonParserConfig{
-//	    TableMapping: map[string]string{
-//	        "sensors.*": "sensor_data",
-//	        "logs.*": "application_logs",
-//	    },
-//	    DefaultTable: "raw_messages",
-//	}
-//	parser, err := NewJsonParser(config)
+//	NewJsonParser() // → parser, nil
 func NewJsonParser() (*JsonParser, error) {
 	slog.Info("Initializing JSON parser")
 	return &JsonParser{}, nil
 }
 
-// Parse transforms a NATS message containing JSON into QuasarDB writer tables.
+// Parse converts JSON msg→QDB tables.
+// Args:
 //
-// Parse implements the Parser interface, converting JSON data from NATS messages
-// into QuasarDB WriterTable structures. Each JSON key becomes a column, with
-// values converted according to the type mapping rules.
+//	msg: *nats.Msg - JSON payload
 //
-// Message Processing:
-// 1. Validates message is non-nil with data
-// 2. Unmarshals JSON into map structure
-// 3. Validates flat structure (no nesting)
-// 4. Creates WriterTable with typed columns
-// 5. Returns table ready for QuasarDB insertion
+// Returns:
 //
-// Error Handling:
-// - Nil or empty messages return ConnectorError with ErrCodeParsingFailed
-// - Invalid JSON syntax returns parsing error with details
-// - Nested structures return descriptive error
-// - Empty JSON objects are valid but produce no columns
+//	[]qdb.WriterTable: flat JSON→table conversion
+//	error: ParsingFailed on invalid/nested JSON
 //
 // Example:
 //
-//	msg := &nats.Msg{
-//	    Subject: "sensors.temperature",
-//	    Data: []byte(`{"temp": 23.5, "unit": "celsius"}`),
-//	}
-//	tables, err := parser.Parse(msg)
-//	if err != nil {
-//	    // Handle parsing error
-//	}
-//	// tables[0] will contain:
-//	// - Table: "foobar" (TODO: make configurable)
-//	// - Columns: "temp" (Double), "unit" (Blob)
-//	// - One row with current timestamp
-//
-// Performance Considerations:
-// - JSON unmarshaling allocates temporary map structure
-// - Each parse allocates new WriterTable and column slices
-// - Suitable for messages up to 1MB (NATS default limit)
-// - For high-throughput scenarios, consider batching at connector level
+//	Parse({"temp": 23.5}) // → [table], nil
 func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	if msg == nil {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("nil message"))
@@ -157,7 +57,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("empty message data"))
 	}
 
-	// Parse JSON data into map
+	// 1. Unmarshal JSON: parse to map
 	var jsonData map[string]interface{}
 	if err := json.Unmarshal(msg.Data, &jsonData); err != nil {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("invalid JSON: %w", err))
@@ -176,7 +76,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	// 4. Consider allowing table name from message headers for dynamic routing
 	tableName := "foobar" // HARDCODED - See TODO above
 
-	// Build column definitions and values
+	// 2. Check structure & 3. Map types: validate flat, convert types
 	var columns []qdb.WriterColumn
 	var values []interface{}
 
@@ -187,9 +87,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 			continue
 		}
 
-		// Validate single-depth requirement and perform type mapping.
-		// This switch enforces the flat JSON structure and converts values
-		// to appropriate QuasarDB column types.
+		// Type mapping: JSON→QDB column types
 		switch v := value.(type) {
 		case map[string]interface{}:
 			return nil, errors.NewParsingFailedError("json_parser",
@@ -246,7 +144,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("no valid columns found after parsing"))
 	}
 
-	// Create WriterTable with proper API
+	// 4. Build table: create with columns & timestamp
 	table, err := qdb.NewWriterTable(tableName, columns)
 	if err != nil {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("failed to create writer table: %w", err))

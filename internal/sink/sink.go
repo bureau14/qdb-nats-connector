@@ -1,10 +1,7 @@
-// Package sink manages the QuasarDB connection and data persistence.
-// This internal package handles batching, compression, encryption, and
-// retry logic for reliable time series data storage.
-// Decision rationale:
-// - Internal package isolates QuasarDB-specific logic
-// - Batching improves write throughput
-// - Configurable compression/encryption for security
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package sink: QuasarDB connection & persistence
+// Types: Sink, Options, OptionsProvider
+// Ex: sink.NewSink(opts).Write(tables) → writes to QDB
 package sink
 
 import (
@@ -18,15 +15,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
-// Sink manages the QuasarDB client connection and write operations.
-// Decision rationale:
-// - Worker pool pattern with dedicated handles prevents resource contention
-// - Each worker has 1:1 mapping with QuasarDB handle for thread safety
-// - Buffered channel provides backpressure control
-// Key assumptions:
-// - QuasarDB cluster is reachable at configured endpoint
-// - Authentication credentials are valid if provided
-// - Sink handles reconnection on transient failures
+// Sink: QDB writer pool with async queue & backpressure control
 type Sink struct {
 	Options Options
 	workers []*worker
@@ -35,13 +24,7 @@ type Sink struct {
 	closed  atomic.Bool
 }
 
-// worker represents a single writer with dedicated QuasarDB handle.
-// Decision rationale:
-// - 1:1 handle to writer mapping ensures thread safety
-// - Dedicated goroutine per worker for concurrent processing
-// Performance trade-offs:
-// - Higher memory usage per worker (handle + connection)
-// - Better isolation and parallel write capability
+// worker: single QDB writer with dedicated handle for thread safety
 type worker struct {
 	id                int
 	handle            qdb.HandleType
@@ -49,14 +32,19 @@ type worker struct {
 	handleInitialized bool
 }
 
-// NewSink establishes connections to the QuasarDB cluster with worker pool.
-// Decision rationale:
-// - Creates dedicated workers with individual handles for thread safety
-// - Validates configuration before creating expensive resources
-// - Pre-connects all workers to fail fast on connection issues
-// Performance trade-offs:
-// - Higher memory usage for multiple handles but better concurrency
-// - Connection establishment overhead during initialization
+// NewSink creates QDB writer pool.
+// Args:
+//
+//	opts: Options - workers/queue/retry config
+//
+// Returns:
+//
+//	*Sink: QDB sink with worker pool
+//	error: connection/validation fails
+//
+// Example:
+//
+//	NewSink(opts) // → sink with 4 workers
 func NewSink(opts Options) (*Sink, error) {
 	slog.Info("Initializing new sink", "num_workers", opts.NumWriters)
 
@@ -74,8 +62,12 @@ func NewSink(opts Options) (*Sink, error) {
 		jobs:    make(chan []*qdb.WriterTable, opts.QueueSize),
 	}
 
-	// Create workers with dedicated handles
+	// Approach: create workers with handles, start goroutines
+	// 1. Create worker - QDB connection per worker
+	// 2. Start goroutine - process jobs concurrently
+
 	for i := range opts.NumWriters {
+		// 1. Create worker: dedicated QDB handle
 		w, err := newWorker(i, opts)
 		if err != nil {
 			// Clean up previously created workers
@@ -86,7 +78,7 @@ func NewSink(opts Options) (*Sink, error) {
 		}
 		s.workers[i] = w
 
-		// Start worker goroutine
+		// 2. Start goroutine: concurrent processing
 		s.wg.Add(1)
 		go w.run(s.jobs, &s.wg)
 	}
@@ -95,14 +87,12 @@ func NewSink(opts Options) (*Sink, error) {
 	return s, nil
 }
 
-// Close gracefully shuts down all workers and connections.
-// Decision rationale:
-// - Stops accepting new work first to prevent resource leaks
-// - Waits for workers to complete current tasks
-// - Closes all handles to release QuasarDB resources
-// Key assumptions:
-// - Pending writes are completed before closure
-// - Method is idempotent and safe to call multiple times
+// Close shuts down workers & QDB handles.
+// Approach: stop queue→wait workers→close handles
+// 1. Close job queue - no new work
+// 2. Wait workers - drain pending
+// 3. Close handles - release resources
+// Ex: Close() → all workers stopped
 func (s *Sink) Close() {
 	if s.closed.Swap(true) {
 		return // Already closed
@@ -110,13 +100,13 @@ func (s *Sink) Close() {
 
 	slog.Info("Closing sink", "workers", len(s.workers))
 
-	// Stop accepting new work
+	// 1. Close job queue: prevent new writes
 	close(s.jobs)
 
-	// Wait for all workers to finish
+	// 2. Wait workers: drain pending writes
 	s.wg.Wait()
 
-	// Close all worker handles
+	// 3. Close handles: release QDB connections
 	for _, w := range s.workers {
 		w.close()
 	}
@@ -124,14 +114,10 @@ func (s *Sink) Close() {
 	slog.Info("Sink closed successfully")
 }
 
-// Write enqueues writer tables for processing by worker pool.
-// Decision rationale:
-// - Non-blocking enqueue prevents NATS handler goroutines from stalling
-// - Returns error immediately if system is overloaded
-// - Worker pool handles actual QuasarDB write operations
-// Performance trade-offs:
-// - Additional memory allocation for channel buffering
-// - Lower latency for NATS message processing
+// Write queues tables for async QDB write.
+// In: tables []*qdb.WriterTable - timeseries data
+// Out: error - queue full|closed sink
+// Ex: Write(tables) → nil (queued)
 func (s *Sink) Write(tables []*qdb.WriterTable) error {
 	if s.closed.Load() {
 		return errors.NewWriteFailedError("sink", fmt.Errorf("sink is closed"))
@@ -149,11 +135,10 @@ func (s *Sink) Write(tables []*qdb.WriterTable) error {
 	}
 }
 
-// newWorker creates a worker with dedicated QuasarDB handle.
-// Decision rationale:
-// - Individual handle per worker ensures thread safety
-// - Connection established during initialization for fail-fast behavior
-// - Security and compression settings applied per handle
+// newWorker creates worker with QDB handle.
+// In: id int, opts Options
+// Out: *worker, error - worker|connection error
+// Ex: newWorker(0, opts) → worker with handle
 func newWorker(id int, opts Options) (*worker, error) {
 	handle, err := qdb.NewHandle()
 	if err != nil {
@@ -200,11 +185,9 @@ func newWorker(id int, opts Options) (*worker, error) {
 	}, nil
 }
 
-// run processes write jobs in dedicated goroutine.
-// Decision rationale:
-// - Dedicated goroutine per worker for parallel processing
-// - Retry logic handles transient QuasarDB async pipeline full errors
-// - Error logging preserves diagnostic information without stopping worker
+// run processes jobs until channel closed.
+// In: jobs <-chan []*qdb.WriterTable, wg *sync.WaitGroup
+// Ex: run(jobs, wg) → processes until channel closed
 func (w *worker) run(jobs <-chan []*qdb.WriterTable, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -218,11 +201,10 @@ func (w *worker) run(jobs <-chan []*qdb.WriterTable, wg *sync.WaitGroup) {
 	}
 }
 
-// processTables writes all tables with retry logic.
-// Decision rationale:
-// - Exponential backoff handles async pipeline full conditions
-// - Retries only on retryable errors to avoid infinite loops
-// - Batch processing of all tables in single operation
+// processTables writes tables with exp backoff.
+// In: tables []*qdb.WriterTable
+// Out: error - write|retry exhausted
+// Ex: processTables(tables) → nil
 func (w *worker) processTables(tables []*qdb.WriterTable) error {
 	if len(tables) == 0 {
 		return nil
@@ -255,10 +237,10 @@ func (w *worker) processTables(tables []*qdb.WriterTable) error {
 	return errors.NewMaxRetriesExceededError("sink", w.options.RetryAttempts)
 }
 
-// pushTables executes the actual QuasarDB write operation.
-// Decision rationale:
-// - Single push operation for all tables to minimize network calls
-// - Uses dedicated handle for thread safety
+// pushTables writes batch to QDB.
+// In: tables []*qdb.WriterTable
+// Out: error - QDB write error
+// Ex: pushTables(tables) → nil
 func (w *worker) pushTables(tables []*qdb.WriterTable) error {
 	writer := qdb.NewWriterWithDefaultOptions()
 
@@ -273,17 +255,17 @@ func (w *worker) pushTables(tables []*qdb.WriterTable) error {
 	return writer.Push(w.handle)
 }
 
-// isRetryable determines if an error should trigger retry logic.
-// Decision rationale:
-// - Async pipeline full is temporary condition worth retrying
-// - Connection errors might be transient network issues
-// - Data validation errors are permanent and shouldn't be retried
+// isRetryable checks if err is transient.
+// In: err error - QDB error
+// Out: bool - true for retry
+// Ex: isRetryable(pipelineFull) → true
 func (w *worker) isRetryable(err error) bool {
 	// TODO: Implement proper error classification based on qdb-api-go error types
 	return true
 }
 
-// close releases the worker's QuasarDB handle.
+// close releases QDB handle.
+// Ex: close() → handle released
 func (w *worker) close() {
 	if w.handleInitialized {
 		w.handle.Close()

@@ -8,6 +8,7 @@ require (
 	github.com/bureau14/qdb-api-go/v3 v3.0.0-20250618120212-acd0a4f32d72
 	github.com/nats-io/nats.go v1.41.0
 	github.com/stretchr/testify v1.10.0
+	pgregory.net/rapid v1.2.0
 )
 
 require (
@@ -19,5 +20,4 @@ require (
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	pgregory.net/rapid v1.2.0 // indirect
 )

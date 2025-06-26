@@ -1,6 +1,7 @@
-// Package connector bridges NATS messaging with QuasarDB time series storage.
-// This package provides the core orchestration logic for subscribing to NATS topics,
-// parsing messages through a configurable pipeline, and storing the results in QuasarDB.
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package connector: NATS→QuasarDB pipeline orchestrator
+// Types: Connector, Options
+// Ex: connector.NewConnector(opts, parser).Run() → data flows
 package connector
 
 import (
@@ -15,13 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Options aggregates configuration for the entire connector pipeline.
-// It implements both source.OptionsProvider and sink.OptionsProvider
-// to allow seamless configuration propagation to child components.
-// Decision rationale:
-// - Embeds source and sink options to avoid duplication
-// - Uses provider pattern for flexible configuration passing
-// - JSON tags enable configuration via files
+// Options: connector config aggregating NATS & QDB settings
 type Options struct {
 	PidFile string `json:"pid"`
 
@@ -37,24 +32,21 @@ var (
 	_ source.OptionsProvider = (*Options)(nil)
 )
 
-// ConfigureOptions parses command-line arguments into a validated Options struct.
-// Key assumptions:
-// - Short and long flag variants are equivalent (e.g., -n and --nats)
-// - Zero values for performance tuning flags mean "use defaults"
-// - Help request returns nil options without error
-// Decision rationale:
-// - Supports both short and long flags for user convenience
-// - Custom flag.Value implementations for type-safe parsing
-// - Performance flags use pointers to distinguish unset from zero
-// Usage example:
+// ConfigureOptions parses CLI args→Options.
+// Args:
 //
-//	opts, err := ConfigureOptions(flag.CommandLine, os.Args[1:], usage)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	if opts == nil {
-//	    return // help was requested
-//	}
+//	fs: *flag.FlagSet - CLI flag parser
+//	args: []string - command line arguments
+//	printHelp: func() - help display callback
+//
+// Returns:
+//
+//	*Options: parsed config (nil if help shown)
+//	error: parsing/validation fails
+//
+// Example:
+//
+//	ConfigureOptions(fs, os.Args[1:], usage) // → opts, nil
 func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Options, error) {
 	opts := &Options{}
 	var (
@@ -104,13 +96,10 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 	return opts, nil
 }
 
-// ValidateOptions ensures all required connector options are properly set.
-// Key assumptions:
-// - Topic is the only mandatory field (endpoints have defaults)
-// - Further validation happens in component constructors
-// Decision rationale:
-// - Minimal validation here, components validate their own requirements
-// - Early failure on missing topic prevents cryptic downstream errors
+// ValidateOptions checks required fields.
+// In: opts *Options
+// Out: *ConnectorError - nil if valid
+// Ex: ValidateOptions(opts) → nil
 func ValidateOptions(opts *Options) *errors.ConnectorError {
 	if opts.sourceOptions.Topic == "" {
 		return errors.NewNoTopicProvidedError("connector")
@@ -119,35 +108,58 @@ func ValidateOptions(opts *Options) *errors.ConnectorError {
 	return nil
 }
 
-// sink.OptionsProvider implementation
-// These methods delegate to embedded sinkOptions to fulfill the provider interface.
-// Decision rationale:
-// - Simple delegation avoids data duplication
-// - Provider pattern allows sink to remain decoupled from connector
-func (o *Options) ClusterUri() string            { return o.sinkOptions.ClusterUri }
-func (o *Options) ClusterPublicKeyFile() string  { return o.sinkOptions.ClusterPublicKeyFile }
-func (o *Options) UserSecurityFile() string      { return o.sinkOptions.UserSecurityFile }
-func (o *Options) Encryption() *qdb.Encryption   { return o.sinkOptions.Encryption }
+// ClusterUri returns QDB cluster URI.
+// Out: string - cluster endpoint
+// Ex: ClusterUri() → "qdb://host:2836"
+func (o *Options) ClusterUri() string { return o.sinkOptions.ClusterUri }
+
+// ClusterPublicKeyFile returns QDB pubkey path.
+// Out: string - file path
+// Ex: ClusterPublicKeyFile() → "/path/to/key"
+func (o *Options) ClusterPublicKeyFile() string { return o.sinkOptions.ClusterPublicKeyFile }
+
+// UserSecurityFile returns QDB user sec path.
+// Out: string - file path
+// Ex: UserSecurityFile() → "/path/to/sec"
+func (o *Options) UserSecurityFile() string { return o.sinkOptions.UserSecurityFile }
+
+// Encryption returns QDB encryption mode.
+// Out: *qdb.Encryption - none|aes
+// Ex: Encryption() → &EncryptAES
+func (o *Options) Encryption() *qdb.Encryption { return o.sinkOptions.Encryption }
+
+// Compression returns QDB compression mode.
+// Out: *qdb.Compression - none|fast|best
+// Ex: Compression() → &CompFast
 func (o *Options) Compression() *qdb.Compression { return o.sinkOptions.Compression }
-func (o *Options) ClientMaxParallelism() *uint   { return o.sinkOptions.ClientMaxParallelism }
-func (o *Options) ClientMaxInBufSize() *uint     { return o.sinkOptions.ClientMaxInBufSize }
 
-// source.OptionsProvider implementation
-// These methods delegate to embedded sourceOptions to fulfill the provider interface.
-// Decision rationale:
-// - Simple delegation avoids data duplication
-// - Provider pattern allows source to remain decoupled from connector
+// ClientMaxParallelism returns QDB max parallelism.
+// Out: *uint - worker threads
+// Ex: ClientMaxParallelism() → &8
+func (o *Options) ClientMaxParallelism() *uint { return o.sinkOptions.ClientMaxParallelism }
+
+// ClientMaxInBufSize returns QDB input buffer size.
+// Out: *uint - bytes
+// Ex: ClientMaxInBufSize() → &1024
+func (o *Options) ClientMaxInBufSize() *uint { return o.sinkOptions.ClientMaxInBufSize }
+
+// Endpoint returns NATS endpoint.
+// Out: string - connection URI
+// Ex: Endpoint() → "nats://host:4222"
 func (o *Options) Endpoint() string { return o.sourceOptions.Endpoint }
-func (o *Options) Topic() string    { return o.sourceOptions.Topic }
 
-// compressionFlag implements flag.Value for *qdb.Compression.
-// Decision rationale:
-// - Double pointer allows distinguishing unset from explicit "none"
-// - Custom parsing provides user-friendly string values
+// Topic returns NATS subscription topic.
+// Out: string - subject pattern
+// Ex: Topic() → "sensors.>"
+func (o *Options) Topic() string { return o.sourceOptions.Topic }
+
+// compressionFlag: CLI flag wrapper for qdb.Compression pointer
 type compressionFlag struct{ dst **qdb.Compression }
 
+// String returns compression as JSON.
+// Out: string - JSON representation
+// Ex: String() → "\"fast\""
 func (f *compressionFlag) String() string {
-	// Keep the output symmetrical with encryptionFlag.
 	if f == nil || f.dst == nil || *f.dst == nil {
 		return ""
 	}
@@ -155,6 +167,11 @@ func (f *compressionFlag) String() string {
 	b, _ := json.Marshal(*f.dst)
 	return string(b)
 }
+
+// Set parses compression from string.
+// In: val string - none|fast|speed|best
+// Out: error - parsing failure
+// Ex: Set("fast") → nil
 func (f *compressionFlag) Set(val string) error {
 	comp, err := parseCompression(val)
 	if err != nil {
@@ -164,12 +181,12 @@ func (f *compressionFlag) Set(val string) error {
 	return nil
 }
 
-// encryptionFlag implements flag.Value for *qdb.Encryption.
-// Decision rationale:
-// - Double pointer allows distinguishing unset from default
-// - String representation matches command-line input format
+// encryptionFlag: CLI flag wrapper for qdb.Encryption pointer
 type encryptionFlag struct{ dst **qdb.Encryption }
 
+// String returns encryption as string.
+// Out: string - none|aes
+// Ex: String() → "aes"
 func (f *encryptionFlag) String() string {
 	if f == nil || f.dst == nil || *f.dst == nil {
 		return ""
@@ -183,6 +200,11 @@ func (f *encryptionFlag) String() string {
 		return ""
 	}
 }
+
+// Set parses encryption from string.
+// In: val string - none|aes
+// Out: error - parsing failure
+// Ex: Set("aes") → nil
 func (f *encryptionFlag) Set(val string) error {
 	enc, err := parseEncryption(val)
 	if err != nil {
@@ -192,13 +214,10 @@ func (f *encryptionFlag) Set(val string) error {
 	return nil
 }
 
-// parseCompression parses string compression values into qdb.Compression constants.
-// Key assumptions:
-// - "fast" and "speed" are synonyms for user convenience
-// - Invalid values return CompNone with error
-// Decision rationale:
-// - Explicit string matching avoids strconv parsing issues
-// - Clear error messages guide users to valid options
+// parseCompression converts string→qdb.Compression.
+// In: val string - none|fast|speed|best
+// Out: qdb.Compression, error
+// Ex: parseCompression("fast") → CompFast, nil
 func parseCompression(val string) (qdb.Compression, error) {
 	switch val {
 	case "none":
@@ -212,13 +231,10 @@ func parseCompression(val string) (qdb.Compression, error) {
 	}
 }
 
-// parseEncryption parses string encryption values into qdb.Encryption constants.
-// Key assumptions:
-// - Only "none" and "aes" are valid options
-// - Invalid values return EncryptNone with error
-// Decision rationale:
-// - Type-safe parsing prevents invalid encryption settings
-// - Defaults to no encryption on error for safety
+// parseEncryption converts string→qdb.Encryption.
+// In: val string - none|aes
+// Out: qdb.Encryption, error
+// Ex: parseEncryption("aes") → EncryptAES, nil
 func parseEncryption(val string) (qdb.Encryption, error) {
 	switch val {
 	case "none":

@@ -1,10 +1,7 @@
-// Package util provides internal utilities for testing and development.
-// This internal package contains helper functions that are not part of
-// the public API but are shared across internal packages.
-// Decision rationale:
-// - Internal package prevents external dependencies
-// - Centralized utilities reduce code duplication
-// - Test helpers isolated from production code
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package util: testing & development utilities
+// Types: none
+// Ex: util.RandomAlias() → "a8Bc3dEf9GhI2jKl"
 package util
 
 import (
@@ -12,24 +9,12 @@ import (
 	"math/rand"
 )
 
-// Latin / ASCII characters that are "safe" to use everywhere
-// Decision rationale:
-// - Alphanumeric only avoids special character issues
-// - No ambiguous characters (0/O, 1/l)
-// - Safe for filenames, topics, and identifiers
+// latin: safe alphanumeric chars for IDs, avoids ambiguous chars
 const latin = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
-// RandomAlias generates a 16-character random string suitable for identifiers.
-// Key assumptions:
-// - Uses global rand source (not cryptographically secure)
-// - Fixed length of 16 characters
-// - Only alphanumeric characters
-// Decision rationale:
-// - Buffer pre-allocation avoids repeated allocations
-// - 16 chars provides sufficient uniqueness for testing
-// Performance trade-offs:
-// - bytes.Buffer is efficient for small strings
-// - Single allocation for entire string
+// RandomAlias generates 16-char alphanumeric ID.
+// Out: string - [A-Za-z0-9]{16}
+// Ex: RandomAlias() → "a8Bc3dEf9GhI2jKl"
 func RandomAlias() string {
 	const size = 16
 	var buffer bytes.Buffer
@@ -40,18 +25,15 @@ func RandomAlias() string {
 	return buffer.String()
 }
 
-// RandomTopicName generates a random NATS topic name for testing.
-// Decision rationale:
-// - Delegates to RandomAlias for consistency
-// - Topic names don't need special formatting
-// - Avoids collision in concurrent tests
+// RandomTopicName creates test topic name.
+// Out: string - 16-char topic
+// Ex: RandomTopicName() → "topic1a2b3c4d5e6"
 func RandomTopicName() string {
 	return RandomAlias()
 }
 
-// GenerateTestData creates sample messages for parser testing.
-// Decision rationale:
-// - Placeholder for future test data generation
-// - Will support multiple formats (JSON, CSV, etc)
+// GenerateTestData creates test messages (TODO).
+// Out: ∅ - placeholder
+// Ex: GenerateTestData() → TODO
 func GenerateTestData() {
 }

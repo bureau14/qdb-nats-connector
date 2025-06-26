@@ -1,3 +1,7 @@
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package parser: message transformation pipeline
+// Types: Parser, JsonParser, NoopParser
+// Ex: parser.NewJsonParser().Parse(msg) → []WriterTable
 package parser
 
 import (
@@ -9,61 +13,37 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// NoopParser provides basic parser orchestration functionality.
-//
-// NoopParser serves as a simple implementation that validates messages
-// but does not perform actual parsing. It's primarily used for testing
-// and as a placeholder until parser plugins are implemented.
-//
-// Key assumptions:
-// - Used when no specific parser is configured
-// - Returns empty result for valid messages
-// - Validates message structure only
+// NoopParser: validation-only parser for testing, returns empty tables
 type NoopParser struct {
 }
 
-// NewNoopParser creates a noop parser instance.
+// NewNoopParser creates validation-only parser.
+// Returns:
 //
-// NewNoopParser initializes a basic parser that validates messages
-// but returns empty results. This is primarily used for testing and
-// as a placeholder implementation.
+//	*NoopParser: test parser, returns ∅
+//	error: never fails (interface consistency)
 //
-// Decision rationale:
-// - Provides a simple parser for testing connector integration
-// - Validates basic message structure without transformation
-// - Serves as reference implementation for custom parsers
+// Example:
 //
-// Example usage:
-//
-//	parser, err := NewNoopParser()
-//	if err != nil {
-//	    return fmt.Errorf("failed to initialize parser: %w", err)
-//	}
-//
-// Future enhancements:
-// - Accept ParserConfig for plugin paths and settings
-// - Load and validate plugins during initialization
-// - Return specific errors for plugin loading failures
+//	NewNoopParser() // → parser, nil
 func NewNoopParser() (*NoopParser, error) {
 	slog.Info("Initializing noop parser")
 	return &NoopParser{}, nil
 }
 
-// Parse implements the Parser interface with basic validation.
+// Parse validates msg, returns ∅.
+// Args:
 //
-// This implementation validates the message structure but does not
-// perform actual parsing. It serves as a reference implementation
-// and testing placeholder.
+//	msg: *nats.Msg - NATS message for validation
 //
-// Decision rationale:
-// - Provides minimal parser implementation for testing
-// - Validates message structure consistently
-// - Returns empty result to indicate successful validation
+// Returns:
 //
-// Error handling:
-// - Returns ConnectorError with ErrCodeParsingFailed for invalid messages
-// - Nil message returns error immediately
-// - Empty message data is considered an error
+//	[]qdb.WriterTable: empty slice (testing only)
+//	error: ParsingFailed on nil/empty msg
+//
+// Example:
+//
+//	Parse(msg) // → [], nil
 func (p *NoopParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	if msg == nil {
 		return nil, errors.NewParsingFailedError("noop_parser", fmt.Errorf("nil message"))

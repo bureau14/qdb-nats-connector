@@ -12,6 +12,7 @@ import (
 
 	"github.com/bureau14/qdb-nats-connector/connector"
 	"github.com/bureau14/qdb-nats-connector/internal/logging"
+	"github.com/bureau14/qdb-nats-connector/internal/parser"
 )
 
 var usageStr = `
@@ -75,8 +76,15 @@ func main() {
 
 	slog.Info("Parsed configuration options", "options", opts)
 
-	c, err := connector.NewConnector(opts)
+	// Create JSON parser
+	jsonParser, err := parser.NewJsonParser()
+	if err != nil {
+		slog.Error("Unable to create JSON parser", "error", err)
+		os.Exit(1)
+	}
 
+	// Create connector with JSON parser
+	c, err := connector.NewConnector(opts, jsonParser)
 	if err != nil {
 		slog.Error("Unable to launch NATS connector", "error", err, "connector", c)
 		os.Exit(1)

@@ -195,7 +195,7 @@ func TestSource_Subscribe(t *testing.T) {
 
 				require.NoError(t, err)
 
-				for _ = range tt.messageCount {
+				for i := 0; i < tt.messageCount; i++ {
 					err = source.NatsConn.Publish(source.Options.Topic, []byte("test message"))
 					require.NoError(t, err)
 				}

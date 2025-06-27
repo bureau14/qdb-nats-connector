@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,6 +18,9 @@ import (
 // usageStr: CLI help text with all connector options
 var usageStr = `
 Usage: qdb-nats-connector [options]
+
+Configuration Options:
+    --config <file>                  Configuration file path (yaml, json, toml)
 
 NATS Options:
     -n, --nats <host>:<port>         NATS cluster endpoint (e.g. 10.192.172.166:4222)
@@ -38,6 +40,21 @@ Performance Options:
 General Options:
     -P, --pid <file>                 File to store PID
     -h, --help                       Show this message
+
+Environment Variables:
+    All options can be set via environment variables with QDB_NATS_ prefix.
+    Examples: QDB_NATS_NATS_ENDPOINT, QDB_NATS_NATS_TOPIC, QDB_NATS_QDB_CLUSTER_URI
+
+Configuration Files:
+    Default locations: ./qdb-nats-connector.yaml, ~/.config/qdb-nats-connector/qdb-nats-connector.yaml
+    Example config file structure:
+      nats:
+        endpoint: "nats://localhost:4222"
+        topic: "sensors.>"
+      qdb:
+        cluster_uri: "qdb://127.0.0.1:2836"
+        compression: "best"
+        encryption: "none"
 `
 
 // usage prints CLI help & exits
@@ -60,12 +77,8 @@ func main() {
 	// Setup structured logging
 	logging.SetupDefault("exe", exe)
 
-	// Create a FlagSet and sets the usage
-	fs := flag.NewFlagSet(exe, flag.ExitOnError)
-	fs.Usage = usage
-
-	// 1. Parse options: CLI overrides config files
-	opts, err := connector.ConfigureOptions(fs, os.Args[1:], fs.Usage)
+	// 1. Load configuration: CLI overrides env vars, config files override defaults
+	opts, err := connector.LoadConfig(os.Args[1:], usage)
 
 	if err != nil {
 		slog.Error("Unable to parse options", "error", err)

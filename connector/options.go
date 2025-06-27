@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"strings"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 )
 
 // Options: connector config aggregating NATS & QDB settings
@@ -31,6 +34,159 @@ var (
 	_ sink.OptionsProvider   = (*Options)(nil)
 	_ source.OptionsProvider = (*Options)(nil)
 )
+
+// LoadConfig loads configuration using viper with proper precedence.
+// Precedence: defaults < config file < env vars < CLI flags
+// Args:
+//
+//	args: []string - command line arguments
+//	printHelp: func() - help display callback
+//
+// Returns:
+//
+//	*Options: loaded config (nil if help shown)
+//	error: loading/validation fails
+//
+// Example:
+//
+//	LoadConfig(os.Args[1:], usage) // → opts, nil
+func LoadConfig(args []string, printHelp func()) (*Options, error) {
+	v := viper.New()
+	fs := pflag.NewFlagSet("qdb-nats-connector", pflag.ExitOnError)
+
+	// Configure viper
+	v.SetConfigName("qdb-nats-connector")
+	v.SetConfigType("yaml")
+	v.AddConfigPath(".")
+	v.AddConfigPath("$HOME/.config/qdb-nats-connector")
+	v.AddConfigPath("/etc/qdb-nats-connector")
+
+	// Set environment variable prefix and replacer
+	v.SetEnvPrefix("QDB_NATS")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+	v.AutomaticEnv()
+
+	// Set defaults
+	v.SetDefault("nats.endpoint", nats.DefaultURL)
+	v.SetDefault("qdb.compression", "best")
+	v.SetDefault("qdb.encryption", "none")
+
+	opts := &Options{}
+	var showHelp bool
+	var configFile string
+
+	// Define CLI flags with pflag
+	fs.BoolVarP(&showHelp, "help", "h", false, "Show this message.")
+	fs.StringVar(&configFile, "config", "", "Configuration file path")
+
+	fs.StringVarP(&opts.sourceOptions.Endpoint, "nats", "n", nats.DefaultURL, "NATS cluster endpoint (e.g. 10.192.172.166:4222)")
+	fs.StringVarP(&opts.sourceOptions.Topic, "topic", "t", "", "Topic to subscribe to.")
+	fs.StringVarP(&opts.PidFile, "pid", "P", "", "File to store PID.")
+
+	// QuasarDB connection flags
+	fs.StringVar(&opts.sinkOptions.ClusterUri, "qdb", "", "QuasarDB cluster endpoint (e.g. qdb://127.0.0.1:2836)")
+	fs.StringVar(&opts.sinkOptions.ClusterPublicKeyFile, "qdb-pubkey-file", "", "QuasarDB cluster public key file")
+	fs.StringVar(&opts.sinkOptions.UserSecurityFile, "qdb-user-sec-file", "", "QuasarDB user security file")
+
+	// Compression and encryption flags (using string for simplicity with pflag)
+	var compressionStr, encryptionStr string
+	fs.StringVar(&compressionStr, "qdb-compression", "", "QuasarDB sink compression (none|best|speed)")
+	fs.StringVar(&encryptionStr, "qdb-encryption", "", "QuasarDB sink encryption (none|aes)")
+
+	// Performance-tuning flags
+	var pm, ib uint
+	fs.UintVar(&pm, "qdb-client-max-parallelism", 0, "QuasarDB sink max parallelism")
+	fs.UintVar(&ib, "qdb-client-inbuf-size", 0, "QuasarDB sink max input buffer size")
+
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+
+	if showHelp {
+		printHelp()
+		return nil, nil
+	}
+
+	// Load config file if specified
+	if configFile != "" {
+		v.SetConfigFile(configFile)
+	}
+
+	// Read config file (ignore if not found)
+	if err := v.ReadInConfig(); err != nil {
+		// Only return error if config file was explicitly specified
+		if configFile != "" {
+			return nil, fmt.Errorf("error reading config file: %w", err)
+		}
+		// For automatic config file discovery, ignore all errors (file not found, parse errors, etc.)
+	}
+
+	// Override with viper values where CLI flags weren't explicitly set
+	// This maintains CLI flag precedence while allowing config file and env vars
+	if !fs.Changed("nats") {
+		opts.sourceOptions.Endpoint = v.GetString("nats.endpoint")
+	}
+	if !fs.Changed("topic") {
+		opts.sourceOptions.Topic = v.GetString("nats.topic")
+	}
+	if !fs.Changed("pid") {
+		opts.PidFile = v.GetString("pid")
+	}
+	if !fs.Changed("qdb") {
+		opts.sinkOptions.ClusterUri = v.GetString("qdb.cluster_uri")
+	}
+	if !fs.Changed("qdb-pubkey-file") {
+		opts.sinkOptions.ClusterPublicKeyFile = v.GetString("qdb.cluster_public_key_file")
+	}
+	if !fs.Changed("qdb-user-sec-file") {
+		opts.sinkOptions.UserSecurityFile = v.GetString("qdb.user_security_file")
+	}
+
+	// Handle compression
+	if fs.Changed("qdb-compression") {
+		comp, err := parseCompression(compressionStr)
+		if err != nil {
+			return nil, err
+		}
+		opts.sinkOptions.Compression = &comp
+	} else if compStr := v.GetString("qdb.compression"); compStr != "" {
+		comp, err := parseCompression(compStr)
+		if err != nil {
+			return nil, err
+		}
+		opts.sinkOptions.Compression = &comp
+	}
+
+	// Handle encryption
+	if fs.Changed("qdb-encryption") {
+		enc, err := parseEncryption(encryptionStr)
+		if err != nil {
+			return nil, err
+		}
+		opts.sinkOptions.Encryption = &enc
+	} else if encStr := v.GetString("qdb.encryption"); encStr != "" {
+		enc, err := parseEncryption(encStr)
+		if err != nil {
+			return nil, err
+		}
+		opts.sinkOptions.Encryption = &enc
+	}
+
+	// Handle performance settings
+	if fs.Changed("qdb-client-max-parallelism") {
+		opts.sinkOptions.ClientMaxParallelism = &pm
+	} else if maxPar := v.GetUint("qdb.client_max_parallelism"); maxPar > 0 {
+		opts.sinkOptions.ClientMaxParallelism = &maxPar
+	}
+
+	if fs.Changed("qdb-client-inbuf-size") {
+		opts.sinkOptions.ClientMaxInBufSize = &ib
+	} else if maxBuf := v.GetUint("qdb.client_max_inbuf_size"); maxBuf > 0 {
+		opts.sinkOptions.ClientMaxInBufSize = &maxBuf
+	}
+
+	return opts, nil
+}
 
 // ConfigureOptions parses CLI args→Options.
 // Args:

@@ -7,9 +7,20 @@
                 "@modelcontextprotocol/server-sequential-thinking"
             ]
         },
+        "context7": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@upstash/context7-mcp"
+            ]
+        },
         "git": {
-            "command": "python3",
-            "args": ["-m", "mcp_server_git"]
+            "command": "uvx",
+            "args": ["--no-cache", "mcp-server-git"]
+        },
+        "time": {
+            "command": "uvx",
+            "args": ["--no-cache", "mcp-server-time", "--local-timezone=Asia/Phnom_Penh"]
         },
         "gopls": {
             "command": "mcp-gopls"

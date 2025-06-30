@@ -70,6 +70,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("nats.endpoint", nats.DefaultURL)
 	v.SetDefault("qdb.compression", "best")
 	v.SetDefault("qdb.encryption", "none")
+	v.SetDefault("qdb.push_mode", "async")
 
 	opts := &Options{}
 	var showHelp bool
@@ -88,10 +89,11 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.StringVar(&opts.sinkOptions.ClusterPublicKeyFile, "qdb-pubkey-file", "", "QuasarDB cluster public key file")
 	fs.StringVar(&opts.sinkOptions.UserSecurityFile, "qdb-user-sec-file", "", "QuasarDB user security file")
 
-	// Compression and encryption flags (using string for simplicity with pflag)
-	var compressionStr, encryptionStr string
+	// Compression, encryption, and push mode flags (using string for simplicity with pflag)
+	var compressionStr, encryptionStr, pushModeStr string
 	fs.StringVar(&compressionStr, "qdb-compression", "", "QuasarDB sink compression (none|best|speed)")
 	fs.StringVar(&encryptionStr, "qdb-encryption", "", "QuasarDB sink encryption (none|aes)")
+	fs.StringVar(&pushModeStr, "qdb-push-mode", "", "QuasarDB sink push mode (transactional|async|fast)")
 
 	// Performance-tuning flags
 	var pm, ib uint
@@ -148,13 +150,13 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 		if err != nil {
 			return nil, err
 		}
-		opts.sinkOptions.Compression = &comp
+		opts.sinkOptions.Compression = comp
 	} else if compStr := v.GetString("qdb.compression"); compStr != "" {
 		comp, err := parseCompression(compStr)
 		if err != nil {
 			return nil, err
 		}
-		opts.sinkOptions.Compression = &comp
+		opts.sinkOptions.Compression = comp
 	}
 
 	// Handle encryption
@@ -170,6 +172,21 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 			return nil, err
 		}
 		opts.sinkOptions.Encryption = &enc
+	}
+
+	// Handle push mode
+	if fs.Changed("qdb-push-mode") {
+		pushMode, err := parsePushMode(pushModeStr)
+		if err != nil {
+			return nil, err
+		}
+		opts.sinkOptions.PushMode = pushMode
+	} else if pushModeStr := v.GetString("qdb.push_mode"); pushModeStr != "" {
+		pushMode, err := parsePushMode(pushModeStr)
+		if err != nil {
+			return nil, err
+		}
+		opts.sinkOptions.PushMode = pushMode
 	}
 
 	// Handle performance settings
@@ -230,6 +247,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 	fs.Var(&compressionFlag{dst: &opts.sinkOptions.Compression}, "qdb-compression", "QuasarDB sink compression (none|best|speed)")
 	// Encryption (custom flag.Value)
 	fs.Var(&encryptionFlag{dst: &opts.sinkOptions.Encryption}, "qdb-encryption", "QuasarDB sink encryption (none|aes)")
+	// Push mode (custom flag.Value)
+	fs.Var(&pushModeFlag{dst: &opts.sinkOptions.PushMode}, "qdb-push-mode", "QuasarDB sink push mode (transactional|async|fast)")
 
 	// Performance-tuning flags
 	var pm uint
@@ -285,9 +304,9 @@ func (o *Options) UserSecurityFile() string { return o.sinkOptions.UserSecurityF
 func (o *Options) Encryption() *qdb.Encryption { return o.sinkOptions.Encryption }
 
 // Compression returns QDB compression mode.
-// Out: *qdb.Compression - none|fast|best
-// Ex: Compression() → &CompFast
-func (o *Options) Compression() *qdb.Compression { return o.sinkOptions.Compression }
+// Out: qdb.Compression - none|fast|best
+// Ex: Compression() → CompFast
+func (o *Options) Compression() qdb.Compression { return o.sinkOptions.Compression }
 
 // ClientMaxParallelism returns QDB max parallelism.
 // Out: *uint - worker threads
@@ -309,14 +328,14 @@ func (o *Options) Endpoint() string { return o.sourceOptions.Endpoint }
 // Ex: Topic() → "sensors.>"
 func (o *Options) Topic() string { return o.sourceOptions.Topic }
 
-// compressionFlag: CLI flag wrapper for qdb.Compression pointer
-type compressionFlag struct{ dst **qdb.Compression }
+// compressionFlag: CLI flag wrapper for qdb.Compression value
+type compressionFlag struct{ dst *qdb.Compression }
 
 // String returns compression as JSON.
 // Out: string - JSON representation
 // Ex: String() → "\"fast\""
 func (f *compressionFlag) String() string {
-	if f == nil || f.dst == nil || *f.dst == nil {
+	if f == nil || f.dst == nil {
 		return ""
 	}
 
@@ -333,7 +352,42 @@ func (f *compressionFlag) Set(val string) error {
 	if err != nil {
 		return err
 	}
-	*f.dst = &comp
+	*f.dst = comp
+	return nil
+}
+
+// pushModeFlag: CLI flag wrapper for qdb.WriterPushMode value
+type pushModeFlag struct{ dst *qdb.WriterPushMode }
+
+// String returns push mode as string.
+// Out: string - transactional|async|fast
+// Ex: String() → "async"
+func (f *pushModeFlag) String() string {
+	if f == nil || f.dst == nil {
+		return ""
+	}
+	switch *f.dst {
+	case qdb.WriterPushModeTransactional:
+		return "transactional"
+	case qdb.WriterPushModeAsync:
+		return "async"
+	case qdb.WriterPushModeFast:
+		return "fast"
+	default:
+		return ""
+	}
+}
+
+// Set parses push mode from string.
+// In: val string - transactional|async|fast
+// Out: error - parsing failure
+// Ex: Set("async") → nil
+func (f *pushModeFlag) Set(val string) error {
+	pushMode, err := parsePushMode(val)
+	if err != nil {
+		return err
+	}
+	*f.dst = pushMode
 	return nil
 }
 
@@ -399,5 +453,22 @@ func parseEncryption(val string) (qdb.Encryption, error) {
 		return qdb.EncryptAES, nil
 	default:
 		return qdb.EncryptNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid encryption value: %s (valid values: none, aes)", val))
+	}
+}
+
+// parsePushMode converts string→qdb.WriterPushMode.
+// In: val string - transactional|async|fast
+// Out: qdb.WriterPushMode, error
+// Ex: parsePushMode("async") → WriterPushModeAsync, nil
+func parsePushMode(val string) (qdb.WriterPushMode, error) {
+	switch val {
+	case "transactional":
+		return qdb.WriterPushModeTransactional, nil
+	case "async":
+		return qdb.WriterPushModeAsync, nil
+	case "fast":
+		return qdb.WriterPushModeFast, nil
+	default:
+		return qdb.WriterPushModeAsync, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid push mode value: %s (valid values: transactional, async, fast)", val))
 	}
 }

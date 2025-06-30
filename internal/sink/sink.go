@@ -7,7 +7,6 @@ package sink
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -153,11 +152,9 @@ func newWorker(id int, opts Options) (*worker, error) {
 			return nil, err
 		}
 	}
-	if opts.Compression != nil {
-		if err := handle.SetCompression(*opts.Compression); err != nil {
-			handle.Close()
-			return nil, err
-		}
+	if err := handle.SetCompression(opts.Compression); err != nil {
+		handle.Close()
+		return nil, err
 	}
 	if opts.ClientMaxParallelism != nil {
 		if err := handle.SetClientMaxParallelism(*opts.ClientMaxParallelism); err != nil {
@@ -211,8 +208,8 @@ func (w *worker) processTables(tables []*qdb.WriterTable) error {
 		return nil
 	}
 
-	backoff := 100 * time.Millisecond
-	maxBackoff := 5 * time.Second
+	backoff := 3 * time.Second
+	maxBackoff := 300 * time.Second
 
 	for attempt := range w.options.RetryAttempts {
 		if attempt > 0 {
@@ -225,7 +222,7 @@ func (w *worker) processTables(tables []*qdb.WriterTable) error {
 
 		// Push all tables
 		if err := w.pushTables(tables); err != nil {
-			if w.isRetryable(err) && attempt < w.options.RetryAttempts-1 {
+			if attempt < w.options.RetryAttempts-1 {
 				slog.Debug("Retryable error, backing off", "worker_id", w.id, "attempt", attempt+1, "backoff", backoff, "error", err)
 				continue
 			}
@@ -243,7 +240,9 @@ func (w *worker) processTables(tables []*qdb.WriterTable) error {
 // Out: error - QDB write error
 // Ex: pushTables(tables) → nil
 func (w *worker) pushTables(tables []*qdb.WriterTable) error {
-	writer := qdb.NewWriterWithDefaultOptions()
+	// Create writer options with push mode
+	writerOpts := qdb.NewWriterOptions().WithPushMode(w.options.PushMode)
+	writer := qdb.NewWriter(writerOpts)
 
 	// Add all tables to the writer
 	for _, table := range tables {
@@ -254,64 +253,6 @@ func (w *worker) pushTables(tables []*qdb.WriterTable) error {
 
 	// Push to QuasarDB
 	return writer.Push(w.handle)
-}
-
-// isRetryable checks if err is transient.
-// In: err error - QDB error
-// Out: bool - true for retry
-// Ex: isRetryable(pipelineFull) → true
-func (w *worker) isRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errStr := strings.ToLower(err.Error())
-
-	// Non-retryable errors (permanent failures)
-	nonRetryablePatterns := []string{
-		"authentication",
-		"authorization",
-		"permission denied",
-		"invalid credentials",
-		"invalid table",
-		"invalid column",
-		"schema mismatch",
-		"invalid data type",
-		"malformed",
-		"invalid handle",
-		"quota exceeded",
-		"storage full",
-	}
-
-	for _, pattern := range nonRetryablePatterns {
-		if strings.Contains(errStr, pattern) {
-			return false
-		}
-	}
-
-	// Retryable errors (transient failures)
-	retryablePatterns := []string{
-		"timeout",
-		"connection",
-		"network",
-		"pipeline full",
-		"busy",
-		"overloaded",
-		"throttled",
-		"unavailable",
-		"temporary",
-		"retry",
-	}
-
-	for _, pattern := range retryablePatterns {
-		if strings.Contains(errStr, pattern) {
-			return true
-		}
-	}
-
-	// Default to retryable for unknown errors to be conservative
-	// This prevents permanent failures from unknown error types
-	return true
 }
 
 // close releases QDB handle.

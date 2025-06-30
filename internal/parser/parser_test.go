@@ -53,7 +53,7 @@ func TestParserInterfaceWhenUsingDifferentParsersShouldWorkPolymorphically(t *te
 			}(),
 			msg: &nats.Msg{
 				Subject: "test.topic",
-				Data:    []byte(`{"key": "value"}`),
+				Data:    []byte(`{"$table": "foobar", "key": "value"}`),
 			},
 			wantErr: false,
 		},
@@ -82,7 +82,7 @@ func TestParserInterfaceWhenUsingDifferentParsersShouldWorkPolymorphically(t *te
 func TestParserPolymorphismWhenSwappingParsersShouldWorkAtRuntime(t *testing.T) {
 	msg := &nats.Msg{
 		Subject: "test.topic",
-		Data:    []byte(`{"temperature": 23.5}`),
+		Data:    []byte(`{"$table": "foobar", "temperature": 23.5}`),
 	}
 
 	// Create different parser implementations

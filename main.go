@@ -34,6 +34,7 @@ QuasarDB Connection Options:
     --qdb-compression <type>         QuasarDB sink compression (none|fast|speed|best)
 
 Performance Options:
+    --qdb-push-mode <mode>           QuasarDB sink push mode (sync|async|fast)
     --qdb-client-max-parallelism <n> QuasarDB sink max parallelism
     --qdb-client-inbuf-size <size>   QuasarDB sink max input buffer size
 
@@ -55,6 +56,7 @@ Configuration Files:
         cluster_uri: "qdb://127.0.0.1:2836"
         compression: "best"
         encryption: "none"
+        push_mode: "async"
 `
 
 // usage prints CLI help & exits

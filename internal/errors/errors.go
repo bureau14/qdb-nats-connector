@@ -45,6 +45,9 @@ const (
 // Out: string - formatted error message
 // Ex: Error() → "[sink] failed to write (code: 1005)"
 func (e *ConnectorError) Error() string {
+	if e.Wrapped != nil {
+		return fmt.Sprintf("[%s] %s: %s (code: %d)", e.Component, e.Message, e.Wrapped.Error(), e.Code)
+	}
 	return fmt.Sprintf("[%s] %s (code: %d)", e.Component, e.Message, e.Code)
 }
 

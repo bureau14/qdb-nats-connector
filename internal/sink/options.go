@@ -21,8 +21,11 @@ type Options struct {
 	UserSecret           string `json:"user_secret"`
 	Encryption           *qdb.Encryption
 
+	// Defaults to `qdb.WriterPushModeAsync`
+	PushMode qdb.WriterPushMode
+
 	// Defaults to `qdb.CompBest`
-	Compression *qdb.Compression
+	Compression qdb.Compression
 
 	ClientMaxParallelism *uint
 	ClientMaxInBufSize   *uint
@@ -46,12 +49,12 @@ type Options struct {
 //
 //	NewOptions(WithClusterUri("qdb://host:2836")) // → opts
 func NewOptions(opts ...Option) Options {
-	defComp := qdb.CompBest
 	options := Options{
-		Compression:   &defComp,
+		PushMode:      qdb.WriterPushModeAsync,
+		Compression:   qdb.CompBest,
 		NumWriters:    4,
 		QueueSize:     100,
-		RetryAttempts: 3,
+		RetryAttempts: 10,
 	}
 	for _, opt := range opts {
 		options = opt(options)
@@ -136,11 +139,22 @@ func WithEncryption(enc *qdb.Encryption) Option {
 	}
 }
 
-// WithCompression sets compression level.
-// In: c *qdb.Compression - none|fast|best
+// WithPushMode sets push mode.
+// In: mode qdb.WriterPushMode - transactional|async|fast
 // Out: Option
-// Ex: WithCompression(&qdb.CompFast)
-func WithCompression(c *qdb.Compression) Option {
+// Ex: WithPushMode(qdb.WriterPushModeTransactional)
+func WithPushMode(mode qdb.WriterPushMode) Option {
+	return func(o Options) Options {
+		o.PushMode = mode
+		return o
+	}
+}
+
+// WithCompression sets compression level.
+// In: c qdb.Compression - none|fast|best
+// Out: Option
+// Ex: WithCompression(qdb.CompFast)
+func WithCompression(c qdb.Compression) Option {
 	return func(o Options) Options {
 		o.Compression = c
 		return o
@@ -208,7 +222,7 @@ type OptionsProvider interface {
 	ClusterPublicKeyFile() string
 	UserSecurityFile() string
 	Encryption() *qdb.Encryption
-	Compression() *qdb.Compression
+	Compression() qdb.Compression
 	ClientMaxParallelism() *uint
 	ClientMaxInBufSize() *uint
 }

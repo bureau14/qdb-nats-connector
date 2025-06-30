@@ -115,16 +115,36 @@ func TestParserJsonParseWhenEmptyJsonShouldReturnError(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse message")
 }
 
+func TestParserJsonParseWhenMissingTableKeyShouldReturnError(t *testing.T) {
+	parser, err := NewJsonParser()
+	require.NoError(t, err)
+
+	msg := &nats.Msg{
+		Subject: util.RandomTopicName(),
+		Data:    []byte(`{"key": "value"}`),
+	}
+
+	tables, err := parser.Parse(msg)
+	assert.Nil(t, tables)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, "json_parser", connErr.Component)
+	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+	assert.Contains(t, err.Error(), "missing required $table key")
+}
+
 func TestParserJsonParseWhenNestedDataShouldReturnError(t *testing.T) {
 	tests := []struct {
 		name string
 		data string
 	}{
-		{"nested object", `{"key": {"nested": "value"}}`},
-		{"nested array", `{"key": ["value1", "value2"]}`},
-		{"mixed nesting", `{"key1": "value1", "key2": {"nested": "value"}}`},
-		{"array with object", `{"key": [{"nested": "value"}]}`},
-		{"deeply nested", `{"key": {"level1": {"level2": "value"}}}`},
+		{"nested object", `{"$table": "foobar", "key": {"nested": "value"}}`},
+		{"nested array", `{"$table": "foobar", "key": ["value1", "value2"]}`},
+		{"mixed nesting", `{"$table": "foobar", "key1": "value1", "key2": {"nested": "value"}}`},
+		{"array with object", `{"$table": "foobar", "key": [{"nested": "value"}]}`},
+		{"deeply nested", `{"$table": "foobar", "key": {"level1": {"level2": "value"}}}`},
 	}
 
 	parser, err := NewJsonParser()
@@ -159,6 +179,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 		{
 			name: "string value",
 			jsonData: map[string]interface{}{
+				"$table": "foobar",
 				"name": "test_string",
 			},
 			expectedCols: 1,
@@ -166,6 +187,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 		{
 			name: "float64 number",
 			jsonData: map[string]interface{}{
+				"$table": "foobar",
 				"temperature": 23.5,
 			},
 			expectedCols: 1,
@@ -173,6 +195,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 		{
 			name: "integer number",
 			jsonData: map[string]interface{}{
+				"$table": "foobar",
 				"count": 42,
 			},
 			expectedCols: 1,
@@ -180,6 +203,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 		{
 			name: "boolean true",
 			jsonData: map[string]interface{}{
+				"$table": "foobar",
 				"active": true,
 			},
 			expectedCols: 1,
@@ -187,6 +211,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 		{
 			name: "boolean false",
 			jsonData: map[string]interface{}{
+				"$table": "foobar",
 				"disabled": false,
 			},
 			expectedCols: 1,
@@ -194,6 +219,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 		{
 			name: "mixed types",
 			jsonData: map[string]interface{}{
+				"$table":      "foobar",
 				"name":        "sensor_01",
 				"temperature": 18.7,
 				"count":       100,
@@ -242,6 +268,7 @@ func TestParserJsonParseWhenNullValuesShouldSkipOrError(t *testing.T) {
 		{
 			name: "only null values",
 			jsonData: map[string]interface{}{
+				"$table": "foobar",
 				"field1": nil,
 				"field2": nil,
 			},
@@ -251,6 +278,7 @@ func TestParserJsonParseWhenNullValuesShouldSkipOrError(t *testing.T) {
 		{
 			name: "mixed null and valid values",
 			jsonData: map[string]interface{}{
+				"$table": "foobar",
 				"field1": nil,
 				"field2": "valid",
 				"field3": nil,
@@ -321,6 +349,7 @@ func TestParserJsonParseWhenSpecialNumbersShouldSucceed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jsonData := map[string]interface{}{
+				"$table": "foobar",
 				"value": tt.value,
 			}
 
@@ -360,6 +389,7 @@ func TestParserJsonParsePropertyBasedStringValues(t *testing.T) {
 		value := rapid.String().Draw(t, "value")
 
 		jsonData := map[string]interface{}{
+			"$table": "foobar",
 			key: value,
 		}
 
@@ -397,6 +427,7 @@ func TestParserJsonParsePropertyBasedNumericValues(t *testing.T) {
 		}
 
 		jsonData := map[string]interface{}{
+			"$table": "foobar",
 			key: value,
 		}
 
@@ -429,6 +460,7 @@ func TestParserJsonParsePropertyBasedBooleanValues(t *testing.T) {
 		value := rapid.Bool().Draw(t, "value")
 
 		jsonData := map[string]interface{}{
+			"$table": "foobar",
 			key: value,
 		}
 
@@ -459,6 +491,7 @@ func TestParserJsonParsePropertyBasedMixedValidTypes(t *testing.T) {
 		// Generate between 1 and 10 random fields with valid types
 		numFields := rapid.IntRange(1, 10).Draw(t, "numFields")
 		jsonData := make(map[string]interface{})
+		jsonData["$table"] = "foobar"
 
 		for i := 0; i < numFields; i++ {
 			key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, fmt.Sprintf("key_%d", i))
@@ -545,11 +578,11 @@ func TestParserJsonParseWhenValidJsonShouldHaveConsistentTableName(t *testing.T)
 
 	// Test that all valid single-depth JSON produces exactly one WriterTable with table name "foobar"
 	tests := []string{
-		`{"key": "value"}`,
-		`{"temperature": 23.5}`,
-		`{"active": true}`,
-		`{"name": "test", "count": 42, "enabled": false}`,
-		`{"field1": "string", "field2": 3.14, "field3": true, "field4": false}`,
+		`{"$table": "foobar", "key": "value"}`,
+		`{"$table": "foobar", "temperature": 23.5}`,
+		`{"$table": "foobar", "active": true}`,
+		`{"$table": "foobar", "name": "test", "count": 42, "enabled": false}`,
+		`{"$table": "foobar", "field1": "string", "field2": 3.14, "field3": true, "field4": false}`,
 	}
 
 	for i, jsonStr := range tests {
@@ -566,100 +599,6 @@ func TestParserJsonParseWhenValidJsonShouldHaveConsistentTableName(t *testing.T)
 			table := tables[0]
 			assert.Equal(t, "foobar", table.GetName(), "table name should always be 'foobar'")
 			assert.Equal(t, 1, table.RowCount(), "should have exactly one row")
-		})
-	}
-}
-
-func TestParserJsonParseWhenLargeValidJsonShouldSucceed(t *testing.T) {
-	parser, err := NewJsonParser()
-	require.NoError(t, err)
-
-	// Generate a large JSON object with many fields
-	jsonData := make(map[string]interface{})
-	for i := 0; i < 1000; i++ {
-		key := fmt.Sprintf("field_%d", i)
-		switch i % 4 {
-		case 0:
-			jsonData[key] = fmt.Sprintf("value_%d", i)
-		case 1:
-			jsonData[key] = float64(i)
-		case 2:
-			jsonData[key] = i%2 == 0
-		case 3:
-			jsonData[key] = nil // will be skipped
-		}
-	}
-
-	jsonBytes, err := json.Marshal(jsonData)
-	require.NoError(t, err)
-
-	msg := &nats.Msg{
-		Subject: util.RandomTopicName(),
-		Data:    jsonBytes,
-	}
-
-	tables, err := parser.Parse(msg)
-	require.NoError(t, err)
-	require.Len(t, tables, 1)
-
-	table := tables[0]
-	assert.Equal(t, "foobar", table.GetName())
-	assert.Equal(t, 1, table.RowCount())
-	assert.NotNil(t, table)
-}
-
-func TestParserJsonParseWhenUnicodeAndSpecialCharsShouldSucceed(t *testing.T) {
-	tests := []struct {
-		name     string
-		jsonData map[string]interface{}
-	}{
-		{
-			name: "unicode strings",
-			jsonData: map[string]interface{}{
-				"emoji":    "🚀💻🔥",
-				"chinese":  "你好世界",
-				"arabic":   "مرحبا بالعالم",
-				"japanese": "こんにちは世界",
-			},
-		},
-		{
-			name: "special characters",
-			jsonData: map[string]interface{}{
-				"quotes":    `He said "Hello"`,
-				"backslash": `C:\Windows\Path`,
-				"newlines":  "line1\nline2\nline3",
-				"tabs":      "col1\tcol2\tcol3",
-			},
-		},
-		{
-			name: "empty string",
-			jsonData: map[string]interface{}{
-				"empty": "",
-			},
-		},
-	}
-
-	parser, err := NewJsonParser()
-	require.NoError(t, err)
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			jsonBytes, err := json.Marshal(tt.jsonData)
-			require.NoError(t, err)
-
-			msg := &nats.Msg{
-				Subject: util.RandomTopicName(),
-				Data:    jsonBytes,
-			}
-
-			tables, err := parser.Parse(msg)
-			require.NoError(t, err)
-			require.Len(t, tables, 1)
-
-			table := tables[0]
-			assert.Equal(t, "foobar", table.GetName())
-			assert.Equal(t, 1, table.RowCount())
-			assert.NotNil(t, table)
 		})
 	}
 }

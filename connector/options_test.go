@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,4 +130,196 @@ func TestLoadConfigNonExistentConfigFile(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, opts)
 	assert.Contains(t, err.Error(), "error reading config file")
+}
+
+// TestParsePushMode verifies parsePushMode function works correctly.
+func TestParsePushMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected qdb.WriterPushMode
+		wantErr  bool
+	}{
+		{
+			name:     "transactional mode",
+			input:    "transactional",
+			expected: qdb.WriterPushModeTransactional,
+			wantErr:  false,
+		},
+		{
+			name:     "async mode",
+			input:    "async",
+			expected: qdb.WriterPushModeAsync,
+			wantErr:  false,
+		},
+		{
+			name:     "fast mode",
+			input:    "fast",
+			expected: qdb.WriterPushModeFast,
+			wantErr:  false,
+		},
+		{
+			name:     "invalid mode",
+			input:    "invalid",
+			expected: qdb.WriterPushModeAsync,
+			wantErr:  true,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: qdb.WriterPushModeAsync,
+			wantErr:  true,
+		},
+		{
+			name:     "case sensitive",
+			input:    "TRANSACTIONAL",
+			expected: qdb.WriterPushModeAsync,
+			wantErr:  true,
+		},
+		{
+			name:     "with spaces",
+			input:    " transactional ",
+			expected: qdb.WriterPushModeAsync,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parsePushMode(tt.input)
+			
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid push mode value")
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestPushModeFlagString verifies pushModeFlag String method.
+func TestPushModeFlagString(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     qdb.WriterPushMode
+		expected string
+	}{
+		{
+			name:     "transactional mode",
+			mode:     qdb.WriterPushModeTransactional,
+			expected: "transactional",
+		},
+		{
+			name:     "async mode",
+			mode:     qdb.WriterPushModeAsync,
+			expected: "async",
+		},
+		{
+			name:     "fast mode",
+			mode:     qdb.WriterPushModeFast,
+			expected: "fast",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flag := &pushModeFlag{dst: &tt.mode}
+			result := flag.String()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestPushModeFlagStringNilCases verifies pushModeFlag String method with nil values.
+func TestPushModeFlagStringNilCases(t *testing.T) {
+	tests := []struct {
+		name string
+		flag *pushModeFlag
+	}{
+		{
+			name: "nil flag",
+			flag: nil,
+		},
+		{
+			name: "nil dst",
+			flag: &pushModeFlag{dst: nil},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.flag.String()
+			assert.Equal(t, "", result)
+		})
+	}
+}
+
+// TestPushModeFlagSet verifies pushModeFlag Set method.
+func TestPushModeFlagSet(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected qdb.WriterPushMode
+		wantErr  bool
+	}{
+		{
+			name:     "transactional mode",
+			input:    "transactional",
+			expected: qdb.WriterPushModeTransactional,
+			wantErr:  false,
+		},
+		{
+			name:     "async mode",
+			input:    "async",
+			expected: qdb.WriterPushModeAsync,
+			wantErr:  false,
+		},
+		{
+			name:     "fast mode",
+			input:    "fast",
+			expected: qdb.WriterPushModeFast,
+			wantErr:  false,
+		},
+		{
+			name:     "invalid mode",
+			input:    "invalid",
+			expected: qdb.WriterPushModeAsync, // default fallback
+			wantErr:  true,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: qdb.WriterPushModeAsync, // default fallback
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mode qdb.WriterPushMode
+			flag := &pushModeFlag{dst: &mode}
+			
+			err := flag.Set(tt.input)
+			
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid push mode value")
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, mode)
+			}
+		})
+	}
+}
+
+// TestPushModeFlagSetNilDst verifies pushModeFlag Set method with nil dst.
+func TestPushModeFlagSetNilDst(t *testing.T) {
+	flag := &pushModeFlag{dst: nil}
+	
+	// This should panic when trying to dereference nil pointer
+	assert.Panics(t, func() {
+		flag.Set("transactional")
+	})
 }

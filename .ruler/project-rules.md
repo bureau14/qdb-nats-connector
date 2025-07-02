@@ -17,12 +17,16 @@ NATS→QuasarDB connector with pluggable parsers.
 
 ## Structure
 ```
+.golangci.yml # Linting, **NEVER CHANGE**
 main.go       # entry
 connector/    # bridge
 internal/     # utils
+insecure/     # Always ignore
 qdb/          # C headers (readonly)
 scripts/      # bash scripts
+secure/       # Always ignore
 ```
+
 
 ## Environment
 **ALWAYS prefix commands**: `direnv exec . <command>`

@@ -22,8 +22,9 @@
             "command": "uvx",
             "args": ["--no-cache", "mcp-server-time", "--local-timezone=Asia/Phnom_Penh"]
         },
-        "gopls": {
-            "command": "mcp-gopls"
+        "language-server": {
+            "command": "direnv",
+            "args": ["exec", ".", "mcp-language-server", "--workspace", ".", "--lsp", "gopls"]
         }
     }
 }

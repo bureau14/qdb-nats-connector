@@ -192,13 +192,13 @@ func TestSourceSubscribeWhenValidHandlerShouldReceiveMessages(t *testing.T) {
 				require.NoError(t, err)
 
 				publishTestMessages(t, source, tt.messageCount)
-				waitForMessages(t, &wg, 2*time.Second)
+				util.WaitForMessages(t, &wg, 2*time.Second)
 
 				assert.Equal(t, tt.messageCount, int(atomic.LoadInt32(&receivedCount)))
 			} else {
 				err := source.Subscribe(tt.handler)
 				if tt.wantErr {
-					assertError(t, tt, err)
+					util.AssertError(t, tt, err)
 				} else {
 					require.NoError(t, err)
 				}

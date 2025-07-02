@@ -51,7 +51,7 @@ type Options struct {
 func NewOptions(opts ...Option) Options {
 	options := Options{
 		PushMode:      qdb.WriterPushModeAsync,
-		Compression:   qdb.CompBest,
+		Compression:   qdb.CompFast,
 		NumWriters:    4,
 		QueueSize:     100,
 		RetryAttempts: 10,
@@ -59,6 +59,7 @@ func NewOptions(opts ...Option) Options {
 	for _, opt := range opts {
 		options = opt(options)
 	}
+
 	return options
 }
 
@@ -69,6 +70,7 @@ func NewOptions(opts ...Option) Options {
 func WithClusterUri(uri string) Option {
 	return func(o Options) Options {
 		o.ClusterUri = uri
+
 		return o
 	}
 }
@@ -80,6 +82,7 @@ func WithClusterUri(uri string) Option {
 func WithClusterPublicKeyFile(file string) Option {
 	return func(o Options) Options {
 		o.ClusterPublicKeyFile = file
+
 		return o
 	}
 }
@@ -91,6 +94,7 @@ func WithClusterPublicKeyFile(file string) Option {
 func WithClusterPublicKey(key string) Option {
 	return func(o Options) Options {
 		o.ClusterPublicKey = key
+
 		return o
 	}
 }
@@ -102,6 +106,7 @@ func WithClusterPublicKey(key string) Option {
 func WithUserSecurityFile(file string) Option {
 	return func(o Options) Options {
 		o.UserSecurityFile = file
+
 		return o
 	}
 }
@@ -113,6 +118,7 @@ func WithUserSecurityFile(file string) Option {
 func WithUserName(name string) Option {
 	return func(o Options) Options {
 		o.UserName = name
+
 		return o
 	}
 }
@@ -124,6 +130,7 @@ func WithUserName(name string) Option {
 func WithUserSecret(secret string) Option {
 	return func(o Options) Options {
 		o.UserSecret = secret
+
 		return o
 	}
 }
@@ -135,6 +142,7 @@ func WithUserSecret(secret string) Option {
 func WithEncryption(enc *qdb.Encryption) Option {
 	return func(o Options) Options {
 		o.Encryption = enc
+
 		return o
 	}
 }
@@ -146,6 +154,7 @@ func WithEncryption(enc *qdb.Encryption) Option {
 func WithPushMode(mode qdb.WriterPushMode) Option {
 	return func(o Options) Options {
 		o.PushMode = mode
+
 		return o
 	}
 }
@@ -157,6 +166,7 @@ func WithPushMode(mode qdb.WriterPushMode) Option {
 func WithCompression(c qdb.Compression) Option {
 	return func(o Options) Options {
 		o.Compression = c
+
 		return o
 	}
 }
@@ -168,6 +178,7 @@ func WithCompression(c qdb.Compression) Option {
 func WithClientMaxParallelism(par uint) Option {
 	return func(o Options) Options {
 		o.ClientMaxParallelism = &par
+
 		return o
 	}
 }
@@ -179,6 +190,7 @@ func WithClientMaxParallelism(par uint) Option {
 func WithClientMaxInBufSize(size uint) Option {
 	return func(o Options) Options {
 		o.ClientMaxInBufSize = &size
+
 		return o
 	}
 }
@@ -190,6 +202,7 @@ func WithClientMaxInBufSize(size uint) Option {
 func WithNumWriters(num int) Option {
 	return func(o Options) Options {
 		o.NumWriters = num
+
 		return o
 	}
 }
@@ -201,6 +214,7 @@ func WithNumWriters(num int) Option {
 func WithQueueSize(size int) Option {
 	return func(o Options) Options {
 		o.QueueSize = size
+
 		return o
 	}
 }
@@ -212,6 +226,7 @@ func WithQueueSize(size int) Option {
 func WithRetryAttempts(attempts int) Option {
 	return func(o Options) Options {
 		o.RetryAttempts = attempts
+
 		return o
 	}
 }
@@ -248,5 +263,6 @@ func FromOptionsProvider(p OptionsProvider) Options {
 	if p.ClientMaxInBufSize() != nil {
 		opts = append(opts, WithClientMaxInBufSize(*p.ClientMaxInBufSize()))
 	}
+
 	return NewOptions(opts...)
 }

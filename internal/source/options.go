@@ -30,6 +30,7 @@ func NewOptions(opts ...Option) Options {
 	for _, opt := range opts {
 		options = opt(options)
 	}
+
 	return options
 }
 
@@ -40,6 +41,7 @@ func NewOptions(opts ...Option) Options {
 func WithEndpoint(endpoint string) Option {
 	return func(o Options) Options {
 		o.Endpoint = endpoint
+
 		return o
 	}
 }
@@ -51,6 +53,7 @@ func WithEndpoint(endpoint string) Option {
 func WithTopic(topic string) Option {
 	return func(o Options) Options {
 		o.Topic = topic
+
 		return o
 	}
 }
@@ -70,5 +73,6 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithEndpoint(p.Endpoint()),
 		WithTopic(p.Topic()),
 	}
+
 	return NewOptions(opts...)
 }

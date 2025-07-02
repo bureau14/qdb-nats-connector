@@ -49,6 +49,7 @@ func TestParserInterfaceWhenUsingDifferentParsersShouldWorkPolymorphically(t *te
 			name: "JsonParser through interface",
 			parser: func() Parser {
 				jp, _ := NewJsonParser()
+
 				return jp
 			}(),
 			msg: &nats.Msg{
@@ -62,7 +63,7 @@ func TestParserInterfaceWhenUsingDifferentParsersShouldWorkPolymorphically(t *te
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Test through interface
-			var p Parser = tt.parser
+			p := tt.parser
 			tables, err := p.Parse(tt.msg)
 
 			if tt.wantErr {
@@ -118,6 +119,7 @@ func (m *mockParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	if m.returnError != nil {
 		return nil, m.returnError
 	}
+
 	return m.returnTables, nil
 }
 

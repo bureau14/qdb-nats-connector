@@ -70,6 +70,7 @@ func getLogFormat() string {
 	if format == "" {
 		return "json" // default for production
 	}
+
 	return strings.ToLower(format)
 }
 
@@ -78,5 +79,6 @@ func getLogFormat() string {
 // Ex: isDevelopment() → true
 func isDevelopment() bool {
 	env := strings.ToLower(os.Getenv("ENVIRONMENT"))
+
 	return env == "development" || env == "dev" || env == ""
 }

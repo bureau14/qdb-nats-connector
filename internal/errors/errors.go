@@ -41,23 +41,6 @@ const (
 	ErrCodeUnexpectedError
 )
 
-// Error formats error as "[component] message (code: N)".
-// Out: string - formatted error message
-// Ex: Error() → "[sink] failed to write (code: 1005)"
-func (e *ConnectorError) Error() string {
-	if e.Wrapped != nil {
-		return fmt.Sprintf("[%s] %s: %s (code: %d)", e.Component, e.Message, e.Wrapped.Error(), e.Code)
-	}
-	return fmt.Sprintf("[%s] %s (code: %d)", e.Component, e.Message, e.Code)
-}
-
-// Unwrap returns wrapped error for errors.Is().
-// Out: error - underlying cause
-// Ex: Unwrap() → original error
-func (e *ConnectorError) Unwrap() error {
-	return e.Wrapped
-}
-
 // NewNoTopicProvidedError creates missing topic error.
 // Args:
 //
@@ -92,7 +75,7 @@ func NewNoTopicProvidedError(component string) *ConnectorError {
 // Example:
 //
 //	NewInvalidConfigError("sink", "missing URI") // → error
-func NewInvalidConfigError(component string, message string) *ConnectorError {
+func NewInvalidConfigError(component, message string) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeInvalidConfig,
 		Component: component,
@@ -105,7 +88,7 @@ func NewInvalidConfigError(component string, message string) *ConnectorError {
 // In: component, endpoint string, err error
 // Out: *ConnectorError with endpoint metadata
 // Ex: NewConnectionFailedError("sink", "qdb://host:2836", err) → err
-func NewConnectionFailedError(component string, endpoint string, err error) *ConnectorError {
+func NewConnectionFailedError(component, endpoint string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeConnectionFailed,
 		Component: component,
@@ -119,7 +102,7 @@ func NewConnectionFailedError(component string, endpoint string, err error) *Con
 // In: component, topic string, err error
 // Out: *ConnectorError with topic metadata
 // Ex: NewSubscriptionFailedError("source", "data.*", err) → err
-func NewSubscriptionFailedError(component string, topic string, err error) *ConnectorError {
+func NewSubscriptionFailedError(component, topic string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeSubscriptionFailed,
 		Component: component,
@@ -187,7 +170,7 @@ func NewMaxRetriesExceededError(component string, maxAttempts int) *ConnectorErr
 // In: component, message string, err error
 // Out: *ConnectorError
 // Ex: NewUnexpectedError("sink", "panic recovery", err) → err
-func NewUnexpectedError(component string, message string, err error) *ConnectorError {
+func NewUnexpectedError(component, message string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeUnexpectedError,
 		Component: component,
@@ -195,4 +178,22 @@ func NewUnexpectedError(component string, message string, err error) *ConnectorE
 		Wrapped:   err,
 		Metadata:  make(map[string]interface{}),
 	}
+}
+
+// Error formats error as "[component] message (code: N)".
+// Out: string - formatted error message
+// Ex: Error() → "[sink] failed to write (code: 1005)"
+func (e *ConnectorError) Error() string {
+	if e.Wrapped != nil {
+		return fmt.Sprintf("[%s] %s: %s (code: %d)", e.Component, e.Message, e.Wrapped.Error(), e.Code)
+	}
+
+	return fmt.Sprintf("[%s] %s (code: %d)", e.Component, e.Message, e.Code)
+}
+
+// Unwrap returns wrapped error for errors.Is().
+// Out: error - underlying cause
+// Ex: Unwrap() → original error
+func (e *ConnectorError) Unwrap() error {
+	return e.Wrapped
 }

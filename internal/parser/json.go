@@ -58,6 +58,7 @@ func NewJsonParser() (*JsonParser, error) {
 //	NewJsonParserWithConfig("", nil)
 func NewJsonParserWithConfig(defaultTable string, subjectMapping map[string]string) (*JsonParser, error) {
 	slog.Info("Initializing JSON parser", "default_table", defaultTable, "subject_mappings", len(subjectMapping))
+
 	return &JsonParser{
 		DefaultTable:   defaultTable,
 		SubjectToTable: subjectMapping,
@@ -67,7 +68,7 @@ func NewJsonParserWithConfig(defaultTable string, subjectMapping map[string]stri
 // Parse converts JSON msg→QDB tables.
 // Args:
 //
-//	msg: *nats.Msg - JSON payload with required $table key
+//	msg: *nats.Msg - JSON payload with required $table key, optional $timestamp key
 //
 // Returns:
 //
@@ -77,6 +78,7 @@ func NewJsonParserWithConfig(defaultTable string, subjectMapping map[string]stri
 // Example:
 //
 //	Parse({"$table": "sensors", "temp": 23.5}) // → [table], nil
+//	Parse({"$table": "sensors", "$timestamp": "2024-01-01T12:00:00.000000000Z", "temp": 23.5}) // → [table], nil
 func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	if msg == nil {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("nil message"))
@@ -86,14 +88,19 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	}
 
 	// 1. Unmarshal JSON: parse to map
+	slog.Debug("JSON parser received message", "subject", msg.Subject, "data_len", len(msg.Data), "data", string(msg.Data))
+
 	var jsonData map[string]interface{}
-	if err := json.Unmarshal(msg.Data, &jsonData); err != nil {
+	err := json.Unmarshal(msg.Data, &jsonData)
+	if err != nil {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("invalid JSON: %w", err))
 	}
 
 	if len(jsonData) == 0 {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("empty JSON object"))
 	}
+
+	slog.Debug("JSON parsed successfully", "keys", len(jsonData), "data", jsonData)
 
 	// Extract and validate required $table key
 	tableInterface, exists := jsonData["$table"]
@@ -105,6 +112,10 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	if !ok || tableName == "" {
 		return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("$table must be a non-empty string, got %T", tableInterface))
 	}
+
+	// Extract optional $timestamp key and parse it
+	timestamp := parseTimestamp(jsonData)
+	delete(jsonData, "$timestamp") // Always delete, even if not present
 
 	// Remove $table from data before processing columns
 	delete(jsonData, "$table")
@@ -118,6 +129,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		// Skip null values
 		if value == nil {
 			slog.Debug("Skipping null value", "key", key)
+
 			continue
 		}
 
@@ -133,7 +145,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 			// Strings are stored as Blob type (UTF-8 bytes)
 			columns = append(columns, qdb.WriterColumn{
 				ColumnName: key,
-				ColumnType: qdb.TsColumnTypes[0], // blob type
+				ColumnType: qdb.TsColumnBlob, // blob type
 			})
 			values = append(values, []byte(v))
 		case float64, int64, int:
@@ -151,7 +163,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 			}
 			columns = append(columns, qdb.WriterColumn{
 				ColumnName: key,
-				ColumnType: qdb.TsColumnTypes[1], // double type
+				ColumnType: qdb.TsColumnDouble, // double type
 			})
 			values = append(values, doubleVal)
 		case bool:
@@ -164,7 +176,7 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 			}
 			columns = append(columns, qdb.WriterColumn{
 				ColumnName: key,
-				ColumnType: qdb.TsColumnTypes[0], // blob type
+				ColumnType: qdb.TsColumnBlob, // blob type
 			})
 			values = append(values, []byte(boolStr))
 		default:
@@ -185,35 +197,81 @@ func (jp *JsonParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	}
 
 	// Set timestamp for single row
-	table.SetIndex([]time.Time{time.Now()})
+	table.SetIndex([]time.Time{timestamp})
 
 	// 5. Column data population: populate table with parsed values
 	for i, value := range values {
 		switch columns[i].ColumnType {
-		case qdb.TsColumnTypes[0]: // blob type
+		case qdb.TsColumnBlob: // blob type
 			if blobData, ok := value.([]byte); ok {
 				columnData := qdb.NewColumnDataBlob([][]byte{blobData})
-				if err := table.SetData(i, &columnData); err != nil {
+				err := table.SetData(i, &columnData)
+				if err != nil {
 					return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("failed to set blob data for column %d: %w", i, err))
 				}
+				slog.Debug("Set blob data", "column", columns[i].ColumnName, "value", string(blobData))
 			}
-		case qdb.TsColumnTypes[1]: // double type
+		case qdb.TsColumnDouble: // double type
 			if doubleData, ok := value.(float64); ok {
 				columnData := qdb.NewColumnDataDouble([]float64{doubleData})
-				if err := table.SetData(i, &columnData); err != nil {
+				err := table.SetData(i, &columnData)
+				if err != nil {
 					return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("failed to set double data for column %d: %w", i, err))
 				}
+				slog.Debug("Set double data", "column", columns[i].ColumnName, "value", doubleData)
 			}
+		case qdb.TsColumnUninitialized:
+			return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("uninitialized column type for column %d (%s)", i, columns[i].ColumnName))
+		case qdb.TsColumnInt64:
+			return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("int64 column type not supported by JSON parser for column %d (%s)", i, columns[i].ColumnName))
+		case qdb.TsColumnString:
+			return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("string column type not supported by JSON parser for column %d (%s)", i, columns[i].ColumnName))
+		case qdb.TsColumnTimestamp:
+			return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("timestamp column type not supported by JSON parser for column %d (%s)", i, columns[i].ColumnName))
+		case qdb.TsColumnSymbol:
+			return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("symbol column type not supported by JSON parser for column %d (%s)", i, columns[i].ColumnName))
 		default:
-			return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("unsupported column type for column %d", i))
+			return nil, errors.NewParsingFailedError("json_parser", fmt.Errorf("unknown column type %v for column %d (%s)", columns[i].ColumnType, i, columns[i].ColumnName))
 		}
 	}
 
 	slog.Debug("Successfully parsed JSON message",
 		"table", tableName,
 		"columns", len(columns),
-		"subject", msg.Subject)
+		"subject", msg.Subject,
+		"timestamp", timestamp.Format(time.RFC3339Nano))
 
 	return []qdb.WriterTable{table}, nil
 }
 
+// parseTimestamp extracts and parses the $timestamp field from JSON data.
+// Returns the parsed time if valid, otherwise returns current time.
+// Preserves exact behavior: silently falls back to time.Now() for any invalid/missing timestamp.
+func parseTimestamp(data map[string]interface{}) time.Time {
+	timestampInterface, exists := data["$timestamp"]
+	if !exists {
+		slog.Debug("No $timestamp provided, using current time")
+
+		return time.Now()
+	}
+
+	timestampStr, ok := timestampInterface.(string)
+	if !ok || timestampStr == "" {
+		slog.Debug("$timestamp must be a non-empty string, using current time",
+			"type", fmt.Sprintf("%T", timestampInterface))
+
+		return time.Now()
+	}
+
+	parsedTime, err := time.Parse("2006-01-02T15:04:05.999999999Z", timestampStr)
+	if err != nil {
+		slog.Debug("Invalid $timestamp format, using current time",
+			"timestamp", timestampStr, "error", err)
+
+		return time.Now()
+	}
+
+	slog.Debug("Parsed custom timestamp", "timestamp", parsedTime.Format(time.RFC3339Nano))
+
+	return parsedTime
+}

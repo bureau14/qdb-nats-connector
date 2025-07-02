@@ -115,7 +115,7 @@ func TestLoadConfigInvalidConfigFile(t *testing.T) {
 	// Create invalid config file
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "invalid.yaml")
-	err := os.WriteFile(configFile, []byte("invalid: yaml: content: ["), 0644)
+	err := os.WriteFile(configFile, []byte("invalid: yaml: content: ["), 0o600)
 	require.NoError(t, err)
 
 	opts, err := LoadConfig([]string{"--config", configFile}, func() {})
@@ -187,7 +187,7 @@ func TestParsePushMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := parsePushMode(tt.input)
-			
+
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), "invalid push mode value")
@@ -300,9 +300,9 @@ func TestPushModeFlagSet(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var mode qdb.WriterPushMode
 			flag := &pushModeFlag{dst: &mode}
-			
+
 			err := flag.Set(tt.input)
-			
+
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), "invalid push mode value")
@@ -317,9 +317,9 @@ func TestPushModeFlagSet(t *testing.T) {
 // TestPushModeFlagSetNilDst verifies pushModeFlag Set method with nil dst.
 func TestPushModeFlagSetNilDst(t *testing.T) {
 	flag := &pushModeFlag{dst: nil}
-	
+
 	// This should panic when trying to dereference nil pointer
 	assert.Panics(t, func() {
-		flag.Set("transactional")
+		_ = flag.Set("transactional")
 	})
 }

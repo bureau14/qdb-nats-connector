@@ -12,7 +12,7 @@ import (
 func TestErrorsConnectorErrorWhenFormattingShouldReturnStructuredMessage(t *testing.T) {
 	err := NewConnectionFailedError("test-component", "localhost:4222", errors.New("connection refused"))
 
-	expected := "[test-component] failed to connect to localhost:4222 (code: 1002)"
+	expected := "[test-component] failed to connect to localhost:4222: connection refused (code: 1002)"
 	assert.Equal(t, expected, err.Error())
 }
 

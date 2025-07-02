@@ -12,7 +12,7 @@ func TestNewOptionsDefaults(t *testing.T) {
 	opts := NewOptions()
 
 	assert.Equal(t, qdb.WriterPushModeAsync, opts.PushMode)
-	assert.Equal(t, qdb.CompBest, opts.Compression)
+	assert.Equal(t, qdb.CompFast, opts.Compression)
 	assert.Equal(t, 4, opts.NumWriters)
 	assert.Equal(t, 100, opts.QueueSize)
 	assert.Equal(t, 10, opts.RetryAttempts)

@@ -74,6 +74,13 @@ func usage() {
 // 3. Run connector - blocks until shutdown
 // Ex: main() → connector runs until SIGINT
 func main() {
+	exitCode := runMain()
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+}
+
+func runMain() int {
 	exe := "qdb-nats-connector"
 
 	// Setup structured logging
@@ -81,10 +88,10 @@ func main() {
 
 	// 1. Load configuration: CLI overrides env vars, config files override defaults
 	opts, err := connector.LoadConfig(os.Args[1:], usage)
-
 	if err != nil {
 		slog.Error("Unable to parse options", "error", err)
-		os.Exit(1)
+
+		return 1
 	}
 
 	slog.Info("Parsed configuration options", "options", opts)
@@ -93,14 +100,16 @@ func main() {
 	jsonParser, err := parser.NewJsonParser()
 	if err != nil {
 		slog.Error("Unable to create JSON parser", "error", err)
-		os.Exit(1)
+
+		return 1
 	}
 
 	// Create connector with JSON parser
 	c, err := connector.NewConnector(opts, jsonParser)
 	if err != nil {
 		slog.Error("Unable to launch NATS connector", "error", err, "connector", c)
-		os.Exit(1)
+
+		return 1
 	}
 	defer c.Close()
 
@@ -110,8 +119,12 @@ func main() {
 	ctx := context.Background()
 
 	// 3. Run connector: blocks until shutdown|error
-	if err := c.RunWithContext(ctx); err != nil && err != context.Canceled {
+	err = c.RunWithContext(ctx)
+	if err != nil && err != context.Canceled {
 		slog.Error("Connector failed", "error", err)
-		os.Exit(1)
+
+		return 1
 	}
+
+	return 0
 }

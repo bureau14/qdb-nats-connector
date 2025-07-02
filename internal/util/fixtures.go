@@ -31,6 +31,6 @@ func DefaultQDBEndpoint() string {
 }
 
 // TestSinkConfig returns conservative sink configuration for testing.
-func TestSinkConfig() (string, int, int, int) {
-	return "qdb://127.0.0.1:2836", 2, 50, 2 // clusterUri, numWriters, queueSize, retryAttempts
+func TestSinkConfig() (clusterUri string, numWriters, queueSize, retryAttempts int) {
+	return "qdb://127.0.0.1:2836", 2, 50, 2
 }

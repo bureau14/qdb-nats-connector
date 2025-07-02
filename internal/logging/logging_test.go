@@ -25,9 +25,9 @@ func TestLoggingLogLevelFromEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.envValue, func(t *testing.T) {
 			oldValue := os.Getenv("LOG_LEVEL")
-			defer os.Setenv("LOG_LEVEL", oldValue)
+			defer func() { _ = os.Setenv("LOG_LEVEL", oldValue) }()
 
-			os.Setenv("LOG_LEVEL", tt.envValue)
+			_ = os.Setenv("LOG_LEVEL", tt.envValue)
 			level := getLogLevel()
 			assert.Equal(t, tt.expected, level)
 		})
@@ -50,9 +50,9 @@ func TestLoggingLogFormatFromEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.envValue, func(t *testing.T) {
 			oldValue := os.Getenv("LOG_FORMAT")
-			defer os.Setenv("LOG_FORMAT", oldValue)
+			defer func() { _ = os.Setenv("LOG_FORMAT", oldValue) }()
 
-			os.Setenv("LOG_FORMAT", tt.envValue)
+			_ = os.Setenv("LOG_FORMAT", tt.envValue)
 			format := getLogFormat()
 			assert.Equal(t, tt.expected, format)
 		})

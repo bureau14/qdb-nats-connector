@@ -48,18 +48,18 @@ func TestConnectorNewConnectorWhenValidOptionsShoulCreateConnector(t *testing.T)
 	require.NoError(t, err)
 
 	c, err := NewConnector(DefaultOptions(), jsonParser)
-
 	// The connector creation may fail if QuasarDB is not available
 	// This is acceptable for unit testing - we're testing the component wiring
 	if err != nil {
 		// Expect either connection error to QuasarDB or NATS
 		require.Contains(t, err.Error(), "failed to connect to")
+
 		return
 	}
 
 	// If successful, ensure proper cleanup
 	require.NoError(t, err)
-	defer c.Close()
+	c.Close()
 }
 
 // TestNewConnector_NilParser ensures connector initialization fails with nil parser.

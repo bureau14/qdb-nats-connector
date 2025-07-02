@@ -47,8 +47,10 @@ func NewConnector(opts *Options, p parser.Parser) (*Connector, error) {
 	// 3. Create sink - QDB connection
 
 	// 1. Validate: opts & parser required
-	if validationErr := ValidateOptions(opts); validationErr != nil {
+	validationErr := ValidateOptions(opts)
+	if validationErr != nil {
 		slog.Error("Options not valid", "options", opts, "error", validationErr)
+
 		return nil, validationErr
 	}
 
@@ -61,6 +63,7 @@ func NewConnector(opts *Options, p parser.Parser) (*Connector, error) {
 	src, err := source.NewSource(srcOpts)
 	if err != nil {
 		slog.Error("Failed to create source", "options", opts, "error", err)
+
 		return nil, err
 	}
 
@@ -70,6 +73,7 @@ func NewConnector(opts *Options, p parser.Parser) (*Connector, error) {
 	if err != nil {
 		slog.Error("Failed to create sink", "options", snkOpts, "error", err)
 		src.Close()
+
 		return nil, err
 	}
 
@@ -103,7 +107,8 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 	slog.Info("Starting connector")
 
 	// Subscribe to NATS with our message handler
-	if err := c.Source.Subscribe(c.handleMessage); err != nil {
+	err := c.Source.Subscribe(c.handleMessage)
+	if err != nil {
 		return errors.NewSubscriptionFailedError("connector", "unknown", err)
 	}
 
@@ -117,11 +122,21 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		slog.Info("Context cancelled, shutting down")
+
 		return ctx.Err()
 	case sig := <-sigCh:
 		slog.Info("Received signal, shutting down", "signal", sig)
+
 		return nil
 	}
+}
+
+// Close shuts down source→sink order.
+// Ex: Close() → components closed
+func (c *Connector) Close() {
+	slog.Info("Closing connector")
+	c.Source.Close()
+	c.Sink.Close()
 }
 
 // handleMessage parses NATS msg→QDB tables
@@ -131,16 +146,25 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 // 2. Convert to pointers - sink needs []*Table
 // 3. Write to QDB - log errors & continue
 func (c *Connector) handleMessage(msg *nats.Msg) {
+	slog.Debug("Connector received NATS message", "subject", msg.Subject, "data_len", len(msg.Data))
+
 	// 1. Parse msg: extract timeseries data
 	tables, err := c.Parser.Parse(msg)
 	if err != nil {
 		slog.Error("Failed to parse message", "subject", msg.Subject, "error", err)
+
 		return
 	}
 
 	if len(tables) == 0 {
 		slog.Debug("Parser returned no tables", "subject", msg.Subject)
+
 		return
+	}
+
+	slog.Debug("Parser returned tables", "subject", msg.Subject, "num_tables", len(tables))
+	for i, table := range tables {
+		slog.Debug("Table details", "index", i, "table_name", table.TableName)
 	}
 
 	// 2. Convert to pointers: []Table→[]*Table
@@ -150,18 +174,13 @@ func (c *Connector) handleMessage(msg *nats.Msg) {
 	}
 
 	// 3. Write to QDB: errors logged, not fatal
-	if err := c.Sink.Write(writerTables); err != nil {
+	slog.Debug("Writing tables to sink", "subject", msg.Subject, "num_tables", len(writerTables))
+	err = c.Sink.Write(writerTables)
+	if err != nil {
 		slog.Error("Failed to write to sink", "subject", msg.Subject, "num_tables", len(tables), "error", err)
+
 		return
 	}
 
 	slog.Debug("Message processed successfully", "subject", msg.Subject, "num_tables", len(tables))
-}
-
-// Close shuts down source→sink order.
-// Ex: Close() → components closed
-func (c *Connector) Close() {
-	slog.Info("Closing connector")
-	c.Source.Close()
-	c.Sink.Close()
 }

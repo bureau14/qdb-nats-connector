@@ -14,8 +14,7 @@ import (
 )
 
 // NoopParser: validation-only parser for testing, returns empty tables
-type NoopParser struct {
-}
+type NoopParser struct{}
 
 // NewNoopParser creates validation-only parser.
 // Returns:
@@ -28,6 +27,7 @@ type NoopParser struct {
 //	NewNoopParser() // → parser, nil
 func NewNoopParser() (*NoopParser, error) {
 	slog.Info("Initializing noop parser")
+
 	return &NoopParser{}, nil
 }
 

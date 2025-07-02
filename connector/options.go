@@ -68,7 +68,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 
 	// Set defaults
 	v.SetDefault("nats.endpoint", nats.DefaultURL)
-	v.SetDefault("qdb.compression", "best")
+	v.SetDefault("qdb.compression", "fast")
 	v.SetDefault("qdb.encryption", "none")
 	v.SetDefault("qdb.push_mode", "async")
 
@@ -100,12 +100,14 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.UintVar(&pm, "qdb-client-max-parallelism", 0, "QuasarDB sink max parallelism")
 	fs.UintVar(&ib, "qdb-client-inbuf-size", 0, "QuasarDB sink max input buffer size")
 
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		return nil, err
 	}
 
 	if showHelp {
 		printHelp()
+
 		return nil, nil
 	}
 
@@ -115,7 +117,8 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	}
 
 	// Read config file (ignore if not found)
-	if err := v.ReadInConfig(); err != nil {
+	err = v.ReadInConfig()
+	if err != nil {
 		// Only return error if config file was explicitly specified
 		if configFile != "" {
 			return nil, fmt.Errorf("error reading config file: %w", err)
@@ -222,9 +225,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 //	ConfigureOptions(fs, os.Args[1:], usage) // → opts, nil
 func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Options, error) {
 	opts := &Options{}
-	var (
-		showHelp bool
-	)
+	var showHelp bool
 
 	fs.BoolVar(&showHelp, "h", false, "Show this message.")
 	fs.BoolVar(&showHelp, "help", false, "Show this message.")
@@ -259,12 +260,14 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 	fs.UintVar(&ib, "qdb-client-inbuf-size", 0, "QuasarDB sink max input buffer size")
 	opts.sinkOptions.ClientMaxInBufSize = &ib
 
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		return nil, err
 	}
 
 	if showHelp {
 		printHelp()
+
 		return nil, nil
 	}
 
@@ -340,6 +343,7 @@ func (f *compressionFlag) String() string {
 	}
 
 	b, _ := json.Marshal(*f.dst)
+
 	return string(b)
 }
 
@@ -353,6 +357,7 @@ func (f *compressionFlag) Set(val string) error {
 		return err
 	}
 	*f.dst = comp
+
 	return nil
 }
 
@@ -388,6 +393,7 @@ func (f *pushModeFlag) Set(val string) error {
 		return err
 	}
 	*f.dst = pushMode
+
 	return nil
 }
 
@@ -421,6 +427,7 @@ func (f *encryptionFlag) Set(val string) error {
 		return err
 	}
 	*f.dst = &enc
+
 	return nil
 }
 

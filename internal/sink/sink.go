@@ -7,6 +7,7 @@ package sink
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +49,10 @@ type worker struct {
 func NewSink(opts Options) (*Sink, error) {
 	slog.Info("Initializing new sink", "num_workers", opts.NumWriters)
 
+	// Note: We used to create a test handle here to ensure QDB API is initialized,
+	// but this was causing unwanted logging in tests. The API will be initialized
+	// when the first worker creates its handle.
+
 	if opts.NumWriters <= 0 {
 		return nil, errors.NewInvalidConfigError("sink", "num_writers must be positive")
 	}
@@ -66,6 +71,9 @@ func NewSink(opts Options) (*Sink, error) {
 	// 1. Create worker - QDB connection per worker
 	// 2. Start goroutine - process jobs concurrently
 
+	// Add initial delay to ensure QDB API is ready
+	time.Sleep(2 * time.Second)
+
 	for i := range opts.NumWriters {
 		// 1. Create worker: dedicated QDB handle
 		w, err := newWorker(i, opts)
@@ -74,6 +82,7 @@ func NewSink(opts Options) (*Sink, error) {
 			for j := range i {
 				s.workers[j].close()
 			}
+
 			return nil, errors.NewConnectionFailedError("sink", opts.ClusterUri, err)
 		}
 		s.workers[i] = w
@@ -81,9 +90,16 @@ func NewSink(opts Options) (*Sink, error) {
 		// 2. Start goroutine: concurrent processing
 		s.wg.Add(1)
 		go w.run(s.jobs, &s.wg)
+
+		// Add delay between worker creation to avoid rapid-fire connections
+		// Increased delay to avoid "operation not yet available" errors
+		if i < opts.NumWriters-1 {
+			time.Sleep(2 * time.Second)
+		}
 	}
 
 	slog.Info("Sink initialized successfully", "workers", len(s.workers))
+
 	return s, nil
 }
 
@@ -147,32 +163,59 @@ func newWorker(id int, opts Options) (*worker, error) {
 
 	// Configure handle options
 	if opts.Encryption != nil {
-		if err := handle.SetEncryption(*opts.Encryption); err != nil {
-			handle.Close()
+		err := handle.SetEncryption(*opts.Encryption)
+		if err != nil {
+			_ = handle.Close()
+
 			return nil, err
 		}
 	}
-	if err := handle.SetCompression(opts.Compression); err != nil {
-		handle.Close()
+	err = handle.SetCompression(opts.Compression)
+	if err != nil {
+		_ = handle.Close()
+
 		return nil, err
 	}
 	if opts.ClientMaxParallelism != nil {
-		if err := handle.SetClientMaxParallelism(*opts.ClientMaxParallelism); err != nil {
-			handle.Close()
+		err = handle.SetClientMaxParallelism(*opts.ClientMaxParallelism)
+		if err != nil {
+			_ = handle.Close()
+
 			return nil, err
 		}
 	}
 	if opts.ClientMaxInBufSize != nil {
-		if err := handle.SetClientMaxInBufSize(*opts.ClientMaxInBufSize); err != nil {
-			handle.Close()
+		err = handle.SetClientMaxInBufSize(*opts.ClientMaxInBufSize)
+		if err != nil {
+			_ = handle.Close()
+
 			return nil, err
 		}
 	}
 
-	// Connect to cluster
-	if err := handle.Connect(opts.ClusterUri); err != nil {
-		handle.Close()
-		return nil, err
+	// Connect to cluster with retry for "operation not yet available" errors
+	var connectErr error
+	for attempt := range 5 {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*2) * time.Second)
+			slog.Debug("Retrying connection", "worker_id", id, "attempt", attempt+1)
+		}
+
+		connectErr = handle.Connect(opts.ClusterUri)
+		if connectErr == nil {
+			break
+		}
+
+		// Check if it's the "operation not yet available" error
+		if !strings.Contains(connectErr.Error(), "code: 1002") {
+			break
+		}
+	}
+
+	if connectErr != nil {
+		_ = handle.Close()
+
+		return nil, connectErr
 	}
 
 	return &worker{
@@ -193,7 +236,8 @@ func (w *worker) run(jobs <-chan []*qdb.WriterTable, wg *sync.WaitGroup) {
 	defer slog.Info("Worker stopped", "worker_id", w.id)
 
 	for tables := range jobs {
-		if err := w.processTables(tables); err != nil {
+		err := w.processTables(tables)
+		if err != nil {
 			slog.Error("Failed to process tables", "worker_id", w.id, "error", err, "num_tables", len(tables))
 		}
 	}
@@ -221,11 +265,14 @@ func (w *worker) processTables(tables []*qdb.WriterTable) error {
 		}
 
 		// Push all tables
-		if err := w.pushTables(tables); err != nil {
+		err := w.pushTables(tables)
+		if err != nil {
 			if attempt < w.options.RetryAttempts-1 {
 				slog.Debug("Retryable error, backing off", "worker_id", w.id, "attempt", attempt+1, "backoff", backoff, "error", err)
+
 				continue
 			}
+
 			return errors.NewWriteFailedError("sink", err)
 		}
 
@@ -240,25 +287,39 @@ func (w *worker) processTables(tables []*qdb.WriterTable) error {
 // Out: error - QDB write error
 // Ex: pushTables(tables) → nil
 func (w *worker) pushTables(tables []*qdb.WriterTable) error {
+	slog.Debug("Worker pushing tables to QDB", "worker_id", w.id, "num_tables", len(tables))
+
 	// Create writer options with push mode
 	writerOpts := qdb.NewWriterOptions().WithPushMode(w.options.PushMode)
 	writer := qdb.NewWriter(writerOpts)
 
 	// Add all tables to the writer
-	for _, table := range tables {
-		if err := writer.SetTable(*table); err != nil {
+	for i, table := range tables {
+		slog.Debug("Adding table to writer", "worker_id", w.id, "table_index", i, "table_name", table.TableName)
+		err := writer.SetTable(*table)
+		if err != nil {
+			slog.Error("Failed to set table in writer", "worker_id", w.id, "table_name", table.TableName, "error", err)
+
 			return err
 		}
 	}
 
 	// Push to QuasarDB
-	return writer.Push(w.handle)
+	slog.Debug("Pushing data to QuasarDB", "worker_id", w.id)
+	err := writer.Push(w.handle)
+	if err != nil {
+		slog.Error("Failed to push to QuasarDB", "worker_id", w.id, "error", err)
+	} else {
+		slog.Debug("Successfully pushed to QuasarDB", "worker_id", w.id)
+	}
+
+	return err
 }
 
 // close releases QDB handle.
 // Ex: close() → handle released
 func (w *worker) close() {
 	if w.handleInitialized {
-		w.handle.Close()
+		_ = w.handle.Close()
 	}
 }

@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand" // #nosec G404 - This is for test data generation only
 
 	"github.com/nats-io/nats.go"
 	"pgregory.net/rapid"
@@ -24,8 +24,8 @@ const latin = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 func RandomAlias() string {
 	const size = 16
 	var buffer bytes.Buffer
-	for i := 0; i < size; i++ {
-		buffer.WriteString(string(latin[rand.Intn(len(latin))]))
+	for range size {
+		buffer.WriteString(string(latin[rand.Intn(len(latin))])) // #nosec G404 - This is for test data generation only
 	}
 
 	return buffer.String()
@@ -42,46 +42,16 @@ func RandomTopicName() string {
 // Out: int - random number 0-999999
 // Ex: RandomNumber() → 42857
 func RandomNumber() int {
-	return rand.Intn(1000000)
+	return rand.Intn(1000000) // #nosec G404 - This is for test data generation only
 }
 
-// ValidJsonString generates a valid JSON string with random fields.
-// Returns a JSON string with 1-5 fields containing various data types.
-func ValidJsonString(t *rapid.T) string {
+// generateRandomJsonFields creates a map with random JSON-compatible fields.
+// Returns a map[string]interface{} with 1-5 randomly generated fields.
+func generateRandomJsonFields(t *rapid.T) map[string]interface{} {
 	numFields := rapid.IntRange(1, 5).Draw(t, "numFields")
 	jsonData := make(map[string]interface{})
 
-	for i := 0; i < numFields; i++ {
-		key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, fmt.Sprintf("key_%d", i))
-
-		// Choose random valid type
-		typeChoice := rapid.IntRange(0, 2).Draw(t, fmt.Sprintf("type_%d", i))
-		switch typeChoice {
-		case 0: // string
-			jsonData[key] = rapid.String().Draw(t, fmt.Sprintf("str_val_%d", i))
-		case 1: // number
-			value := rapid.Float64Range(-1e10, 1e10).Draw(t, fmt.Sprintf("num_val_%d", i))
-			if !math.IsNaN(value) && !math.IsInf(value, 0) {
-				jsonData[key] = value
-			} else {
-				jsonData[key] = 42.0 // fallback for special values
-			}
-		case 2: // boolean
-			jsonData[key] = rapid.Bool().Draw(t, fmt.Sprintf("bool_val_%d", i))
-		}
-	}
-
-	jsonBytes, _ := json.Marshal(jsonData)
-	return string(jsonBytes)
-}
-
-// ValidJsonMap generates a valid JSON map with random fields.
-// Returns a map[string]interface{} suitable for JSON marshaling.
-func ValidJsonMap(t *rapid.T) map[string]interface{} {
-	numFields := rapid.IntRange(1, 5).Draw(t, "numFields")
-	jsonData := make(map[string]interface{})
-
-	for i := 0; i < numFields; i++ {
+	for i := range numFields {
 		key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, fmt.Sprintf("key_%d", i))
 
 		// Choose random valid type
@@ -104,6 +74,21 @@ func ValidJsonMap(t *rapid.T) map[string]interface{} {
 	return jsonData
 }
 
+// ValidJsonString generates a valid JSON string with random fields.
+// Returns a JSON string with 1-5 fields containing various data types.
+func ValidJsonString(t *rapid.T) string {
+	jsonData := generateRandomJsonFields(t)
+	jsonBytes, _ := json.Marshal(jsonData)
+
+	return string(jsonBytes)
+}
+
+// ValidJsonMap generates a valid JSON map with random fields.
+// Returns a map[string]interface{} suitable for JSON marshaling.
+func ValidJsonMap(t *rapid.T) map[string]interface{} {
+	return generateRandomJsonFields(t)
+}
+
 // InvalidJsonString generates invalid JSON strings for testing error handling.
 func InvalidJsonString(t *rapid.T) string {
 	invalidPatterns := []string{
@@ -118,6 +103,7 @@ func InvalidJsonString(t *rapid.T) string {
 	}
 
 	idx := rapid.IntRange(0, len(invalidPatterns)-1).Draw(t, "invalid_pattern")
+
 	return invalidPatterns[idx]
 }
 
@@ -152,6 +138,7 @@ func RandomEndpoint(t *rapid.T) string {
 		"nats://127.0.0.1:4222",
 		"nats://test.example.com:4222",
 	}
+
 	return rapid.SampledFrom(endpoints).Draw(t, "endpoint")
 }
 
@@ -162,6 +149,7 @@ func RandomClusterUri(t *rapid.T) string {
 		"qdb://localhost:2836",
 		"qdb://test.example.com:2836",
 	}
+
 	return rapid.SampledFrom(uris).Draw(t, "cluster_uri")
 }
 
@@ -176,6 +164,7 @@ func ComponentName(t *rapid.T) string {
 		"source", "sink", "parser", "connector",
 		"json_parser", "noop_parser", "writer",
 	}
+
 	return rapid.SampledFrom(components).Draw(t, "component")
 }
 
@@ -189,6 +178,7 @@ func UnicodeName(t *rapid.T) string {
 		"Здравствуй мир",
 		"Γεια σου κόσμε",
 	}
+
 	return rapid.SampledFrom(unicodeStrings).Draw(t, "unicode")
 }
 
@@ -203,5 +193,6 @@ func SpecialCharsString(t *rapid.T) string {
 		" ",
 		"\x00\x01\x02",
 	}
+
 	return rapid.SampledFrom(specialStrings).Draw(t, "special_chars")
 }

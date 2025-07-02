@@ -8,12 +8,11 @@ import (
 	"testing"
 	"time"
 
+	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
-	"github.com/bureau14/qdb-nats-connector/internal/util"
 )
 
 func TestSourceNewSourceWhenValidOptionsShouldCreateSource(t *testing.T) {
@@ -72,6 +71,7 @@ func TestSourceNewSourceWhenValidOptionsShouldCreateSource(t *testing.T) {
 				assert.Equal(t, "source", connErr.Component)
 				assert.Equal(t, connectorErrors.ErrCodeConnectionFailed, connErr.Code)
 				assert.Equal(t, tt.opts.Endpoint, connErr.Metadata["endpoint"])
+
 				return
 			}
 
@@ -103,6 +103,7 @@ func TestSourceSubscribeWhenValidHandlerShouldReceiveMessages(t *testing.T) {
 					Topic:    util.RandomTopicName(),
 				})
 				require.NoError(t, err)
+
 				return source
 			},
 			handler: func(msg *nats.Msg) {
@@ -119,6 +120,7 @@ func TestSourceSubscribeWhenValidHandlerShouldReceiveMessages(t *testing.T) {
 					Topic:    util.RandomTopicName(),
 				})
 				require.NoError(t, err)
+
 				return source
 			},
 			handler: func(msg *nats.Msg) {
@@ -136,6 +138,7 @@ func TestSourceSubscribeWhenValidHandlerShouldReceiveMessages(t *testing.T) {
 					Topic:    util.RandomTopicName(),
 				})
 				require.NoError(t, err)
+
 				return source
 			},
 			handler: func(msg *nats.Msg) {
@@ -153,6 +156,7 @@ func TestSourceSubscribeWhenValidHandlerShouldReceiveMessages(t *testing.T) {
 				})
 				require.NoError(t, err)
 				source.NatsConn.Close()
+
 				return source
 			},
 			handler: func(msg *nats.Msg) {
@@ -180,49 +184,21 @@ func TestSourceSubscribeWhenValidHandlerShouldReceiveMessages(t *testing.T) {
 
 				err := source.Subscribe(wrappedHandler)
 				if tt.wantErr {
-					require.Error(t, err)
-					if tt.errContains != "" {
-						assert.Contains(t, err.Error(), tt.errContains)
-					}
+					assertSubscriptionError(t, tt, err, source)
 
-					var connErr *connectorErrors.ConnectorError
-					require.True(t, errors.As(err, &connErr), "error should be a ConnectorError")
-					assert.Equal(t, "source", connErr.Component)
-					assert.Equal(t, connectorErrors.ErrCodeSubscriptionFailed, connErr.Code)
-					assert.Equal(t, source.Options.Topic, connErr.Metadata["topic"])
 					return
 				}
 
 				require.NoError(t, err)
 
-				for i := 0; i < tt.messageCount; i++ {
-					err = source.NatsConn.Publish(source.Options.Topic, []byte("test message"))
-					require.NoError(t, err)
-				}
+				publishTestMessages(t, source, tt.messageCount)
+				waitForMessages(t, &wg, 2*time.Second)
 
-				err = source.NatsConn.Flush()
-				require.NoError(t, err)
-
-				done := make(chan struct{})
-				go func() {
-					wg.Wait()
-					close(done)
-				}()
-
-				select {
-				case <-done:
-				case <-time.After(2 * time.Second):
-					t.Fatal("timeout waiting for messages")
-				}
-
-				assert.Equal(t, int32(tt.messageCount), atomic.LoadInt32(&receivedCount))
+				assert.Equal(t, tt.messageCount, int(atomic.LoadInt32(&receivedCount)))
 			} else {
 				err := source.Subscribe(tt.handler)
 				if tt.wantErr {
-					require.Error(t, err)
-					if tt.errContains != "" {
-						assert.Contains(t, err.Error(), tt.errContains)
-					}
+					assertError(t, tt, err)
 				} else {
 					require.NoError(t, err)
 				}
@@ -245,6 +221,7 @@ func TestSourceCloseWhenActiveShouldCloseConnection(t *testing.T) {
 					Topic:    util.RandomTopicName(),
 				})
 				require.NoError(t, err)
+
 				return source
 			},
 		},
@@ -256,6 +233,7 @@ func TestSourceCloseWhenActiveShouldCloseConnection(t *testing.T) {
 					Topic:    util.RandomTopicName(),
 				})
 				require.NoError(t, err)
+
 				return source
 			},
 			preClose: func(t *testing.T, source *Source) {
@@ -271,6 +249,7 @@ func TestSourceCloseWhenActiveShouldCloseConnection(t *testing.T) {
 					Topic:    util.RandomTopicName(),
 				})
 				require.NoError(t, err)
+
 				return source
 			},
 			preClose: func(t *testing.T, source *Source) {
@@ -361,7 +340,7 @@ func TestSourceConcurrentOperationsWhenCallingCloseShouldBeSafe(t *testing.T) {
 	numGoroutines := 10
 
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			defer wg.Done()
 			source.Close()
@@ -442,6 +421,7 @@ func TestSourceOptionsValidationWhenValidOptionsShouldSucceed(t *testing.T) {
 			source, err := NewSource(tt.opts)
 			if tt.wantErr {
 				require.Error(t, err)
+
 				return
 			}
 
@@ -627,6 +607,7 @@ func TestSourceErrorMetadataWhenErrorOccursShouldIncludeMetadata(t *testing.T) {
 					Endpoint: "nats://unreachable:99999",
 					Topic:    util.RandomTopicName(),
 				})
+
 				return err
 			},
 			expectedCode: connectorErrors.ErrCodeConnectionFailed,
@@ -646,6 +627,7 @@ func TestSourceErrorMetadataWhenErrorOccursShouldIncludeMetadata(t *testing.T) {
 				})
 				require.NoError(t, err)
 				source.NatsConn.Close()
+
 				return source.Subscribe(func(msg *nats.Msg) {})
 			},
 			expectedCode: connectorErrors.ErrCodeSubscriptionFailed,
@@ -688,6 +670,7 @@ func TestSourceErrorWrappingWhenErrorOccursShouldWrapUnderlyingError(t *testing.
 					Endpoint: "nats://invalid.host:99999",
 					Topic:    util.RandomTopicName(),
 				})
+
 				return err
 			},
 			checkWrapped: func(t *testing.T, err error) {
@@ -706,6 +689,7 @@ func TestSourceErrorWrappingWhenErrorOccursShouldWrapUnderlyingError(t *testing.
 				})
 				require.NoError(t, err)
 				source.NatsConn.Close()
+
 				return source.Subscribe(func(msg *nats.Msg) {})
 			},
 			checkWrapped: func(t *testing.T, err error) {
@@ -739,6 +723,7 @@ func TestSourceErrorFormattingWhenErrorOccursShouldHaveConsistentFormat(t *testi
 					Endpoint: "nats://invalid:99999",
 					Topic:    util.RandomTopicName(),
 				})
+
 				return err
 			},
 			expectedPattern: `\[source\] failed to connect to .+ \(code: 1002\)`,
@@ -752,6 +737,7 @@ func TestSourceErrorFormattingWhenErrorOccursShouldHaveConsistentFormat(t *testi
 				})
 				require.NoError(t, err)
 				source.NatsConn.Close()
+
 				return source.Subscribe(func(msg *nats.Msg) {})
 			},
 			expectedPattern: `\[source\] failed to subscribe to topic .+ \(code: 1003\)`,

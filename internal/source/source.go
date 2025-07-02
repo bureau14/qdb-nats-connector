@@ -7,9 +7,8 @@ package source
 import (
 	"log/slog"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/nats-io/nats.go"
 )
 
 // Source: NATS client with connection & subscription lifecycle management
@@ -36,10 +35,12 @@ func NewSource(opts Options) (*Source, error) {
 	nc, err := nats.Connect(opts.Endpoint)
 	if err != nil {
 		slog.Error("Error while establishing connection", "nats_endpoint", opts.Endpoint, "error", err)
+
 		return nil, errors.NewConnectionFailedError("source", opts.Endpoint, err)
 	}
 
 	slog.Info("Connected to NATS endpoint", "topic", opts.Topic)
+
 	return &Source{NatsConn: nc, Options: opts}, nil
 }
 
@@ -51,7 +52,8 @@ func NewSource(opts Options) (*Source, error) {
 func (s *Source) Close() {
 	slog.Info("Draining NATS source")
 	// 1. Drain: wait for pending messages
-	if err := s.NatsConn.Drain(); err != nil {
+	err := s.NatsConn.Drain()
+	if err != nil {
 		slog.Error("Failed to drain NATS connection", "error", err)
 	}
 
@@ -69,7 +71,9 @@ func (s *Source) Subscribe(handler nats.MsgHandler) error {
 	_, err := s.NatsConn.Subscribe(s.Options.Topic, handler)
 	if err != nil {
 		slog.Error("Failed to subscribe to topic", "error", err, "topic", s.Options.Topic)
+
 		return errors.NewSubscriptionFailedError("source", s.Options.Topic, err)
 	}
+
 	return nil
 }

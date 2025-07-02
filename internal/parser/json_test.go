@@ -7,14 +7,31 @@ import (
 	"math"
 	"testing"
 
+	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
-
-	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
-	"github.com/bureau14/qdb-nats-connector/internal/util"
 )
+
+// assertParsingError is a helper function that verifies a parser returns the expected error
+func assertParsingError(t *testing.T, parser *JsonParser, jsonData, expectedErrorFragment string) {
+	msg := &nats.Msg{
+		Subject: util.RandomTopicName(),
+		Data:    []byte(jsonData),
+	}
+
+	tables, err := parser.Parse(msg)
+	assert.Nil(t, tables)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, "json_parser", connErr.Component)
+	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+	assert.Contains(t, err.Error(), expectedErrorFragment)
+}
 
 func TestParserJsonNewParserShouldReturnValidParser(t *testing.T) {
 	parser, err := NewJsonParser()
@@ -77,62 +94,29 @@ func TestParserJsonParseWhenInvalidJsonShouldReturnError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &nats.Msg{
-				Subject: util.RandomTopicName(),
-				Data:    []byte(tt.data),
-			}
-
-			tables, err := parser.Parse(msg)
-			assert.Nil(t, tables)
-			require.Error(t, err)
-
-			var connErr *connectorErrors.ConnectorError
-			require.True(t, errors.As(err, &connErr))
-			assert.Equal(t, "json_parser", connErr.Component)
-			assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-			assert.Contains(t, err.Error(), "parse message")
+			assertParsingError(t, parser, tt.data, "parse message")
 		})
 	}
 }
 
-func TestParserJsonParseWhenEmptyJsonShouldReturnError(t *testing.T) {
+func TestParserJsonParseWhenInvalidJsonStructureShouldReturnError(t *testing.T) {
+	tests := []struct {
+		name             string
+		data             string
+		expectedErrorMsg string
+	}{
+		{"empty json", `{}`, "parse message"},
+		{"missing table key", `{"key": "value"}`, "missing required $table key"},
+	}
+
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
-	msg := &nats.Msg{
-		Subject: util.RandomTopicName(),
-		Data:    []byte(`{}`),
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertParsingError(t, parser, tt.data, tt.expectedErrorMsg)
+		})
 	}
-
-	tables, err := parser.Parse(msg)
-	assert.Nil(t, tables)
-	require.Error(t, err)
-
-	var connErr *connectorErrors.ConnectorError
-	require.True(t, errors.As(err, &connErr))
-	assert.Equal(t, "json_parser", connErr.Component)
-	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-	assert.Contains(t, err.Error(), "parse message")
-}
-
-func TestParserJsonParseWhenMissingTableKeyShouldReturnError(t *testing.T) {
-	parser, err := NewJsonParser()
-	require.NoError(t, err)
-
-	msg := &nats.Msg{
-		Subject: util.RandomTopicName(),
-		Data:    []byte(`{"key": "value"}`),
-	}
-
-	tables, err := parser.Parse(msg)
-	assert.Nil(t, tables)
-	require.Error(t, err)
-
-	var connErr *connectorErrors.ConnectorError
-	require.True(t, errors.As(err, &connErr))
-	assert.Equal(t, "json_parser", connErr.Component)
-	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-	assert.Contains(t, err.Error(), "missing required $table key")
 }
 
 func TestParserJsonParseWhenNestedDataShouldReturnError(t *testing.T) {
@@ -152,20 +136,7 @@ func TestParserJsonParseWhenNestedDataShouldReturnError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &nats.Msg{
-				Subject: util.RandomTopicName(),
-				Data:    []byte(tt.data),
-			}
-
-			tables, err := parser.Parse(msg)
-			assert.Nil(t, tables)
-			require.Error(t, err)
-
-			var connErr *connectorErrors.ConnectorError
-			require.True(t, errors.As(err, &connErr))
-			assert.Equal(t, "json_parser", connErr.Component)
-			assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-			assert.Contains(t, err.Error(), "parse message")
+			assertParsingError(t, parser, tt.data, "parse message")
 		})
 	}
 }
@@ -180,14 +151,14 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 			name: "string value",
 			jsonData: map[string]interface{}{
 				"$table": "foobar",
-				"name": "test_string",
+				"name":   "test_string",
 			},
 			expectedCols: 1,
 		},
 		{
 			name: "float64 number",
 			jsonData: map[string]interface{}{
-				"$table": "foobar",
+				"$table":      "foobar",
 				"temperature": 23.5,
 			},
 			expectedCols: 1,
@@ -196,7 +167,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 			name: "integer number",
 			jsonData: map[string]interface{}{
 				"$table": "foobar",
-				"count": 42,
+				"count":  42,
 			},
 			expectedCols: 1,
 		},
@@ -211,7 +182,7 @@ func TestParserJsonParseWhenValidTypesShouldCreateTable(t *testing.T) {
 		{
 			name: "boolean false",
 			jsonData: map[string]interface{}{
-				"$table": "foobar",
+				"$table":   "foobar",
 				"disabled": false,
 			},
 			expectedCols: 1,
@@ -350,7 +321,7 @@ func TestParserJsonParseWhenSpecialNumbersShouldSucceed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			jsonData := map[string]interface{}{
 				"$table": "foobar",
-				"value": tt.value,
+				"value":  tt.value,
 			}
 
 			jsonBytes, err := json.Marshal(jsonData)
@@ -378,109 +349,84 @@ func TestParserJsonParseWhenSpecialNumbersShouldSucceed(t *testing.T) {
 	}
 }
 
-// Property-based testing with rapid
-func TestParserJsonParsePropertyBasedStringValues(t *testing.T) {
+// Property-based testing with rapid - table-driven approach
+func TestParserJsonParsePropertyBasedValues(t *testing.T) {
+	testCases := []struct {
+		name          string
+		valueGen      func(*rapid.T) interface{}
+		skipCondition func(interface{}) bool
+	}{
+		{
+			name: "string values",
+			valueGen: func(t *rapid.T) interface{} {
+				return rapid.String().Draw(t, "value")
+			},
+			skipCondition: nil,
+		},
+		{
+			name: "numeric values",
+			valueGen: func(t *rapid.T) interface{} {
+				return rapid.Float64Range(-1e10, 1e10).Draw(t, "value")
+			},
+			skipCondition: func(v interface{}) bool {
+				if f, ok := v.(float64); ok {
+					return math.IsNaN(f) || math.IsInf(f, 0)
+				}
+
+				return false
+			},
+		},
+		{
+			name: "boolean values",
+			valueGen: func(t *rapid.T) interface{} {
+				return rapid.Bool().Draw(t, "value")
+			},
+			skipCondition: nil,
+		},
+	}
+
 	parser, err := NewJsonParser()
 	require.NoError(t, err)
 
-	rapid.Check(t, func(t *rapid.T) {
-		// Generate random string key and value
-		key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "key")
-		value := rapid.String().Draw(t, "value")
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rapid.Check(t, func(t *rapid.T) {
+				key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "key")
+				value := tc.valueGen(t)
 
-		jsonData := map[string]interface{}{
-			"$table": "foobar",
-			key: value,
-		}
+				if tc.skipCondition != nil && tc.skipCondition(value) {
+					t.Skip("skipping special values")
+				}
 
-		jsonBytes, err := json.Marshal(jsonData)
-		require.NoError(t, err)
-
-		msg := &nats.Msg{
-			Subject: util.RandomTopicName(),
-			Data:    jsonBytes,
-		}
-
-		tables, err := parser.Parse(msg)
-		require.NoError(t, err)
-		require.Len(t, tables, 1)
-
-		table := tables[0]
-		assert.Equal(t, "foobar", table.GetName())
-		assert.Equal(t, 1, table.RowCount())
-		assert.NotNil(t, table)
-	})
+				testPropertyBasedParsing(t, parser, key, value)
+			})
+		})
+	}
 }
 
-func TestParserJsonParsePropertyBasedNumericValues(t *testing.T) {
-	parser, err := NewJsonParser()
+// testPropertyBasedParsing contains the shared test logic for property-based tests
+func testPropertyBasedParsing(t *rapid.T, parser *JsonParser, key string, value interface{}) {
+	jsonData := map[string]interface{}{
+		"$table": "foobar",
+		key:      value,
+	}
+
+	jsonBytes, err := json.Marshal(jsonData)
 	require.NoError(t, err)
 
-	rapid.Check(t, func(t *rapid.T) {
-		// Generate random key and numeric value
-		key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "key")
-		value := rapid.Float64Range(-1e10, 1e10).Draw(t, "value")
+	msg := &nats.Msg{
+		Subject: util.RandomTopicName(),
+		Data:    jsonBytes,
+	}
 
-		// Skip special float values
-		if math.IsNaN(value) || math.IsInf(value, 0) {
-			t.Skip("skipping NaN/Inf values")
-		}
-
-		jsonData := map[string]interface{}{
-			"$table": "foobar",
-			key: value,
-		}
-
-		jsonBytes, err := json.Marshal(jsonData)
-		require.NoError(t, err)
-
-		msg := &nats.Msg{
-			Subject: util.RandomTopicName(),
-			Data:    jsonBytes,
-		}
-
-		tables, err := parser.Parse(msg)
-		require.NoError(t, err)
-		require.Len(t, tables, 1)
-
-		table := tables[0]
-		assert.Equal(t, "foobar", table.GetName())
-		assert.Equal(t, 1, table.RowCount())
-		assert.NotNil(t, table)
-	})
-}
-
-func TestParserJsonParsePropertyBasedBooleanValues(t *testing.T) {
-	parser, err := NewJsonParser()
+	tables, err := parser.Parse(msg)
 	require.NoError(t, err)
+	require.Len(t, tables, 1)
 
-	rapid.Check(t, func(t *rapid.T) {
-		// Generate random key and boolean value
-		key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "key")
-		value := rapid.Bool().Draw(t, "value")
-
-		jsonData := map[string]interface{}{
-			"$table": "foobar",
-			key: value,
-		}
-
-		jsonBytes, err := json.Marshal(jsonData)
-		require.NoError(t, err)
-
-		msg := &nats.Msg{
-			Subject: util.RandomTopicName(),
-			Data:    jsonBytes,
-		}
-
-		tables, err := parser.Parse(msg)
-		require.NoError(t, err)
-		require.Len(t, tables, 1)
-
-		table := tables[0]
-		assert.Equal(t, "foobar", table.GetName())
-		assert.Equal(t, 1, table.RowCount())
-		assert.NotNil(t, table)
-	})
+	table := tables[0]
+	assert.Equal(t, "foobar", table.GetName())
+	assert.Equal(t, 1, table.RowCount())
+	assert.NotNil(t, table)
 }
 
 func TestParserJsonParsePropertyBasedMixedValidTypes(t *testing.T) {
@@ -493,7 +439,7 @@ func TestParserJsonParsePropertyBasedMixedValidTypes(t *testing.T) {
 		jsonData := make(map[string]interface{})
 		jsonData["$table"] = "foobar"
 
-		for i := 0; i < numFields; i++ {
+		for i := range numFields {
 			key := rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, fmt.Sprintf("key_%d", i))
 
 			// Choose random valid type

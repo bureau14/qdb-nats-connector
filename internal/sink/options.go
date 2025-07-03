@@ -5,6 +5,8 @@
 package sink
 
 import (
+	"time"
+
 	qdb "github.com/bureau14/qdb-api-go/v3"
 )
 
@@ -24,16 +26,18 @@ type Options struct {
 	// Defaults to `qdb.WriterPushModeAsync`
 	PushMode qdb.WriterPushMode
 
-	// Defaults to `qdb.CompBest`
+	// Defaults to `qdb.CompNone`
 	Compression qdb.Compression
 
 	ClientMaxParallelism *uint
 	ClientMaxInBufSize   *uint
 
 	// Worker pool configuration
-	NumWriters    int `json:"num_writers"`
-	QueueSize     int `json:"queue_size"`
-	RetryAttempts int `json:"retry_attempts"`
+	NumWriters          int            `json:"num_writers"`
+	QueueSize           int            `json:"queue_size"`
+	RetryAttempts       int            `json:"retry_attempts"`
+	Timeout             *time.Duration `json:"timeout"`
+	WorkerCreationDelay time.Duration  `json:"worker_creation_delay"`
 }
 
 // NewOptions creates sink config with defaults.
@@ -43,18 +47,19 @@ type Options struct {
 //
 // Returns:
 //
-//	Options: CompBest compression, 4 workers, queue=100
+//	Options: CompNone compression, 4 workers, queue=100
 //
 // Example:
 //
 //	NewOptions(WithClusterUri("qdb://host:2836")) // → opts
 func NewOptions(opts ...Option) Options {
 	options := Options{
-		PushMode:      qdb.WriterPushModeAsync,
-		Compression:   qdb.CompFast,
-		NumWriters:    4,
-		QueueSize:     100,
-		RetryAttempts: 10,
+		PushMode:            qdb.WriterPushModeAsync,
+		Compression:         qdb.CompNone,
+		NumWriters:          4,
+		QueueSize:           100,
+		RetryAttempts:       10,
+		WorkerCreationDelay: 0,
 	}
 	for _, opt := range opts {
 		options = opt(options)
@@ -231,6 +236,30 @@ func WithRetryAttempts(attempts int) Option {
 	}
 }
 
+// WithTimeout sets connection timeout.
+// In: timeout time.Duration - connection timeout
+// Out: Option
+// Ex: WithTimeout(30*time.Second) // 30s timeout
+func WithTimeout(timeout time.Duration) Option {
+	return func(o Options) Options {
+		o.Timeout = &timeout
+
+		return o
+	}
+}
+
+// WithWorkerCreationDelay sets delay between worker creation.
+// In: delay time.Duration - delay between workers
+// Out: Option
+// Ex: WithWorkerCreationDelay(time.Second) // 1s delay
+func WithWorkerCreationDelay(delay time.Duration) Option {
+	return func(o Options) Options {
+		o.WorkerCreationDelay = delay
+
+		return o
+	}
+}
+
 // OptionsProvider: interface for sink config decoupling from connector
 type OptionsProvider interface {
 	ClusterUri() string
@@ -240,6 +269,8 @@ type OptionsProvider interface {
 	Compression() qdb.Compression
 	ClientMaxParallelism() *uint
 	ClientMaxInBufSize() *uint
+	Timeout() *time.Duration
+	WorkerCreationDelay() time.Duration
 }
 
 // FromOptionsProvider builds Options from provider.
@@ -254,6 +285,7 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithUserSecurityFile(p.UserSecurityFile()),
 		WithEncryption(p.Encryption()),
 		WithCompression(p.Compression()),
+		WithWorkerCreationDelay(p.WorkerCreationDelay()),
 	}
 
 	// Use Go 1.21+ slice operations for conditional appends
@@ -262,6 +294,9 @@ func FromOptionsProvider(p OptionsProvider) Options {
 	}
 	if p.ClientMaxInBufSize() != nil {
 		opts = append(opts, WithClientMaxInBufSize(*p.ClientMaxInBufSize()))
+	}
+	if p.Timeout() != nil {
+		opts = append(opts, WithTimeout(*p.Timeout()))
 	}
 
 	return NewOptions(opts...)

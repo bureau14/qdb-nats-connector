@@ -1,49 +1,17 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
 // Package util: testing & development utilities
 // Types: none
-// Ex: util.RandomAlias() → "a8Bc3dEf9GhI2jKl"
+// Ex: util.ValidJsonString() → "{\"key\": \"value\"}"
 package util
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand" // #nosec G404 - This is for test data generation only
 
 	"github.com/nats-io/nats.go"
 	"pgregory.net/rapid"
 )
-
-// latin: safe alphanumeric chars for IDs, avoids ambiguous chars
-const latin = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-
-// RandomAlias generates 16-char alphanumeric ID.
-// Out: string - [A-Za-z0-9]{16}
-// Ex: RandomAlias() → "a8Bc3dEf9GhI2jKl"
-func RandomAlias() string {
-	const size = 16
-	var buffer bytes.Buffer
-	for range size {
-		buffer.WriteString(string(latin[rand.Intn(len(latin))])) // #nosec G404 - This is for test data generation only
-	}
-
-	return buffer.String()
-}
-
-// RandomTopicName creates test topic name.
-// Out: string - 16-char topic
-// Ex: RandomTopicName() → "topic1a2b3c4d5e6"
-func RandomTopicName() string {
-	return RandomAlias()
-}
-
-// RandomNumber generates a random integer for testing.
-// Out: int - random number 0-999999
-// Ex: RandomNumber() → 42857
-func RandomNumber() int {
-	return rand.Intn(1000000) // #nosec G404 - This is for test data generation only
-}
 
 // generateRandomJsonFields creates a map with random JSON-compatible fields.
 // Returns a map[string]interface{} with 1-5 randomly generated fields.
@@ -110,7 +78,7 @@ func InvalidJsonString(t *rapid.T) string {
 // NatsMessage generates a NATS message with random subject and data.
 func NatsMessage(t *rapid.T) *nats.Msg {
 	return &nats.Msg{
-		Subject: RandomTopicName(),
+		Subject: rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "topic"),
 		Data:    []byte(rapid.String().Draw(t, "data")),
 	}
 }
@@ -118,7 +86,7 @@ func NatsMessage(t *rapid.T) *nats.Msg {
 // NatsMessageWithJson generates a NATS message containing valid JSON data.
 func NatsMessageWithJson(t *rapid.T) *nats.Msg {
 	return &nats.Msg{
-		Subject: RandomTopicName(),
+		Subject: rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "topic"),
 		Data:    []byte(ValidJsonString(t)),
 	}
 }
@@ -126,7 +94,7 @@ func NatsMessageWithJson(t *rapid.T) *nats.Msg {
 // NatsMessageWithInvalidJson generates a NATS message containing invalid JSON.
 func NatsMessageWithInvalidJson(t *rapid.T) *nats.Msg {
 	return &nats.Msg{
-		Subject: RandomTopicName(),
+		Subject: rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "topic"),
 		Data:    []byte(InvalidJsonString(t)),
 	}
 }
@@ -140,22 +108,6 @@ func RandomEndpoint(t *rapid.T) string {
 	}
 
 	return rapid.SampledFrom(endpoints).Draw(t, "endpoint")
-}
-
-// RandomClusterUri generates random QuasarDB cluster URIs for testing.
-func RandomClusterUri(t *rapid.T) string {
-	uris := []string{
-		"qdb://127.0.0.1:2836",
-		"qdb://localhost:2836",
-		"qdb://test.example.com:2836",
-	}
-
-	return rapid.SampledFrom(uris).Draw(t, "cluster_uri")
-}
-
-// Email generates a random email address for testing.
-func Email() string {
-	return fmt.Sprintf("test%d@example.com", RandomNumber())
 }
 
 // ComponentName generates a random component name for error testing.

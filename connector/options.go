@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"strings"
+	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
@@ -68,7 +69,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 
 	// Set defaults
 	v.SetDefault("nats.endpoint", nats.DefaultURL)
-	v.SetDefault("qdb.compression", "fast")
+	v.SetDefault("qdb.compression", "none")
 	v.SetDefault("qdb.encryption", "none")
 	v.SetDefault("qdb.push_mode", "async")
 
@@ -91,7 +92,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 
 	// Compression, encryption, and push mode flags (using string for simplicity with pflag)
 	var compressionStr, encryptionStr, pushModeStr string
-	fs.StringVar(&compressionStr, "qdb-compression", "", "QuasarDB sink compression (none|best|speed)")
+	fs.StringVar(&compressionStr, "qdb-compression", "", "QuasarDB sink compression (none|fast|balanced)")
 	fs.StringVar(&encryptionStr, "qdb-encryption", "", "QuasarDB sink encryption (none|aes)")
 	fs.StringVar(&pushModeStr, "qdb-push-mode", "", "QuasarDB sink push mode (transactional|async|fast)")
 
@@ -245,7 +246,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Optio
 	fs.StringVar(&opts.sinkOptions.UserSecurityFile, "qdb-user-sec-file", "", "QuasarDB user security file")
 
 	// Compression (custom flag.Value)
-	fs.Var(&compressionFlag{dst: &opts.sinkOptions.Compression}, "qdb-compression", "QuasarDB sink compression (none|best|speed)")
+	fs.Var(&compressionFlag{dst: &opts.sinkOptions.Compression}, "qdb-compression", "QuasarDB sink compression (none|fast|balanced)")
 	// Encryption (custom flag.Value)
 	fs.Var(&encryptionFlag{dst: &opts.sinkOptions.Encryption}, "qdb-encryption", "QuasarDB sink encryption (none|aes)")
 	// Push mode (custom flag.Value)
@@ -307,8 +308,8 @@ func (o *Options) UserSecurityFile() string { return o.sinkOptions.UserSecurityF
 func (o *Options) Encryption() *qdb.Encryption { return o.sinkOptions.Encryption }
 
 // Compression returns QDB compression mode.
-// Out: qdb.Compression - none|fast|best
-// Ex: Compression() → CompFast
+// Out: qdb.Compression - none|fast|balanced
+// Ex: Compression() → CompNone
 func (o *Options) Compression() qdb.Compression { return o.sinkOptions.Compression }
 
 // ClientMaxParallelism returns QDB max parallelism.
@@ -320,6 +321,16 @@ func (o *Options) ClientMaxParallelism() *uint { return o.sinkOptions.ClientMaxP
 // Out: *uint - bytes
 // Ex: ClientMaxInBufSize() → &1024
 func (o *Options) ClientMaxInBufSize() *uint { return o.sinkOptions.ClientMaxInBufSize }
+
+// Timeout returns QDB connection timeout.
+// Out: *time.Duration - timeout duration
+// Ex: Timeout() → &30s
+func (o *Options) Timeout() *time.Duration { return o.sinkOptions.Timeout }
+
+// WorkerCreationDelay returns delay between worker creation.
+// Out: time.Duration - delay duration
+// Ex: WorkerCreationDelay() → 2s
+func (o *Options) WorkerCreationDelay() time.Duration { return o.sinkOptions.WorkerCreationDelay }
 
 // Endpoint returns NATS endpoint.
 // Out: string - connection URI
@@ -348,9 +359,9 @@ func (f *compressionFlag) String() string {
 }
 
 // Set parses compression from string.
-// In: val string - none|fast|speed|best
+// In: val string - none|fast|balanced
 // Out: error - parsing failure
-// Ex: Set("fast") → nil
+// Ex: Set("none") → nil
 func (f *compressionFlag) Set(val string) error {
 	comp, err := parseCompression(val)
 	if err != nil {
@@ -432,19 +443,19 @@ func (f *encryptionFlag) Set(val string) error {
 }
 
 // parseCompression converts string→qdb.Compression.
-// In: val string - none|fast|speed|best
+// In: val string - none|fast|balanced
 // Out: qdb.Compression, error
-// Ex: parseCompression("fast") → CompFast, nil
+// Ex: parseCompression("none") → CompNone, nil
 func parseCompression(val string) (qdb.Compression, error) {
 	switch val {
 	case "none":
 		return qdb.CompNone, nil
-	case "fast", "speed":
+	case "fast":
 		return qdb.CompFast, nil
-	case "best":
-		return qdb.CompBest, nil
+	case "balanced":
+		return qdb.CompBalanced, nil
 	default:
-		return qdb.CompNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid compression value: %s (valid values: none, fast, speed, best)", val))
+		return qdb.CompNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid compression value: %s (valid values: none, fast, balanced)", val))
 	}
 }
 

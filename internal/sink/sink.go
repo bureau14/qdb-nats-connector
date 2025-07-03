@@ -7,7 +7,7 @@ package sink
 import (
 	"fmt"
 	"log/slog"
-	"strings"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,9 +71,6 @@ func NewSink(opts Options) (*Sink, error) {
 	// 1. Create worker - QDB connection per worker
 	// 2. Start goroutine - process jobs concurrently
 
-	// Add initial delay to ensure QDB API is ready
-	time.Sleep(2 * time.Second)
-
 	for i := range opts.NumWriters {
 		// 1. Create worker: dedicated QDB handle
 		w, err := newWorker(i, opts)
@@ -91,10 +88,9 @@ func NewSink(opts Options) (*Sink, error) {
 		s.wg.Add(1)
 		go w.run(s.jobs, &s.wg)
 
-		// Add delay between worker creation to avoid rapid-fire connections
-		// Increased delay to avoid "operation not yet available" errors
-		if i < opts.NumWriters-1 {
-			time.Sleep(2 * time.Second)
+		// Add configurable delay between worker creation
+		if i < opts.NumWriters-1 && opts.WorkerCreationDelay > 0 {
+			time.Sleep(opts.WorkerCreationDelay)
 		}
 	}
 
@@ -156,66 +152,49 @@ func (s *Sink) Write(tables []*qdb.WriterTable) error {
 // Out: *worker, error - worker|connection error
 // Ex: newWorker(0, opts) → worker with handle
 func newWorker(id int, opts Options) (*worker, error) {
-	handle, err := qdb.NewHandle()
-	if err != nil {
-		return nil, err
-	}
+	// Build HandleOptions from sink options
+	handleOpts := qdb.NewHandleOptions().
+		WithClusterUri(opts.ClusterUri).
+		WithClusterPublicKeyFile(opts.ClusterPublicKeyFile).
+		WithUserSecurityFile(opts.UserSecurityFile).
+		WithCompression(opts.Compression)
 
-	// Configure handle options
+	// Set encryption if provided
 	if opts.Encryption != nil {
-		err := handle.SetEncryption(*opts.Encryption)
-		if err != nil {
-			_ = handle.Close()
-
-			return nil, err
-		}
+		handleOpts = handleOpts.WithEncryption(*opts.Encryption)
 	}
-	err = handle.SetCompression(opts.Compression)
-	if err != nil {
-		_ = handle.Close()
 
-		return nil, err
-	}
+	// Set optional client parameters
 	if opts.ClientMaxParallelism != nil {
-		err = handle.SetClientMaxParallelism(*opts.ClientMaxParallelism)
-		if err != nil {
-			_ = handle.Close()
-
-			return nil, err
+		parallelism := *opts.ClientMaxParallelism
+		if parallelism > math.MaxInt {
+			return nil, fmt.Errorf("client max parallelism %d exceeds maximum allowed value %d", parallelism, math.MaxInt)
 		}
+		handleOpts = handleOpts.WithClientMaxParallelism(int(parallelism))
 	}
 	if opts.ClientMaxInBufSize != nil {
-		err = handle.SetClientMaxInBufSize(*opts.ClientMaxInBufSize)
-		if err != nil {
-			_ = handle.Close()
-
-			return nil, err
-		}
+		handleOpts = handleOpts.WithClientMaxInBufSize(*opts.ClientMaxInBufSize)
 	}
 
-	// Connect to cluster with retry for "operation not yet available" errors
-	var connectErr error
-	for attempt := range 5 {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*2) * time.Second)
-			slog.Debug("Retrying connection", "worker_id", id, "attempt", attempt+1)
-		}
-
-		connectErr = handle.Connect(opts.ClusterUri)
-		if connectErr == nil {
-			break
-		}
-
-		// Check if it's the "operation not yet available" error
-		if !strings.Contains(connectErr.Error(), "code: 1002") {
-			break
-		}
+	// Set timeout if provided
+	if opts.Timeout != nil {
+		handleOpts = handleOpts.WithTimeout(*opts.Timeout)
 	}
 
-	if connectErr != nil {
-		_ = handle.Close()
+	// Set user credentials if provided
+	if opts.UserName != "" && opts.UserSecret != "" {
+		handleOpts = handleOpts.WithUserName(opts.UserName).WithUserSecret(opts.UserSecret)
+	}
 
-		return nil, connectErr
+	// Set cluster public key if provided as string
+	if opts.ClusterPublicKey != "" {
+		handleOpts = handleOpts.WithClusterPublicKey(opts.ClusterPublicKey)
+	}
+
+	// Create handle using builder pattern
+	handle, err := qdb.NewHandleFromOptions(handleOpts)
+	if err != nil {
+		return nil, err
 	}
 
 	return &worker{

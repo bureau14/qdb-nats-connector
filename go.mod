@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.24.4
 
 require (
-	github.com/bureau14/qdb-api-go/v3 v3.0.0-20250618120212-acd0a4f32d72
+	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20250702122732-3ea780d29f79
 	github.com/nats-io/nats.go v1.41.0
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.20.1

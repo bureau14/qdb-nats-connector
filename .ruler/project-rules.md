@@ -21,10 +21,13 @@ NATS→QuasarDB connector with pluggable parsers.
 main.go       # entry
 connector/    # bridge
 internal/     # utils
-insecure/     # Always ignore
 qdb/          # C headers (readonly)
 scripts/      # bash scripts
-secure/       # Always ignore
+vendor/       # vendored libraries
+
+insecure/     # Ignore
+secure/       # Ignore
+
 ```
 
 

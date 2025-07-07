@@ -1,22 +1,13 @@
 {
     "mcpServers": {
-        "sequential-thinking": {
+        "ref": {
             "command": "npx",
             "args": [
-                "-y",
-                "@modelcontextprotocol/server-sequential-thinking"
+                "mcp-remote@0.1.0-0",
+                "https://api.ref.tools/mcp",
+                "--header",
+                "x-ref-api-key: ref-14d068fe917e52adde79"
             ]
-        },
-        "context7": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "@upstash/context7-mcp"
-            ]
-        },
-        "git": {
-            "command": "uvx",
-            "args": ["--no-cache", "mcp-server-git"]
         },
         "time": {
             "command": "uvx",

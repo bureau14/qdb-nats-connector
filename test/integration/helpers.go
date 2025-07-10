@@ -2,7 +2,8 @@
 // +build integration
 
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package integration: helper functions for integration testing
+
+// Package integration provides integration test helpers.
 package integration
 
 import (
@@ -17,17 +18,27 @@ import (
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector"
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
-	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/nats-io/nats.go"
 	"pgregory.net/rapid"
 )
 
-// ConnectorConfig holds configuration for integration tests
+// ConnectorConfig holds the configuration parameters for integration tests.
+// It provides all necessary connection details for both NATS and QuasarDB,
+// along with optional security credentials and parser selection.
 type ConnectorConfig struct {
+	// NATSEndpoint is the NATS server URL (e.g., "nats://localhost:4222")
 	NATSEndpoint    string
+	
+	// QDBEndpoint is the QuasarDB cluster URI (e.g., "qdb://localhost:2836")
 	QDBEndpoint     string
+	
+	// QDBPublicKey is the optional QuasarDB cluster public key for secure connections
 	QDBPublicKey    string
+	
+	// QDBUserSecurity is the optional QuasarDB user security credentials
 	QDBUserSecurity string
+	
+	// Parser specifies which message parser to use (currently only "json" is supported)
 	Parser          string
 }
 
@@ -37,7 +48,8 @@ const (
 	defaultQDBCluster   = "qdb://127.0.0.1:2836"
 )
 
-// getEnvOrDefault returns environment variable value or default
+// getEnvOrDefault returns env var or default.
+// Internal helper for test configuration.
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -49,8 +61,8 @@ func getEnvOrDefault(key, defaultValue string) string {
 // Data Conversion Helpers
 // =============================================================================
 
-// ColumnDataToJSON converts ColumnDataSet to JSON messages
-// Each row becomes a JSON object with $table and $timestamp fields
+// ColumnDataToJSON converts dataset rows to JSON messages with $table/$timestamp fields.
+// Returns JSON array for NATS publishing.
 func ColumnDataToJSON(columnDataSet *ColumnDataSet) [][]byte {
 	if columnDataSet == nil {
 		return nil
@@ -91,7 +103,8 @@ func ColumnDataToJSON(columnDataSet *ColumnDataSet) [][]byte {
 // NATS Helper Functions
 // =============================================================================
 
-// GenerateRandomSubject generates random NATS subjects using rapid
+// GenerateRandomSubject creates rapid generator for NATS subjects (1-3 parts, dots).
+// Parts: 2-10 chars, alphanumeric, letter start.
 func GenerateRandomSubject() *rapid.Generator[string] {
 	return rapid.Custom(func(t *rapid.T) string {
 		// Generate 1-3 subject parts separated by dots
@@ -111,7 +124,8 @@ func GenerateRandomSubject() *rapid.Generator[string] {
 	})
 }
 
-// PublishJSONMessages publishes JSON messages to a NATS subject
+// PublishJSONMessages publishes JSON messages to NATS subject with flush.
+// Sequential publish for test synchronization.
 func PublishJSONMessages(nc *nats.Conn, subject string, messages [][]byte) error {
 	if nc == nil {
 		return errors.NewConnectionFailedError("nats_helper", "nil connection", nil)
@@ -132,11 +146,38 @@ func PublishJSONMessages(nc *nats.Conn, subject string, messages [][]byte) error
 	return nil
 }
 
+// PublishJSONMessagesSync publishes messages with proper synchronization.
+// Instead of time.Sleep, this uses JetStream's synchronous guarantees.
+func PublishJSONMessagesSync(nc *nats.Conn, subject string, messages [][]byte) error {
+	if nc == nil {
+		return errors.NewConnectionFailedError("nats_helper", "nil connection", nil)
+	}
+
+	// Get JetStream context for synchronous publishing
+	js, err := nc.JetStream()
+	if err != nil {
+		return errors.NewConnectionFailedError("nats_helper", "failed to get JetStream context", err)
+	}
+
+	// Publish messages synchronously with ack wait
+	for i, msg := range messages {
+		_, err := js.Publish(subject, msg)
+		if err != nil {
+			return errors.NewConnectionFailedError("nats_helper",
+				fmt.Sprintf("failed to publish message %d", i), err)
+		}
+	}
+
+	// No additional flush needed - JetStream publish waits for ack
+	return nil
+}
+
 // =============================================================================
 // QuasarDB Helper Functions
 // =============================================================================
 
-// CreateTableFromSchema creates a QuasarDB table from a schema
+// CreateTableFromSchema creates QDB timeseries table from schema.
+// Uses 24-hour shards for testing.
 func CreateTableFromSchema(handle qdb.HandleType, schema *TableSchema) error {
 	// Note: HandleType is a struct, so we can't check for nil
 	// Instead we'll let any invalid handle fail during table operations
@@ -158,7 +199,8 @@ func CreateTableFromSchema(handle qdb.HandleType, schema *TableSchema) error {
 	return nil
 }
 
-// ReadAllData reads all data from a QuasarDB table
+// ReadAllData reads all QDB table data from epoch to now+1h.
+// Supports blob/string types, returns strings for comparison.
 func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error) {
 	// Note: HandleType is a struct, so we can't check for nil
 	// Instead we'll let any invalid handle fail during operations
@@ -192,7 +234,12 @@ func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error
 	beginTime := time.Unix(0, 0)
 	endTime := time.Now().Add(time.Hour) // Add buffer for future timestamps
 
-	// Create bulk reader with all columns
+	// Since the Reader API with private fields is not accessible, we need to use a different approach.
+	// For now, let's use a simple approach: use the old bulk API with proper error handling
+	// and note that this migration will need the Reader API to be updated to provide public access.
+	// TODO: This is a temporary solution until the Reader API provides public field access.
+	
+	// Create bulk reader with all columns (keeping old approach for now)
 	bulk, err := table.Bulk(columnsInfo...)
 	if err != nil {
 		return nil, errors.NewConnectionFailedError("ReadAllData",
@@ -260,7 +307,8 @@ func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error
 	}, nil
 }
 
-// CompareColumnData compares two ColumnDataSets after sorting by timestamp
+// CompareColumnData compares datasets for equality with timestamp sorting.
+// Validates schema, row count, and values after sorting.
 func CompareColumnData(expected, actual *ColumnDataSet) error {
 	if expected == nil && actual == nil {
 		return nil
@@ -329,7 +377,8 @@ func CompareColumnData(expected, actual *ColumnDataSet) error {
 	return nil
 }
 
-// sortColumnDataByTimestamp sorts a ColumnDataSet by timestamp
+// sortColumnDataByTimestamp sorts dataset by timestamp.
+// Internal helper for consistent comparison.
 func sortColumnDataByTimestamp(data *ColumnDataSet) *ColumnDataSet {
 	if len(data.Timestamps) <= 1 {
 		return data
@@ -373,18 +422,14 @@ func sortColumnDataByTimestamp(data *ColumnDataSet) *ColumnDataSet {
 // Connector Helper Functions
 // =============================================================================
 
-// RunConnectorForSubject runs the connector for a specific subject until messages are processed
+// RunConnectorForSubject runs connector for subject with 30s timeout.
+// Uses async mode, TEST_STREAM for testing.
 func RunConnectorForSubject(subject string, cfg ConnectorConfig) error {
-	// Create JSON parser
-	jsonParser, err := parser.NewJsonParser()
-	if err != nil {
-		return errors.NewConnectionFailedError("RunConnectorForSubject", "failed to create parser", err)
-	}
-
 	// Build command line arguments for configuration
 	args := []string{
 		"--nats", cfg.NATSEndpoint,
 		"--topic", subject,
+		"--stream", "TEST_STREAM", // Required for JetStream
 		"--qdb", cfg.QDBEndpoint,
 	}
 
@@ -397,8 +442,8 @@ func RunConnectorForSubject(subject string, cfg ConnectorConfig) error {
 		return errors.NewConnectionFailedError("RunConnectorForSubject", "failed to load config", err)
 	}
 
-	// Create connector
-	conn, err := connector.NewConnector(loadedOpts, jsonParser)
+	// Create connector (parser is created internally by workers)
+	conn, err := connector.NewConnector(loadedOpts)
 	if err != nil {
 		return errors.NewConnectionFailedError("RunConnectorForSubject", "failed to create connector", err)
 	}

@@ -21,6 +21,7 @@ import (
 const latin = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 // RandomAlias generates 16-char alphanumeric ID.
+// In: none
 // Out: string - [A-Za-z0-9]{16}
 // Ex: RandomAlias() → "a8Bc3dEf9GhI2jKl"
 func RandomAlias() string {
@@ -33,23 +34,26 @@ func RandomAlias() string {
 	return buffer.String()
 }
 
-// RandomTopicName creates test topic name.
-// Out: string - 16-char topic
+// RandomTopicName delegates to RandomAlias for topics.
+// In: none
+// Out: string - 16-char alphanumeric
 // Ex: RandomTopicName() → "topic1a2b3c4d5e6"
 func RandomTopicName() string {
 	return RandomAlias()
 }
 
-// RandomNumber generates a random integer for testing.
-// Out: int - random number 0-999999
+// RandomNumber generates test integer 0-999999.
+// In: none
+// Out: int - random [0,999999]
 // Ex: RandomNumber() → 42857
 func RandomNumber() int {
 	return rand.Intn(1000000) // #nosec G404 - This is for test data generation only
 }
 
-// SetupNATS creates a test NATS connection using the default URL.
-// Returns a connected NATS connection for testing.
-// The connection should be closed by the caller using defer conn.Close().
+// SetupNATS connects to test NATS server.
+// In: t *testing.T - test context
+// Out: *nats.Conn - connected, caller must close
+// Ex: SetupNATS(t) → &Conn{connected:true}
 func SetupNATS(t *testing.T) *nats.Conn {
 	t.Helper()
 
@@ -60,24 +64,34 @@ func SetupNATS(t *testing.T) *nats.Conn {
 	return conn
 }
 
-// DefaultNATSEndpoint returns the default NATS endpoint for testing.
+// DefaultNATSEndpoint returns test NATS URL.
+// In: none
+// Out: string - nats.DefaultURL
+// Ex: DefaultNATSEndpoint() → "nats://localhost:4222"
 func DefaultNATSEndpoint() string {
 	return nats.DefaultURL
 }
 
-// DefaultQDBEndpoint returns the default QuasarDB endpoint for testing.
+// DefaultQDBEndpoint returns test QuasarDB URL.
+// In: none
+// Out: string - local QDB endpoint
+// Ex: DefaultQDBEndpoint() → "qdb://127.0.0.1:2836"
 func DefaultQDBEndpoint() string {
 	return "qdb://127.0.0.1:2836"
 }
 
-// TestSinkConfig returns conservative sink configuration for testing.
+// TestSinkConfig returns conservative test sink params.
+// In: none
+// Out: uri string, writers/queue/retries int
+// Ex: TestSinkConfig() → "qdb://127.0.0.1:2836",2,50,2
 func TestSinkConfig() (clusterUri string, numWriters, queueSize, retryAttempts int) {
 	return "qdb://127.0.0.1:2836", 2, 50, 2
 }
 
-// AssertError checks if an error occurred and optionally validates error content.
-// It accepts any test struct that has an errContains field for content validation.
-// This is a generic helper that can be used across all test suites.
+// AssertError validates error & optional content match.
+// In: t *testing.T, tt T - test case, err error
+// Out: none - asserts error exists & contains text
+// Ex: AssertError(t, tt{errContains:"fail"}, err)
 func AssertError[T any](t *testing.T, tt T, err error) {
 	require.Error(t, err)
 
@@ -87,9 +101,10 @@ func AssertError[T any](t *testing.T, tt T, err error) {
 	}
 }
 
-// WaitForMessages waits for messages with a timeout using a WaitGroup.
-// This is useful for synchronizing tests that involve concurrent message processing.
-// It will fail the test if the timeout is reached before all messages are processed.
+// WaitForMessages blocks until WaitGroup done or timeout.
+// In: t *testing.T, wg *sync.WaitGroup, timeout Duration
+// Out: none - returns or t.Fatal on timeout
+// Ex: WaitForMessages(t, wg, 5*time.Second)
 func WaitForMessages(t *testing.T, wg *sync.WaitGroup, timeout time.Duration) {
 	done := make(chan struct{})
 	go func() {
@@ -104,7 +119,10 @@ func WaitForMessages(t *testing.T, wg *sync.WaitGroup, timeout time.Duration) {
 	}
 }
 
-// AssertSubscriptionError checks subscription-specific error details
+// AssertSubscriptionError validates subscription error fields.
+// In: t *testing.T, tt T, err error, topic string
+// Out: none - asserts ConnectorError with code 1003
+// Ex: AssertSubscriptionError(t, tt, err, "data.*")
 func AssertSubscriptionError[T any](t *testing.T, tt T, err error, topic string) {
 	AssertError(t, tt, err)
 

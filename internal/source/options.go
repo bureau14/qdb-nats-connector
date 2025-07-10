@@ -1,32 +1,40 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package source: NATS connection & subscriptions
-// Types: Source, Options, OptionsProvider
-// Ex: source.NewSource(opts).Subscribe(handler) → messages flow
+// Package source: NATS JetStream connection & subscriptions
+// Types: Source, Options, OptionsProvider, MessageBatch, MessageInfo
+// Ex: source.NewSource(opts).FetchBatch(ctx) → messages flow
 package source
+
+import "time"
 
 // Option: functional option for source configuration
 type Option func(Options) Options
 
-// Options: NATS connection config with endpoint & topic
+// Options: NATS JetStream connection config
 type Options struct {
-	Endpoint string `json:"endpoint"`
-	Topic    string `json:"topic"`
+	Endpoint     string        `json:"endpoint"`
+	Topic        string        `json:"topic"`
+	StreamName   string        `json:"stream_name"`
+	ConsumerName string        `json:"consumer_name"`
+	BatchSize    int           `json:"batch_size"`
+	BatchTimeout time.Duration `json:"batch_timeout"`
+	FetchTimeout time.Duration `json:"fetch_timeout"`
+	AckWait      time.Duration `json:"ack_wait"`
+	MaxDeliver   int           `json:"max_deliver"`
 }
 
-// NewOptions creates source config.
-// Args:
-//
-//	opts: ...Option - functional option setters
-//
-// Returns:
-//
-//	Options: NATS endpoint & topic config
-//
-// Example:
-//
-//	NewOptions(WithEndpoint("nats://localhost:4222")) // → opts
+// NewOptions applies options to JetStream defaults.
+// In: opts ...Option - functional options
+// Out: Options - batch=100, timeout=1s, ack=30s
+// Ex: NewOptions(WithEndpoint("nats://localhost")) → Options{}
 func NewOptions(opts ...Option) Options {
-	options := Options{}
+	// Set defaults for JetStream
+	options := Options{
+		BatchSize:    100,
+		BatchTimeout: time.Second,
+		FetchTimeout: 5 * time.Second,
+		AckWait:      30 * time.Second,
+		MaxDeliver:   3,
+	}
 	for _, opt := range opts {
 		options = opt(options)
 	}
@@ -58,20 +66,106 @@ func WithTopic(topic string) Option {
 	}
 }
 
+// WithStreamName sets JetStream stream name.
+// In: streamName string - JetStream stream
+// Out: Option
+// Ex: WithStreamName("EVENTS")
+func WithStreamName(streamName string) Option {
+	return func(o Options) Options {
+		o.StreamName = streamName
+
+		return o
+	}
+}
+
+// WithBatchSize sets messages per fetch.
+// In: batchSize int - messages per batch
+// Out: Option
+// Ex: WithBatchSize(100)
+func WithBatchSize(batchSize int) Option {
+	return func(o Options) Options {
+		o.BatchSize = batchSize
+
+		return o
+	}
+}
+
+// WithBatchTimeout sets max wait for batch.
+// In: timeout time.Duration - max wait
+// Out: Option
+// Ex: WithBatchTimeout(time.Second)
+func WithBatchTimeout(timeout time.Duration) Option {
+	return func(o Options) Options {
+		o.BatchTimeout = timeout
+
+		return o
+	}
+}
+
+// WithFetchTimeout sets total fetch timeout.
+// In: timeout time.Duration - total timeout
+// Out: Option
+// Ex: WithFetchTimeout(5*time.Second)
+func WithFetchTimeout(timeout time.Duration) Option {
+	return func(o Options) Options {
+		o.FetchTimeout = timeout
+
+		return o
+	}
+}
+
+// WithAckWait sets message ACK timeout.
+// In: timeout time.Duration - ACK timeout
+// Out: Option
+// Ex: WithAckWait(30*time.Second)
+func WithAckWait(timeout time.Duration) Option {
+	return func(o Options) Options {
+		o.AckWait = timeout
+
+		return o
+	}
+}
+
+// WithMaxDeliver sets max redelivery count.
+// In: maxDeliver int - max attempts
+// Out: Option
+// Ex: WithMaxDeliver(3)
+func WithMaxDeliver(maxDeliver int) Option {
+	return func(o Options) Options {
+		o.MaxDeliver = maxDeliver
+
+		return o
+	}
+}
+
 // OptionsProvider: interface for source config decoupling from connector
 type OptionsProvider interface {
+	URL() string
+	StreamName() string
+	BatchSize() int
+	BatchTimeout() time.Duration
+	FetchTimeout() time.Duration
+	AckWait() time.Duration
+	MaxDeliver() int
+	// Legacy compatibility
 	Endpoint() string
 	Topic() string
 }
 
-// FromOptionsProvider builds Options from provider.
-// In: p OptionsProvider - config source
-// Out: Options - NATS config
-// Ex: FromOptionsProvider(connectorOpts) → sourceOpts
-func FromOptionsProvider(p OptionsProvider) Options {
+// FromOptionsProvider extracts source config with topic override.
+// In: p OptionsProvider - config, topicFilter string - worker topic
+// Out: Options - JetStream config with custom topic
+// Ex: FromOptionsProvider(opts, "sensors.*") → Options{topic:"sensors.*"}
+func FromOptionsProvider(p OptionsProvider, topicFilter string) Options {
 	opts := []Option{
-		WithEndpoint(p.Endpoint()),
-		WithTopic(p.Topic()),
+		WithEndpoint(p.URL()),
+		WithTopic(topicFilter),
+		WithStreamName(p.StreamName()),
+		WithBatchSize(p.BatchSize()),
+		WithBatchTimeout(p.BatchTimeout()),
+		WithFetchTimeout(p.FetchTimeout()),
+		WithAckWait(p.AckWait()),
+		WithMaxDeliver(p.MaxDeliver()),
 	}
 
 	return NewOptions(opts...)

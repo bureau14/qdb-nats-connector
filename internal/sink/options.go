@@ -29,6 +29,9 @@ type Options struct {
 	// Defaults to `qdb.CompNone`
 	Compression qdb.Compression
 
+	// Defaults to `qdb.WriterDeduplicationModeDrop`
+	DeduplicationMode qdb.WriterDeduplicationMode
+
 	ClientMaxParallelism *uint
 	ClientMaxInBufSize   *uint
 
@@ -40,22 +43,15 @@ type Options struct {
 	WorkerCreationDelay time.Duration  `json:"worker_creation_delay"`
 }
 
-// NewOptions creates sink config with defaults.
-// Args:
-//
-//	opts: ...Option - functional option setters
-//
-// Returns:
-//
-//	Options: CompNone compression, 4 workers, queue=100
-//
-// Example:
-//
-//	NewOptions(WithClusterUri("qdb://host:2836")) // → opts
+// NewOptions applies options to default sink config.
+// In: opts ...Option - functional options
+// Out: Options - async push, 4 workers, queue=100
+// Ex: NewOptions(WithClusterUri("qdb://host")) → Options{}
 func NewOptions(opts ...Option) Options {
 	options := Options{
 		PushMode:            qdb.WriterPushModeAsync,
 		Compression:         qdb.CompNone,
+		DeduplicationMode:   qdb.WriterDeduplicationModeDrop,
 		NumWriters:          4,
 		QueueSize:           100,
 		RetryAttempts:       10,
@@ -176,6 +172,18 @@ func WithCompression(c qdb.Compression) Option {
 	}
 }
 
+// WithDeduplicationMode sets deduplication mode.
+// In: mode qdb.WriterDeduplicationMode - disabled|drop|upsert
+// Out: Option
+// Ex: WithDeduplicationMode(qdb.WriterDeduplicationModeDrop)
+func WithDeduplicationMode(mode qdb.WriterDeduplicationMode) Option {
+	return func(o Options) Options {
+		o.DeduplicationMode = mode
+
+		return o
+	}
+}
+
 // WithClientMaxParallelism sets max threads.
 // In: par uint - parallelism limit
 // Out: Option
@@ -267,16 +275,17 @@ type OptionsProvider interface {
 	UserSecurityFile() string
 	Encryption() *qdb.Encryption
 	Compression() qdb.Compression
+	DeduplicationMode() qdb.WriterDeduplicationMode
 	ClientMaxParallelism() *uint
 	ClientMaxInBufSize() *uint
 	Timeout() *time.Duration
 	WorkerCreationDelay() time.Duration
 }
 
-// FromOptionsProvider builds Options from provider.
-// In: p OptionsProvider - config source
-// Out: Options - built config
-// Ex: FromOptionsProvider(connectorOpts) → sinkOpts
+// FromOptionsProvider extracts sink config from provider.
+// In: p OptionsProvider - config source interface
+// Out: Options - built from provider fields
+// Ex: FromOptionsProvider(connOpts) → Options{uri,auth,workers}
 func FromOptionsProvider(p OptionsProvider) Options {
 	// Build base options with required fields
 	opts := []Option{
@@ -285,6 +294,7 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithUserSecurityFile(p.UserSecurityFile()),
 		WithEncryption(p.Encryption()),
 		WithCompression(p.Compression()),
+		WithDeduplicationMode(p.DeduplicationMode()),
 		WithWorkerCreationDelay(p.WorkerCreationDelay()),
 	}
 

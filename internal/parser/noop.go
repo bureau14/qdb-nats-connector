@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package parser: message transformation pipeline
-// Types: Parser, JsonParser, NoopParser
-// Ex: parser.NewJsonParser().Parse(msg) → []WriterTable
+// Package parser: NATS→QuasarDB message transformation
+// Types: Parser, JsonParser, ParseResult
+// Ex: parser.Parse(msg) → []WriterTable
 package parser
 
 import (
@@ -17,33 +17,19 @@ import (
 type NoopParser struct{}
 
 // NewNoopParser creates validation-only parser.
-// Returns:
-//
-//	*NoopParser: test parser, returns ∅
-//	error: never fails (interface consistency)
-//
-// Example:
-//
-//	NewNoopParser() // → parser, nil
+// In: none
+// Out: *NoopParser, error - test parser, always nil
+// Ex: NewNoopParser() → &NoopParser{}, nil
 func NewNoopParser() (*NoopParser, error) {
 	slog.Info("Initializing noop parser")
 
 	return &NoopParser{}, nil
 }
 
-// Parse validates msg, returns ∅.
-// Args:
-//
-//	msg: *nats.Msg - NATS message for validation
-//
-// Returns:
-//
-//	[]qdb.WriterTable: empty slice (testing only)
-//	error: ParsingFailed on nil/empty msg
-//
-// Example:
-//
-//	Parse(msg) // → [], nil
+// Parse validates message, returns empty tables.
+// In: msg *nats.Msg - message to validate
+// Out: []WriterTable, error - ∅ or nil/empty error
+// Ex: Parse(msg) → [], nil
 func (p *NoopParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	if msg == nil {
 		return nil, errors.NewParsingFailedError("noop_parser", fmt.Errorf("nil message"))
@@ -55,4 +41,12 @@ func (p *NoopParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	slog.Debug("Parsing NATS message", "subject", msg.Subject, "data_len", len(msg.Data))
 
 	return []qdb.WriterTable{}, nil
+}
+
+// ParseBatch delegates to DefaultParseBatch for validation.
+// In: msgs []*nats.Msg - message batch
+// Out: []ParseResult - empty tables or errors
+// Ex: ParseBatch(msgs) → [{[],nil},{[],err}]
+func (p *NoopParser) ParseBatch(msgs []*nats.Msg) []ParseResult {
+	return DefaultParseBatch(p, msgs)
 }

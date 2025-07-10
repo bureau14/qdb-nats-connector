@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package connector: NATS→QuasarDB pipeline orchestrator
-// Types: Connector, Options
-// Ex: connector.NewConnector(opts, parser).Run() → data flows
+// Package connector: NATS→QuasarDB pipeline orchestration
+// Types: Connector, Worker, Options
+// Ex: connector.New(opts).Run() → streams data
 package connector
 
 import (
@@ -9,178 +9,203 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
-	qdb "github.com/bureau14/qdb-api-go/v3"
-	"github.com/bureau14/qdb-nats-connector/internal/errors"
-	"github.com/bureau14/qdb-nats-connector/internal/parser"
-	"github.com/bureau14/qdb-nats-connector/internal/sink"
-	"github.com/bureau14/qdb-nats-connector/internal/source"
-	"github.com/nats-io/nats.go"
+	"github.com/bureau14/qdb-nats-connector/connector/resilience"
 )
 
-// Connector: NATS→QDB pipeline orchestrator, handles source/parser/sink lifecycle
+// Connector: orchestrates NATS→QuasarDB pipeline, goroutine-safe
 type Connector struct {
-	Source *source.Source
-	Parser parser.Parser
-	Sink   *sink.Sink
+	workers        []*Worker // topic processors
+	breakerManager *resilience.Manager
+	wg             sync.WaitGroup
+	cancel         context.CancelFunc
 }
 
-// NewConnector creates NATS→QDB pipeline.
+// NewConnector creates NATS→QuasarDB connector.
 // Args:
 //
-//	opts: *Options - endpoints & credentials
-//	p: Parser - message transformer
+//	opts: NATS/QuasarDB config & topic filters
 //
 // Returns:
 //
-//	*Connector: pipeline orchestrator
-//	error: validation/connection fails
+//	*Connector: configured pipeline
+//	error: invalid options/worker creation failed
 //
 // Example:
 //
-//	NewConnector(opts, jsonParser) // → connector, nil
-func NewConnector(opts *Options, p parser.Parser) (*Connector, error) {
-	// Approach: validate→create in order, cleanup on fail
-	// 1. Validate config - fail fast
-	// 2. Create source - NATS connection
-	// 3. Create sink - QDB connection
-
-	// 1. Validate: opts & parser required
-	validationErr := ValidateOptions(opts)
+//	conn := NewConnector(&Options{...}) // → *Connector
+func NewConnector(opts *Options) (*Connector, error) {
+	// Validate config
+	validationErr := validateOptions(opts)
 	if validationErr != nil {
 		slog.Error("Options not valid", "options", opts, "error", validationErr)
 
 		return nil, validationErr
 	}
 
-	if p == nil {
-		return nil, errors.NewInvalidConfigError("connector", "parser cannot be nil")
+	// Create circuit breaker manager
+	var breakerManager *resilience.Manager
+	if opts.CircuitBreakerShared {
+		breakerManager = resilience.NewManager(
+			resilience.WithDefaults(
+				opts.CircuitBreakerFailureThreshold,
+				opts.CircuitBreakerSuccessThreshold,
+				opts.CircuitBreakerTimeout,
+			),
+			resilience.WithDefaultJitter(opts.CircuitBreakerJitterMax),
+			resilience.WithDefaultHalfOpen(opts.CircuitBreakerHalfOpenBase, opts.CircuitBreakerHalfOpenMax),
+			resilience.WithHookRegistry(opts.Hooks),
+		)
 	}
 
-	// 2. Create source: NATS subscriber
-	srcOpts := source.FromOptionsProvider(opts)
-	src, err := source.NewSource(srcOpts)
-	if err != nil {
-		slog.Error("Failed to create source", "options", opts, "error", err)
+	// Create workers - one per topic filter
+	workers := make([]*Worker, len(opts.NatsTopicFilters))
 
-		return nil, err
-	}
+	for i, topicFilter := range opts.NatsTopicFilters {
+		worker, err := NewWorker(i, topicFilter, *opts, breakerManager)
+		if err != nil {
+			// Cleanup created workers
+			for j := range i {
+				_ = workers[j].shutdown()
+			}
 
-	// 3. Create sink: QDB writer with cleanup
-	snkOpts := sink.FromOptionsProvider(opts)
-	snk, err := sink.NewSink(snkOpts)
-	if err != nil {
-		slog.Error("Failed to create sink", "options", snkOpts, "error", err)
-		src.Close()
-
-		return nil, err
+			return nil, err
+		}
+		workers[i] = worker
 	}
 
 	return &Connector{
-		Source: src,
-		Parser: p,
-		Sink:   snk,
+		workers:        workers,
+		breakerManager: breakerManager,
 	}, nil
 }
 
-// Run starts connector & blocks until shutdown.
-// Out: error - subscription failure
-// Ex: Run() → nil
+// Run starts connector, blocks until shutdown/error.
+// Args:
+//
+//	none
+//
+// Returns:
+//
+//	error: worker failure/context cancelled
+//
+// Example:
+//
+//	conn.Run() // blocks until SIGINT/error
 func (c *Connector) Run() error {
 	return c.RunWithContext(context.Background())
 }
 
-// RunWithContext runs connector with cancellation.
+// RunWithContext runs connector with cancellation control.
 // Args:
 //
-//	ctx: context.Context - cancellation context
+//	ctx: cancellation context
 //
 // Returns:
 //
-//	error: subscription/context errors
+//	error: worker error/context cancelled
 //
 // Example:
 //
-//	RunWithContext(ctx) // blocks until SIGINT/cancel
+//	RunWithContext(ctx) // blocks until ctx.Done()/error
 func (c *Connector) RunWithContext(ctx context.Context) error {
-	slog.Info("Starting connector")
+	ctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	defer cancel()
 
-	// Subscribe to NATS with our message handler
-	err := c.Source.Subscribe(c.handleMessage)
-	if err != nil {
-		return errors.NewSubscriptionFailedError("connector", "unknown", err)
+	slog.Info("Starting connector with workers", "worker_count", len(c.workers))
+
+	// Error channel for worker failures
+	errCh := make(chan error, len(c.workers))
+
+	// Start workers
+	for _, worker := range c.workers {
+		c.wg.Add(1)
+		go func(w *Worker) {
+			defer c.wg.Done()
+			err := w.Run(ctx)
+			if err != nil && err != context.Canceled {
+				errCh <- err
+			}
+		}(worker)
 	}
 
-	slog.Info("Connector running, processing messages...")
+	// Start health monitor
+	go c.monitorWorkers(ctx)
 
 	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Wait for context cancellation or interrupt signal
-	select {
-	case <-ctx.Done():
-		slog.Info("Context cancelled, shutting down")
+	slog.Info("Connector running, processing messages...")
 
-		return ctx.Err()
+	// Wait for error, signal, or cancellation
+	select {
+	case err := <-errCh:
+		slog.Error("Worker error, shutting down", "error", err)
+		cancel() // Stop all workers
+		c.wg.Wait()
+
+		return err
 	case sig := <-sigCh:
 		slog.Info("Received signal, shutting down", "signal", sig)
+		cancel()
+		c.wg.Wait()
 
 		return nil
+	case <-ctx.Done():
+		slog.Info("Context cancelled, shutting down")
+		c.wg.Wait()
+
+		return ctx.Err()
 	}
 }
 
-// Close shuts down source→sink order.
-// Ex: Close() → components closed
+// Close gracefully shuts down connector & workers.
+// Args:
+//
+//	none
+//
+// Returns:
+//
+//	none
+//
+// Example:
+//
+//	conn.Close() // cancels ctx, waits workers, frees resources
 func (c *Connector) Close() {
 	slog.Info("Closing connector")
-	c.Source.Close()
-	c.Sink.Close()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.wg.Wait()
+	for _, worker := range c.workers {
+		_ = worker.shutdown()
+	}
 }
 
-// handleMessage parses NATS msg→QDB tables
-// In: msg *nats.Msg - raw message
-// Approach: parse→convert→write, skip ∅
-// 1. Parse msg - get tables
-// 2. Convert to pointers - sink needs []*Table
-// 3. Write to QDB - log errors & continue
-func (c *Connector) handleMessage(msg *nats.Msg) {
-	slog.Debug("Connector received NATS message", "subject", msg.Subject, "data_len", len(msg.Data))
+// monitorWorkers checks worker health every 30s
+// In: ctx context.Context - cancellation
+// Out: none - logs warnings
+// Ex: monitorWorkers(ctx) → logs unhealthy
+func (c *Connector) monitorWorkers(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
-	// 1. Parse msg: extract timeseries data
-	tables, err := c.Parser.Parse(msg)
-	if err != nil {
-		slog.Error("Failed to parse message", "subject", msg.Subject, "error", err)
-
-		return
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, w := range c.workers {
+				if !w.isHealthy() {
+					slog.Warn("Worker unhealthy", "topic", w.topicFilter)
+					// Workers auto-recover via consumer recreation
+				}
+			}
+		}
 	}
-
-	if len(tables) == 0 {
-		slog.Debug("Parser returned no tables", "subject", msg.Subject)
-
-		return
-	}
-
-	slog.Debug("Parser returned tables", "subject", msg.Subject, "num_tables", len(tables))
-	for i, table := range tables {
-		slog.Debug("Table details", "index", i, "table_name", table.TableName)
-	}
-
-	// 2. Convert to pointers: []Table→[]*Table
-	writerTables := make([]*qdb.WriterTable, len(tables))
-	for i := range tables {
-		writerTables[i] = &tables[i]
-	}
-
-	// 3. Write to QDB: errors logged, not fatal
-	slog.Debug("Writing tables to sink", "subject", msg.Subject, "num_tables", len(writerTables))
-	err = c.Sink.Write(writerTables)
-	if err != nil {
-		slog.Error("Failed to write to sink", "subject", msg.Subject, "num_tables", len(tables), "error", err)
-
-		return
-	}
-
-	slog.Debug("Message processed successfully", "subject", msg.Subject, "num_tables", len(tables))
 }

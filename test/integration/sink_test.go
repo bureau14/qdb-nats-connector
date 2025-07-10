@@ -2,7 +2,7 @@
 // +build integration
 
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package integration: direct sink integration tests
+// Package integration provides integration test helpers.
 package integration
 
 import (
@@ -15,21 +15,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSinkDirectWrite tests writing directly to the sink without NATS/parser
+// TestSinkDirectWrite writes directly to sink without NATS/parser.
 func TestSinkDirectWrite(t *testing.T) {
-	cfg := getTestConfig()
+	qdbEndpoint := "qdb://127.0.0.1:2836"
 
 	// Connect to QuasarDB for verification
 	handle, err := qdb.NewHandle()
 	require.NoError(t, err, "Failed to create QuasarDB handle")
-	defer handle.Close()
+	defer func() { _ = handle.Close() }()
 
-	err = handle.Connect(cfg.QDBEndpoint)
-	require.NoError(t, err, "Failed to connect to QuasarDB at %s", cfg.QDBEndpoint)
+	err = handle.Connect(qdbEndpoint)
+	require.NoError(t, err, "Failed to connect to QuasarDB at %s", qdbEndpoint)
 
 	// Create test table
 	tableName := "test_sink_direct_" + time.Now().Format("20060102150405")
-	table := handle.Timeseries(tableName)
+	table := handle.Table(tableName)
 
 	columns := []qdb.TsColumnInfo{
 		qdb.NewTsColumnInfo("temperature", qdb.TsColumnDouble),
@@ -39,11 +39,11 @@ func TestSinkDirectWrite(t *testing.T) {
 
 	err = table.Create(24*time.Hour, columns...)
 	require.NoError(t, err, "Failed to create test table")
-	defer table.Remove()
+	defer func() { _ = table.Remove() }()
 
 	// Create sink with minimal configuration
 	sinkOpts := sink.Options{
-		ClusterUri:    cfg.QDBEndpoint,
+		ClusterUri:    qdbEndpoint,
 		NumWriters:    1,
 		QueueSize:     10,
 		RetryAttempts: 3,
@@ -89,35 +89,24 @@ func TestSinkDirectWrite(t *testing.T) {
 	require.NoError(t, err, "Failed to set location data")
 
 	// Write to sink
-	err = s.Write([]*qdb.WriterTable{&writerTable})
+	err = s.Write([]qdb.WriterTable{writerTable})
 	require.NoError(t, err, "Failed to write to sink")
 
 	// Wait for async write to complete
 	time.Sleep(2 * time.Second)
 
-	// Verify data was written
-	bulk, err := table.Bulk(columns...)
-	require.NoError(t, err, "Failed to create bulk reader")
-	defer bulk.Release()
+	// Verify data was written using the new Reader API
+	reader, err := qdb.NewReader(handle, qdb.NewReaderOptions().
+		WithTables([]string{tableName}).
+		WithTimeRange(now.Add(-1*time.Second), now.Add(2*time.Second)))
+	require.NoError(t, err, "Failed to create reader")
+	defer reader.Close()
 
-	ranges := []qdb.TsRange{qdb.NewRange(now.Add(-1*time.Second), now.Add(2*time.Second))}
-	err = bulk.GetRanges(ranges...)
-	require.NoError(t, err, "Failed to get ranges")
+	// Count rows using FetchAll and RowCount
+	chunk, err := reader.FetchAll()
+	require.NoError(t, err, "Failed to fetch data")
 
-	// Count rows
-	rowCount := 0
-	for {
-		_, err := bulk.NextRow()
-		if err != nil {
-			break
-		}
-		rowCount++
-
-		// Skip reading values, just drain the row
-		bulk.GetDouble() // temperature
-		bulk.GetDouble() // humidity
-		bulk.GetString() // location
-	}
+	rowCount := chunk.RowCount()
 
 	assert.Equal(t, 2, rowCount, "Expected 2 rows written to QuasarDB")
 	t.Logf("✓ Sink direct write test passed: %d rows written to table %s", rowCount, tableName)

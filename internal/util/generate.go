@@ -13,8 +13,10 @@ import (
 	"pgregory.net/rapid"
 )
 
-// generateRandomJsonFields creates a map with random JSON-compatible fields.
-// Returns a map[string]interface{} with 1-5 randomly generated fields.
+// generateRandomJsonFields creates 1-5 random JSON fields.
+// In: t *rapid.T - test randomizer
+// Out: map[string]any - string/float64/bool fields
+// Ex: generateRandomJsonFields(t) → {"key1":"val","key2":42.0}
 func generateRandomJsonFields(t *rapid.T) map[string]interface{} {
 	numFields := rapid.IntRange(1, 5).Draw(t, "numFields")
 	jsonData := make(map[string]interface{})
@@ -42,8 +44,10 @@ func generateRandomJsonFields(t *rapid.T) map[string]interface{} {
 	return jsonData
 }
 
-// ValidJsonString generates a valid JSON string with random fields.
-// Returns a JSON string with 1-5 fields containing various data types.
+// ValidJsonString generates valid JSON with 1-5 random fields.
+// In: t *rapid.T - test randomizer
+// Out: string - marshaled JSON object
+// Ex: ValidJsonString(t) → "{\"key\":\"value\"}"
 func ValidJsonString(t *rapid.T) string {
 	jsonData := generateRandomJsonFields(t)
 	jsonBytes, _ := json.Marshal(jsonData)
@@ -51,13 +55,18 @@ func ValidJsonString(t *rapid.T) string {
 	return string(jsonBytes)
 }
 
-// ValidJsonMap generates a valid JSON map with random fields.
-// Returns a map[string]interface{} suitable for JSON marshaling.
+// ValidJsonMap generates random JSON-compatible map.
+// In: t *rapid.T - test randomizer
+// Out: map[string]any - 1-5 fields
+// Ex: ValidJsonMap(t) → {"field1":true,"field2":123}
 func ValidJsonMap(t *rapid.T) map[string]interface{} {
 	return generateRandomJsonFields(t)
 }
 
-// InvalidJsonString generates invalid JSON strings for testing error handling.
+// InvalidJsonString picks malformed JSON for error tests.
+// In: t *rapid.T - test randomizer
+// Out: string - syntax error JSON
+// Ex: InvalidJsonString(t) → "{\"key\": invalid}"
 func InvalidJsonString(t *rapid.T) string {
 	invalidPatterns := []string{
 		`{"key": invalid}`,
@@ -75,7 +84,10 @@ func InvalidJsonString(t *rapid.T) string {
 	return invalidPatterns[idx]
 }
 
-// NatsMessage generates a NATS message with random subject and data.
+// NatsMessage generates random NATS message.
+// In: t *rapid.T - test randomizer
+// Out: *nats.Msg - random subject & data
+// Ex: NatsMessage(t) → &Msg{Subject:"topic1",Data:[]byte("data")}
 func NatsMessage(t *rapid.T) *nats.Msg {
 	return &nats.Msg{
 		Subject: rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "topic"),
@@ -83,7 +95,10 @@ func NatsMessage(t *rapid.T) *nats.Msg {
 	}
 }
 
-// NatsMessageWithJson generates a NATS message containing valid JSON data.
+// NatsMessageWithJson creates NATS message with valid JSON.
+// In: t *rapid.T - test randomizer
+// Out: *nats.Msg - random subject, JSON data
+// Ex: NatsMessageWithJson(t) → &Msg{Data:[]byte("{\"k\":\"v\"}")}
 func NatsMessageWithJson(t *rapid.T) *nats.Msg {
 	return &nats.Msg{
 		Subject: rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "topic"),
@@ -91,7 +106,10 @@ func NatsMessageWithJson(t *rapid.T) *nats.Msg {
 	}
 }
 
-// NatsMessageWithInvalidJson generates a NATS message containing invalid JSON.
+// NatsMessageWithInvalidJson creates NATS message with bad JSON.
+// In: t *rapid.T - test randomizer
+// Out: *nats.Msg - random subject, invalid JSON
+// Ex: NatsMessageWithInvalidJson(t) → &Msg{Data:[]byte("{key:}")}
 func NatsMessageWithInvalidJson(t *rapid.T) *nats.Msg {
 	return &nats.Msg{
 		Subject: rapid.StringMatching(`[a-zA-Z][a-zA-Z0-9_]*`).Draw(t, "topic"),
@@ -99,7 +117,10 @@ func NatsMessageWithInvalidJson(t *rapid.T) *nats.Msg {
 	}
 }
 
-// RandomEndpoint generates random NATS endpoints for testing.
+// RandomEndpoint picks test NATS endpoint.
+// In: t *rapid.T - test randomizer
+// Out: string - nats://host:4222 format
+// Ex: RandomEndpoint(t) → "nats://localhost:4222"
 func RandomEndpoint(t *rapid.T) string {
 	endpoints := []string{
 		"nats://localhost:4222",
@@ -110,7 +131,10 @@ func RandomEndpoint(t *rapid.T) string {
 	return rapid.SampledFrom(endpoints).Draw(t, "endpoint")
 }
 
-// ComponentName generates a random component name for error testing.
+// ComponentName picks random component for error tests.
+// In: t *rapid.T - test randomizer
+// Out: string - source/sink/parser/etc
+// Ex: ComponentName(t) → "json_parser"
 func ComponentName(t *rapid.T) string {
 	components := []string{
 		"source", "sink", "parser", "connector",
@@ -120,7 +144,10 @@ func ComponentName(t *rapid.T) string {
 	return rapid.SampledFrom(components).Draw(t, "component")
 }
 
-// UnicodeName generates a string with unicode characters for testing.
+// UnicodeName picks unicode test string.
+// In: t *rapid.T - test randomizer
+// Out: string - emoji/CJK/Arabic/etc
+// Ex: UnicodeName(t) → "🚀💻🔥"
 func UnicodeName(t *rapid.T) string {
 	unicodeStrings := []string{
 		"🚀💻🔥",
@@ -134,7 +161,10 @@ func UnicodeName(t *rapid.T) string {
 	return rapid.SampledFrom(unicodeStrings).Draw(t, "unicode")
 }
 
-// SpecialCharsString generates strings with special characters for testing.
+// SpecialCharsString picks string with special chars.
+// In: t *rapid.T - test randomizer
+// Out: string - quotes/newlines/nulls/etc
+// Ex: SpecialCharsString(t) → "line1\nline2"
 func SpecialCharsString(t *rapid.T) string {
 	specialStrings := []string{
 		`He said "Hello"`,

@@ -41,18 +41,10 @@ const (
 	ErrCodeUnexpectedError
 )
 
-// NewNoTopicProvidedError creates missing topic error.
-// Args:
-//
-//	component: string - caller module name
-//
-// Returns:
-//
-//	*ConnectorError: ErrCodeNoTopicProvided
-//
-// Example:
-//
-//	NewNoTopicProvidedError("source") // → error
+// NewNoTopicProvidedError creates no topic provided error.
+// In: component string - caller module
+// Out: *ConnectorError - code 1000 with metadata
+// Ex: NewNoTopicProvidedError("source") → &ConnectorError{Code:1000}
 func NewNoTopicProvidedError(component string) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeNoTopicProvided,
@@ -63,18 +55,9 @@ func NewNoTopicProvidedError(component string) *ConnectorError {
 }
 
 // NewInvalidConfigError creates config validation error.
-// Args:
-//
-//	component: string - caller module name
-//	message: string - specific validation issue
-//
-// Returns:
-//
-//	*ConnectorError: ErrCodeInvalidConfig
-//
-// Example:
-//
-//	NewInvalidConfigError("sink", "missing URI") // → error
+// In: component string, message string - module & issue
+// Out: *ConnectorError - code 1001 with formatted msg
+// Ex: NewInvalidConfigError("sink", "missing URI") → &ConnectorError{Code:1001}
 func NewInvalidConfigError(component, message string) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeInvalidConfig,

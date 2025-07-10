@@ -2,7 +2,7 @@
 // +build integration
 
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package integration: integration tests for NATS→JSON→QuasarDB flow
+// Package integration provides integration test helpers.
 package integration
 
 import (
@@ -15,7 +15,8 @@ import (
 	"pgregory.net/rapid"
 )
 
-// getTestConfig returns configuration for integration tests
+// getTestConfig returns test configuration.
+// Internal helper for connection setup.
 func getTestConfig() ConnectorConfig {
 	return ConnectorConfig{
 		NATSEndpoint: getEnvOrDefault("NATS_ENDPOINT", defaultNATSEndpoint),
@@ -23,26 +24,26 @@ func getTestConfig() ConnectorConfig {
 	}
 }
 
-// TestConnectorJSONToQuasarDB tests the complete NATS→JSON→QuasarDB flow
+// TestConnectorJSONToQuasarDB tests complete NATS→JSON→QuasarDB flow.
 func TestConnectorJSONToQuasarDB(t *testing.T) {
 	cfg := getTestConfig()
 
 	// Connect to NATS
 	nc, err := nats.Connect(cfg.NATSEndpoint)
 	if err != nil {
-		t.Skipf("NATS not available at %s: %v", cfg.NATSEndpoint, err)
+		t.Fatalf("NATS not available at %s: %v", cfg.NATSEndpoint, err)
 	}
 	defer nc.Close()
 
 	// Connect to QuasarDB
 	handle, err := qdb.NewHandle()
 	if err != nil {
-		t.Skipf("QuasarDB handle creation failed: %v", err)
+		t.Fatalf("QuasarDB handle creation failed: %v", err)
 	}
 	defer handle.Close()
 
 	if err := handle.Connect(cfg.QDBEndpoint); err != nil {
-		t.Skipf("QuasarDB not available at %s: %v", cfg.QDBEndpoint, err)
+		t.Fatalf("QuasarDB not available at %s: %v", cfg.QDBEndpoint, err)
 	}
 
 	// Property-based test using rapid

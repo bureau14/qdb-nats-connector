@@ -2,7 +2,7 @@
 // +build integration
 
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package integration: test fixtures for property-based testing
+// Package integration provides integration test helpers.
 package integration
 
 import (
@@ -13,20 +13,21 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TableSchema represents a table schema for testing
+// TableSchema: test table schema
 type TableSchema struct {
 	Name    string
 	Columns []qdb.WriterColumn
 }
 
-// ColumnDataSet represents a complete dataset for a table
+// ColumnDataSet: table data with timestamps
 type ColumnDataSet struct {
 	Schema     TableSchema
 	Timestamps []time.Time
 	ColumnData [][]string // string data for each column
 }
 
-// AlphanumericString generates random alphanumeric strings
+// AlphanumericString generates alphanum strings.
+// Internal generator for test data.
 func AlphanumericString(minLen, maxLen int) *rapid.Generator[string] {
 	return rapid.StringMatching(`^[a-zA-Z0-9]+$`).
 		Filter(func(s string) bool {
@@ -34,18 +35,21 @@ func AlphanumericString(minLen, maxLen int) *rapid.Generator[string] {
 		})
 }
 
-// UniqueTableName generates unique table names for tests
+// UniqueTableName generates unique test table names.
+// Prefix + random suffix.
 func UniqueTableName() *rapid.Generator[string] {
 	return rapid.Custom(func(t *rapid.T) string {
 		prefix := rapid.StringMatching(`^[a-zA-Z][a-zA-Z0-9_]*$`).
 			Filter(func(s string) bool { return len(s) >= 3 && len(s) <= 10 }).
 			Draw(t, "table_prefix")
 		suffix := rapid.Uint64().Draw(t, "table_suffix")
+
 		return fmt.Sprintf("%s_%d", prefix, suffix)
 	})
 }
 
-// ColumnName generates valid column names
+// ColumnName generates valid column names.
+// 2-20 chars, alphanum.
 func ColumnName() *rapid.Generator[string] {
 	return rapid.StringMatching(`^[a-zA-Z][a-zA-Z0-9_]*$`).
 		Filter(func(s string) bool {
@@ -53,7 +57,8 @@ func ColumnName() *rapid.Generator[string] {
 		})
 }
 
-// TableSchemaGen generates table schemas with string columns
+// TableSchemaGen generates schemas with 1-10 blob columns.
+// Unique names, blob type only.
 func TableSchemaGen() *rapid.Generator[TableSchema] {
 	return rapid.Custom(func(t *rapid.T) TableSchema {
 		tableName := UniqueTableName().Draw(t, "table_name")
@@ -64,13 +69,14 @@ func TableSchemaGen() *rapid.Generator[TableSchema] {
 		columns := make([]qdb.WriterColumn, numColumns)
 		usedNames := make(map[string]bool)
 
-		for i := 0; i < numColumns; i++ {
+		for i := range numColumns {
 			var colName string
 			// Ensure unique column names
 			for {
 				colName = ColumnName().Draw(t, fmt.Sprintf("column_%d_name", i))
 				if !usedNames[colName] {
 					usedNames[colName] = true
+
 					break
 				}
 			}
@@ -90,7 +96,8 @@ func TableSchemaGen() *rapid.Generator[TableSchema] {
 	})
 }
 
-// TimestampArray generates arrays of timestamps with nanosecond precision
+// TimestampArray generates timestamp arrays from 2024-01-01.
+// Nanosecond precision, unique values.
 func TimestampArray(minRows, maxRows int) *rapid.Generator[[]time.Time] {
 	return rapid.Custom(func(t *rapid.T) []time.Time {
 		numRows := rapid.IntRange(minRows, maxRows).Draw(t, "num_rows")
@@ -99,7 +106,7 @@ func TimestampArray(minRows, maxRows int) *rapid.Generator[[]time.Time] {
 		baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 		timestamps := make([]time.Time, numRows)
 
-		for i := 0; i < numRows; i++ {
+		for i := range numRows {
 			// Add random nanoseconds to ensure unique timestamps
 			nanoOffset := rapid.Int64Range(0, 1000000000).Draw(t, fmt.Sprintf("nano_offset_%d", i))
 			timestamps[i] = baseTime.Add(time.Duration(int64(i)*1000000000 + nanoOffset))
@@ -109,18 +116,21 @@ func TimestampArray(minRows, maxRows int) *rapid.Generator[[]time.Time] {
 	})
 }
 
-// StringDataArray generates arrays of alphanumeric string data
+// StringDataArray generates string arrays.
+// Alphanum, 1-50 chars.
 func StringDataArray(numRows int) *rapid.Generator[[]string] {
 	return rapid.Custom(func(t *rapid.T) []string {
 		data := make([]string, numRows)
-		for i := 0; i < numRows; i++ {
+		for i := range numRows {
 			data[i] = AlphanumericString(1, 50).Draw(t, fmt.Sprintf("string_data_%d", i))
 		}
+
 		return data
 	})
 }
 
-// ColumnDataSetGen generates complete column data sets
+// ColumnDataSetGen generates full datasets with 1-1000 rows.
+// Schema + timestamps + column data.
 func ColumnDataSetGen() *rapid.Generator[ColumnDataSet] {
 	return rapid.Custom(func(t *rapid.T) ColumnDataSet {
 		schema := TableSchemaGen().Draw(t, "schema")
@@ -144,7 +154,8 @@ func ColumnDataSetGen() *rapid.Generator[ColumnDataSet] {
 	})
 }
 
-// ToWriterTable converts ColumnDataSet to qdb.WriterTable
+// ToWriterTable converts to QDB writer table.
+// Sets timestamps and column data.
 func (cds *ColumnDataSet) ToWriterTable() (qdb.WriterTable, error) {
 	table, err := qdb.NewWriterTable(cds.Schema.Name, cds.Schema.Columns)
 	if err != nil {
@@ -157,7 +168,8 @@ func (cds *ColumnDataSet) ToWriterTable() (qdb.WriterTable, error) {
 	// Set column data
 	for i, colData := range cds.ColumnData {
 		columnData := qdb.NewColumnDataString(colData)
-		if err := table.SetData(i, &columnData); err != nil {
+		err := table.SetData(i, &columnData)
+		if err != nil {
 			return table, fmt.Errorf("failed to set data for column %d: %w", i, err)
 		}
 	}
@@ -165,12 +177,12 @@ func (cds *ColumnDataSet) ToWriterTable() (qdb.WriterTable, error) {
 	return table, nil
 }
 
-// NumRows returns the number of rows in the dataset
+// NumRows returns row count.
 func (cds *ColumnDataSet) NumRows() int {
 	return len(cds.Timestamps)
 }
 
-// NumColumns returns the number of columns in the dataset
+// NumColumns returns column count.
 func (cds *ColumnDataSet) NumColumns() int {
 	return len(cds.Schema.Columns)
 }

@@ -161,9 +161,9 @@ func WithPushMode(mode qdb.WriterPushMode) Option {
 }
 
 // WithCompression sets compression level.
-// In: c qdb.Compression - none|fast|best
+// In: c qdb.Compression - none|balanced
 // Out: Option
-// Ex: WithCompression(qdb.CompFast)
+// Ex: WithCompression(qdb.CompBalanced)
 func WithCompression(c qdb.Compression) Option {
 	return func(o Options) Options {
 		o.Compression = c

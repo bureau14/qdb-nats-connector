@@ -6,6 +6,7 @@ package connector
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -81,7 +82,7 @@ var (
 	_ source.OptionsProvider = (*Options)(nil)
 )
 
-// LoadConfig loads config from CLI/env/files via Viper.
+// LoadConfig loads config from CLI arguments and environment variables.
 // Args:
 //
 //	args: command-line arguments
@@ -99,12 +100,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v := viper.New()
 	fs := pflag.NewFlagSet("qdb-nats-connector", pflag.ExitOnError)
 
-	// Configure viper
-	v.SetConfigName("qdb-nats-connector")
-	v.SetConfigType("yaml")
-	v.AddConfigPath(".")
-	v.AddConfigPath("$HOME/.config/qdb-nats-connector")
-	v.AddConfigPath("/etc/qdb-nats-connector")
+	// Configure viper for environment variables only
 
 	// Set environment variable prefix and replacer
 	v.SetEnvPrefix("QDB_NATS")
@@ -133,11 +129,9 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("circuit-breaker-half-open-max", 32)
 
 	var showHelp bool
-	var configFile string
 
 	// Define CLI flags with pflag
 	fs.BoolVarP(&showHelp, "help", "h", false, "Show this message.")
-	fs.StringVar(&configFile, "config", "", "Configuration file path")
 
 	// NATS flags
 	fs.StringP("nats", "n", nats.DefaultURL, "NATS cluster endpoint (e.g. 10.192.172.166:4222)")
@@ -158,7 +152,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.String("qdb", "", "QuasarDB cluster endpoint (e.g. qdb://127.0.0.1:2836)")
 	fs.String("qdb-pubkey-file", "", "QuasarDB cluster public key file")
 	fs.String("qdb-user-sec-file", "", "QuasarDB user security file")
-	fs.String("qdb-compression", "", "QuasarDB sink compression (none|fast|balanced)")
+	fs.String("qdb-compression", "", "QuasarDB sink compression (none|balanced)")
 	fs.String("qdb-encryption", "", "QuasarDB sink encryption (none|aes)")
 	fs.String("qdb-push-mode", "", "QuasarDB sink push mode (transactional|async|fast)")
 	fs.String("qdb-deduplication-mode", "", "QuasarDB deduplication mode (disabled|drop|upsert)")
@@ -174,6 +168,15 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.Int("circuit-breaker-half-open-base", 1, "Initial requests allowed in half-open state")
 	fs.Int("circuit-breaker-half-open-max", 32, "Maximum requests before closing circuit")
 
+	// Check for deprecated --config flag and warn user
+	for _, arg := range args {
+		if arg == "--config" {
+			fmt.Fprintf(os.Stderr, "WARNING: --config flag is no longer supported. Please use command-line arguments or environment variables instead.\n")
+
+			break
+		}
+	}
+
 	err := fs.Parse(args)
 	if err != nil {
 		return nil, err
@@ -183,21 +186,6 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 		printHelp()
 
 		return nil, nil
-	}
-
-	// Load config file if specified
-	if configFile != "" {
-		v.SetConfigFile(configFile)
-	}
-
-	// Read config file (ignore if not found)
-	err = v.ReadInConfig()
-	if err != nil {
-		// Only return error if config file was explicitly specified
-		if configFile != "" {
-			return nil, fmt.Errorf("error reading config file: %w", err)
-		}
-		// For automatic config file discovery, ignore all errors (file not found, parse errors, etc.)
 	}
 
 	// Bind flags to viper - this handles precedence automatically
@@ -383,8 +371,8 @@ func (o *Options) Encryption() *qdb.Encryption { return o.parsedSinkOptions.Encr
 
 // Compression returns QDB compression mode
 // In: none
-// Out: qdb.Compression - none|fast|balanced
-// Ex: Compression() → CompFast
+// Out: qdb.Compression - none|balanced
+// Ex: Compression() → CompBalanced
 func (o *Options) Compression() qdb.Compression { return o.parsedSinkOptions.Compression }
 
 // DeduplicationMode returns QDB deduplication mode
@@ -489,19 +477,22 @@ func (o *Options) Endpoint() string { return o.parsedSourceOptions.URL }
 func (o *Options) Topic() string { return o.TopicFilter() }
 
 // parseCompression converts string→qdb.Compression.
-// In: val string - none|fast|balanced
+// In: val string - none|balanced
 // Out: qdb.Compression, error
 // Ex: parseCompression("none") → CompNone, nil
 func parseCompression(val string) (qdb.Compression, error) {
+	// Check for deprecated "fast" compression and warn user
+	if val == "fast" {
+		fmt.Fprintf(os.Stderr, "WARNING: 'fast' compression is no longer supported. Please use 'none' or 'balanced' instead.\n")
+	}
+
 	switch val {
 	case "none":
 		return qdb.CompNone, nil
-	case "fast":
-		return qdb.CompFast, nil
 	case "balanced":
 		return qdb.CompBalanced, nil
 	default:
-		return qdb.CompNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid compression value: %s (valid values: none, fast, balanced)", val))
+		return qdb.CompNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid compression value: %s (valid values: none, balanced)", val))
 	}
 }
 

@@ -1,6 +1,3 @@
-//go:build integration
-// +build integration
-
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
 // Package integration provides integration test helpers.
 package integration
@@ -42,7 +39,8 @@ func TestConnectorJSONToQuasarDB(t *testing.T) {
 	}
 	defer handle.Close()
 
-	if err := handle.Connect(cfg.QDBEndpoint); err != nil {
+	err = handle.Connect(cfg.QDBEndpoint)
+	if err != nil {
 		t.Fatalf("QuasarDB not available at %s: %v", cfg.QDBEndpoint, err)
 	}
 
@@ -66,7 +64,8 @@ func testConnectorFlow(t *rapid.T, nc *nats.Conn, handle qdb.HandleType, cfg Con
 
 	// Step 2: Create QuasarDB table with generated schema
 	t.Logf("Step 2: Creating QuasarDB table")
-	if err := CreateTableFromSchema(handle, &inputData.Schema); err != nil {
+	err := CreateTableFromSchema(handle, &inputData.Schema)
+	if err != nil {
 		t.Fatalf("Failed to create QuasarDB table: %v", err)
 	}
 
@@ -74,7 +73,8 @@ func testConnectorFlow(t *rapid.T, nc *nats.Conn, handle qdb.HandleType, cfg Con
 	defer func() {
 		// Cleanup table after test
 		table := handle.Timeseries(inputData.Schema.Name)
-		if err := table.Remove(); err != nil {
+		err := table.Remove()
+		if err != nil {
 			t.Logf("Warning: Failed to cleanup table %s: %v", inputData.Schema.Name, err)
 		}
 	}()
@@ -86,7 +86,8 @@ func testConnectorFlow(t *rapid.T, nc *nats.Conn, handle qdb.HandleType, cfg Con
 		t.Fatalf("No JSON messages generated from input data")
 	}
 
-	if err := PublishJSONMessages(nc, subject, jsonMessages); err != nil {
+	err = PublishJSONMessages(nc, subject, jsonMessages)
+	if err != nil {
 		t.Fatalf("Failed to publish JSON messages: %v", err)
 	}
 
@@ -129,7 +130,8 @@ func testConnectorFlow(t *rapid.T, nc *nats.Conn, handle qdb.HandleType, cfg Con
 
 	// Step 6: Compare input vs output ColumnData
 	t.Logf("Step 6: Comparing input and output data")
-	if err := CompareColumnData(&inputData, outputData); err != nil {
+	err = CompareColumnData(&inputData, outputData)
+	if err != nil {
 		t.Fatalf("Data comparison failed: %v", err)
 	}
 

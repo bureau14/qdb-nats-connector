@@ -1,6 +1,3 @@
-//go:build integration
-// +build integration
-
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
 // Package integration provides checkpointing integration tests.
 package integration
@@ -271,7 +268,7 @@ func runCheckpointTest(t *testing.T, tc checkpointTestCase) {
 	// - Does deduplication work correctly?
 	// - Are the expected number of rows present?
 	t.Logf("=== Phase 4: Simplified Behavior Validation ===")
-	
+
 	validateBehavior(t, qdbHandle, tableName, tc, len(messages))
 	t.Logf("PASS: Checkpointing behavior validated for %s mode", tc.dedupMode)
 }
@@ -285,39 +282,39 @@ func runCheckpointTest(t *testing.T, tc checkpointTestCase) {
 // This approach is more reliable and faster than detailed data comparison.
 func validateBehavior(t *testing.T, handle qdb.HandleType, tableName string, tc checkpointTestCase, originalMessageCount int) {
 	t.Helper()
-	
+
 	// Use the new Reader API for simple row counting
 	reader, err := qdb.NewReader(handle, qdb.NewReaderOptions().
 		WithTables([]string{tableName}))
 	require.NoError(t, err, "Failed to create reader for validation")
 	defer reader.Close()
-	
+
 	// Get all data to count rows
 	chunk, err := reader.FetchAll()
 	require.NoError(t, err, "Failed to fetch data for validation")
-	
+
 	totalRows := chunk.RowCount()
 	t.Logf("Found %d total rows in table %s", totalRows, tableName)
-	
+
 	// Simplified validation based on dedup mode behavior
 	switch tc.dedupMode {
 	case "disabled":
 		// In disabled mode, duplicates are allowed, so we expect >= original count
-		assert.GreaterOrEqual(t, totalRows, originalMessageCount, 
+		assert.GreaterOrEqual(t, totalRows, originalMessageCount,
 			"With dedup disabled, should have at least original message count")
 		t.Logf("✓ Disabled mode: %d rows >= %d original messages", totalRows, originalMessageCount)
-		
+
 	case "drop", "upsert":
 		// In drop/upsert mode, duplicates should be handled, expect close to original count
 		// Allow some tolerance for edge cases in failure scenarios
-		assert.GreaterOrEqual(t, totalRows, originalMessageCount, 
+		assert.GreaterOrEqual(t, totalRows, originalMessageCount,
 			"Should have at least original message count (no data loss)")
-		assert.LessOrEqual(t, totalRows, originalMessageCount*2, 
+		assert.LessOrEqual(t, totalRows, originalMessageCount*2,
 			"Should not have excessive duplicates with dedup enabled")
-		t.Logf("✓ %s mode: %d rows within expected range of %d original messages", 
+		t.Logf("✓ %s mode: %d rows within expected range of %d original messages",
 			tc.dedupMode, totalRows, originalMessageCount)
 	}
-	
+
 	// Basic integrity check: ensure table is accessible and has reasonable data
 	assert.Greater(t, totalRows, 0, "Table should contain data")
 	t.Logf("✓ Table integrity confirmed: %d rows accessible", totalRows)
@@ -352,6 +349,7 @@ func generateTestID() string {
 		// Fallback to timestamp-based ID
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
+
 	return hex.EncodeToString(bytes)
 }
 
@@ -359,7 +357,7 @@ func createTestMessages(count int, tableName string) []testMessage {
 	messages := make([]testMessage, count)
 	baseTime := time.Now().Truncate(time.Second)
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		messages[i] = testMessage{
 			Table:     tableName,
 			Timestamp: baseTime.Add(time.Duration(i) * time.Second).Format("2006-01-02T15:04:05.000000000Z"),
@@ -392,12 +390,13 @@ func testMessagesToJSON(messages []testMessage) [][]byte {
 		}
 		jsonMessages[i] = jsonBytes
 	}
+
 	return jsonMessages
 }
 
 func runConnectorWithFailure(ctx context.Context, t *testing.T, cfg ConnectorConfig,
-	subject, consumerName, dedupMode string, injector *FailureInjector) error {
-
+	subject, consumerName, dedupMode string, injector *FailureInjector,
+) error {
 	// Create connector options
 	opts, err := createConnectorOptions(cfg, subject, consumerName, dedupMode)
 	if err != nil {
@@ -420,8 +419,8 @@ func runConnectorWithFailure(ctx context.Context, t *testing.T, cfg ConnectorCon
 }
 
 func runConnectorWithoutFailure(ctx context.Context, t *testing.T, cfg ConnectorConfig,
-	subject, consumerName, dedupMode string) error {
-
+	subject, consumerName, dedupMode string,
+) error {
 	// Create connector options without hooks
 	opts, err := createConnectorOptions(cfg, subject, consumerName, dedupMode)
 	if err != nil {
@@ -457,7 +456,7 @@ func createConnectorOptions(cfg ConnectorConfig, subject, consumerName, dedupMod
 	// Add deduplication mode if specified
 	// This controls how QuasarDB handles duplicate messages:
 	// - "disabled": no dedup, allows duplicates
-	// - "drop": silently drops duplicates  
+	// - "drop": silently drops duplicates
 	// - "upsert": updates existing records
 	if dedupMode != "" {
 		args = append(args, "--qdb-deduplication-mode", dedupMode)
@@ -466,7 +465,7 @@ func createConnectorOptions(cfg ConnectorConfig, subject, consumerName, dedupMod
 	// Add performance settings
 	// Async mode allows the connector to continue processing while writes are in progress
 	args = append(args, "--qdb-push-mode", "async")
-	
+
 	// Debug: log the args being passed
 	// This helps diagnose configuration issues during test failures
 	fmt.Printf("Creating connector with args: %v\n", args)
@@ -493,7 +492,7 @@ func createConnectorOptions(cfg ConnectorConfig, subject, consumerName, dedupMod
 
 	// Debug: print the loaded topics
 	fmt.Printf("Loaded topics: %v\n", opts.TopicFilter())
-	
+
 	return opts, nil
 }
 
@@ -512,6 +511,7 @@ func findColumnIndices(schema *TableSchema) (testIDIndex, sequenceIndex int) {
 			sequenceIndex = i
 		}
 	}
+
 	return testIDIndex, sequenceIndex
 }
 
@@ -523,7 +523,7 @@ func countMessageOccurrences(data *ColumnDataSet, testIDColIndex, sequenceColInd
 	occurrenceMap := make(map[string]*messageOccurrence)
 	numRows := data.NumRows()
 
-	for i := 0; i < numRows; i++ {
+	for i := range numRows {
 		testID := data.ColumnData[testIDColIndex][i]
 		timestamp := data.Timestamps[i]
 
@@ -625,7 +625,7 @@ func analyzeMessageDuplicates(data *ColumnDataSet) *duplicateReport {
 func analyzeByTimestamp(data *ColumnDataSet) *duplicateReport {
 	// Fallback analysis using timestamps
 	timestampMap := make(map[string]int)
-	
+
 	for _, timestamp := range data.Timestamps {
 		key := timestamp.Format("2006-01-02T15:04:05.000000000Z")
 		timestampMap[key]++

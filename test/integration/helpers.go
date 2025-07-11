@@ -1,6 +1,3 @@
-//go:build integration
-// +build integration
-
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
 
 // Package integration provides integration test helpers.
@@ -27,19 +24,19 @@ import (
 // along with optional security credentials and parser selection.
 type ConnectorConfig struct {
 	// NATSEndpoint is the NATS server URL (e.g., "nats://localhost:4222")
-	NATSEndpoint    string
-	
+	NATSEndpoint string
+
 	// QDBEndpoint is the QuasarDB cluster URI (e.g., "qdb://localhost:2836")
-	QDBEndpoint     string
-	
+	QDBEndpoint string
+
 	// QDBPublicKey is the optional QuasarDB cluster public key for secure connections
-	QDBPublicKey    string
-	
+	QDBPublicKey string
+
 	// QDBUserSecurity is the optional QuasarDB user security credentials
 	QDBUserSecurity string
-	
+
 	// Parser specifies which message parser to use (currently only "json" is supported)
-	Parser          string
+	Parser string
 }
 
 // Test environment configuration
@@ -54,6 +51,7 @@ func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
+
 	return defaultValue
 }
 
@@ -71,7 +69,7 @@ func ColumnDataToJSON(columnDataSet *ColumnDataSet) [][]byte {
 	numRows := columnDataSet.NumRows()
 	messages := make([][]byte, numRows)
 
-	for i := 0; i < numRows; i++ {
+	for i := range numRows {
 		// Create JSON object for this row
 		jsonObj := make(map[string]interface{})
 
@@ -111,7 +109,7 @@ func GenerateRandomSubject() *rapid.Generator[string] {
 		numParts := rapid.IntRange(1, 3).Draw(t, "num_parts")
 		parts := make([]string, numParts)
 
-		for i := 0; i < numParts; i++ {
+		for i := range numParts {
 			// Each part is alphanumeric, 2-10 characters
 			part := rapid.StringMatching(`^[a-zA-Z][a-zA-Z0-9]*$`).
 				Filter(func(s string) bool {
@@ -132,14 +130,16 @@ func PublishJSONMessages(nc *nats.Conn, subject string, messages [][]byte) error
 	}
 
 	for i, msg := range messages {
-		if err := nc.Publish(subject, msg); err != nil {
+		err := nc.Publish(subject, msg)
+		if err != nil {
 			return errors.NewConnectionFailedError("nats_helper",
 				fmt.Sprintf("failed to publish message %d", i), err)
 		}
 	}
 
 	// Flush to ensure all messages are sent
-	if err := nc.Flush(); err != nil {
+	err := nc.Flush()
+	if err != nil {
 		return errors.NewConnectionFailedError("nats_helper", "failed to flush", err)
 	}
 
@@ -192,7 +192,8 @@ func CreateTableFromSchema(handle qdb.HandleType, schema *TableSchema) error {
 	}
 
 	// Create table with 24-hour shard size
-	if err := table.Create(24*time.Hour, columns...); err != nil {
+	err := table.Create(24*time.Hour, columns...)
+	if err != nil {
 		return errors.NewWriteFailedError("CreateTableFromSchema", err)
 	}
 
@@ -238,7 +239,7 @@ func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error
 	// For now, let's use a simple approach: use the old bulk API with proper error handling
 	// and note that this migration will need the Reader API to be updated to provide public access.
 	// TODO: This is a temporary solution until the Reader API provides public field access.
-	
+
 	// Create bulk reader with all columns (keeping old approach for now)
 	bulk, err := table.Bulk(columnsInfo...)
 	if err != nil {
@@ -249,7 +250,8 @@ func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error
 
 	// Get data for the time range
 	ranges := []qdb.TsRange{qdb.NewRange(beginTime, endTime)}
-	if err := bulk.GetRanges(ranges...); err != nil {
+	err = bulk.GetRanges(ranges...)
+	if err != nil {
 		return nil, errors.NewConnectionFailedError("ReadAllData",
 			fmt.Sprintf("failed to get ranges for table %s", tableName), err)
 	}

@@ -19,9 +19,6 @@ import (
 var usageStr = `
 Usage: qdb-nats-connector [options]
 
-Configuration Options:
-    --config <file>                  Configuration file path (yaml, json, toml)
-
 NATS JetStream Options:
     -n, --nats <host>:<port>         NATS cluster endpoint (e.g. 10.192.172.166:4222)
     --stream <name>                  JetStream stream name (required)
@@ -39,7 +36,7 @@ QuasarDB Connection Options:
     --qdb-pubkey-file <file>         QuasarDB cluster public key file
     --qdb-user-sec-file <file>       QuasarDB user security file
     --qdb-encryption <type>          QuasarDB sink encryption (none|aes)
-    --qdb-compression <type>         QuasarDB sink compression (none|fast|balanced)
+    --qdb-compression <type>         QuasarDB sink compression (none|balanced)
 
 Performance Options:
     --qdb-push-mode <mode>           QuasarDB sink push mode (transactional|async|fast)
@@ -54,19 +51,6 @@ General Options:
 Environment Variables:
     All options can be set via environment variables with QDB_NATS_ prefix.
     Examples: QDB_NATS_NATS_ENDPOINT, QDB_NATS_STREAM, QDB_NATS_QDB_CLUSTER_URI
-
-Configuration Files:
-    Default locations: ./qdb-nats-connector.yaml, ~/.config/qdb-nats-connector/qdb-nats-connector.yaml
-    Example config file structure:
-      nats:
-        endpoint: "nats://localhost:4222"
-        topic: "sensors.>"
-      qdb:
-        cluster_uri: "qdb://127.0.0.1:2836"
-        compression: "best"
-        encryption: "none"
-        push_mode: "async"
-        deduplication_mode: "drop"
 `
 
 // usage prints CLI help & exits
@@ -98,7 +82,7 @@ func runMain() int {
 	// Setup structured logging
 	logging.SetupDefault("exe", exe)
 
-	// 1. Load configuration: CLI overrides env vars, config files override defaults
+	// 1. Load configuration: CLI overrides env vars
 	opts, err := connector.LoadConfig(os.Args[1:], usage)
 	if err != nil {
 		slog.Error("Unable to parse options", "error", err)

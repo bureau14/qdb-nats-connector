@@ -10,10 +10,16 @@ import (
 	qdb "github.com/bureau14/qdb-api-go/v3"
 )
 
-// Option: functional option for sink configuration
+// Option: functional option pattern for sink configuration. Needed for flexible option composition.
+// Who: WithX functions return, NewOptions consumes.
 type Option func(Options) Options
 
-// Options: QDB sink config with auth & worker pool settings
+// Options: QuasarDB sink configuration with auth, connection, and worker pool settings. Needed for customizable high-performance writes.
+// Who: connector config provides, sink consumes via NewSink.
+// ClusterUri-UserSecret: QDB connection & auth credentials
+// Encryption-DeduplicationMode: data handling policies
+// ClientMaxParallelism-ClientMaxInBufSize: QDB client tuning
+// NumWriters-WorkerCreationDelay: worker pool configuration
 type Options struct {
 	ClusterUri           string `json:"cluster_uri"`
 	ClusterPublicKeyFile string `json:"cluster_public_key_file"`
@@ -270,15 +276,25 @@ func WithWorkerCreationDelay(delay time.Duration) Option {
 
 // OptionsProvider: interface for sink config decoupling from connector
 type OptionsProvider interface {
+	// ClusterUri returns QuasarDB cluster URI (e.g., "qdb://host:2836")
 	ClusterUri() string
+	// ClusterPublicKeyFile returns path to cluster public key file for authentication
 	ClusterPublicKeyFile() string
+	// UserSecurityFile returns path to user security credentials file
 	UserSecurityFile() string
+	// Encryption returns encryption mode (nil for none, or qdb.EncryptAES)
 	Encryption() *qdb.Encryption
+	// Compression returns data compression algorithm (qdb.CompNone or qdb.CompBalanced)
 	Compression() qdb.Compression
+	// DeduplicationMode returns how duplicate timestamps are handled
 	DeduplicationMode() qdb.WriterDeduplicationMode
+	// ClientMaxParallelism returns max client threads (nil for default)
 	ClientMaxParallelism() *uint
+	// ClientMaxInBufSize returns max input buffer size in bytes (nil for default)
 	ClientMaxInBufSize() *uint
+	// Timeout returns connection timeout duration (nil for default)
 	Timeout() *time.Duration
+	// WorkerCreationDelay returns delay between worker initialization
 	WorkerCreationDelay() time.Duration
 }
 

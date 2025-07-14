@@ -12,24 +12,15 @@ import (
 
 // ParseResult: parse outcome with tables/error & sequence
 type ParseResult struct {
-	// Tables contains the QuasarDB WriterTable structures created from the parsed message.
-	// This slice is empty if parsing failed (Error will be non-nil).
-	// Currently, parsers return a single table per message, but the slice format
-	// allows for future extensions.
-	Tables []qdb.WriterTable
-
-	// Error contains parsing failure information if the message could not be processed.
-	// This is nil when parsing succeeds (Tables will contain data).
-	// Common errors include invalid JSON, missing required fields, or unsupported data types.
-	Error *errors.ConnectorError
-
-	// Sequence is the JetStream consumer sequence number of the message.
-	// This is used for selective acknowledgment and negative acknowledgment of messages
-	// based on processing results.
-	Sequence uint64
+	Tables   []qdb.WriterTable      // parsed QDB tables, ∅ if Error≠nil
+	Error    *errors.ConnectorError // parse failure info, nil→success
+	Sequence uint64                 // JetStream seq# for ACK/NACK
 }
 
-// Parser: NATS msg→QuasarDB tables transformer, goroutine-safe
+// Parser: transforms NATS messages into QuasarDB timeseries tables. Needed for pluggable data transformations.
+// Who: connector uses, JsonParser/NoopParser implement.
+// Parse: converts single message to tables
+// ParseBatch: processes multiple messages, returns ParseResult per message
 type Parser interface {
 	// Parse transforms single NATS message to QuasarDB tables
 	Parse(msg *nats.Msg) ([]qdb.WriterTable, error)

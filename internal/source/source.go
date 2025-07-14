@@ -12,7 +12,12 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Source: NATS JetStream client with batch fetching capabilities
+// Source: JetStream client that pulls message batches. Needed for reliable message consumption.
+// Who: connector creates, workers consume.
+// NatsConn: underlying NATS connection
+// JetStream: JS context for pull subscriptions
+// Subscription: active pull subscription
+// Options: connection & batch configuration
 type Source struct {
 	NatsConn     *nats.Conn
 	JetStream    nats.JetStreamContext
@@ -20,13 +25,20 @@ type Source struct {
 	Options      Options
 }
 
-// MessageInfo: wrapper for NATS message with sequence tracking
+// MessageInfo: NATS message with sequence number. Needed for selective ACK/NACK operations.
+// Who: Source creates, parsers consume.
+// Msg: raw NATS message with data & metadata
+// Sequence: JetStream sequence for acknowledgment
 type MessageInfo struct {
 	Msg      *nats.Msg
 	Sequence uint64
 }
 
-// MessageBatch: collection of messages with acknowledgment functions
+// MessageBatch: message collection with ACK control. Needed for batch processing with acknowledgment.
+// Who: Source creates via FetchBatch, connector processes.
+// Messages: fetched messages with sequences
+// AckFunc: acknowledges messages by sequence
+// NackFunc: negative acknowledges by sequence
 type MessageBatch struct {
 	Messages []MessageInfo
 	AckFunc  func([]uint64) error
@@ -170,23 +182,6 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 	}
 
 	return batch, nil
-}
-
-// Deprecated: Use FetchBatch instead for JetStream
-// Subscribe registers handler for topic (legacy NATS Core).
-// In: handler nats.MsgHandler - concurrent-safe func
-// Out: error - subscription failure
-// Ex: Subscribe(handleMsg) → nil
-func (s *Source) Subscribe(handler nats.MsgHandler) error {
-	slog.Info("Subscribing to topic", "topic", s.Options.Topic)
-	_, err := s.NatsConn.Subscribe(s.Options.Topic, handler)
-	if err != nil {
-		slog.Error("Failed to subscribe to topic", "error", err, "topic", s.Options.Topic)
-
-		return errors.NewSubscriptionFailedError("source", s.Options.Topic, err)
-	}
-
-	return nil
 }
 
 // ackMessages acknowledges messages by sequence number.

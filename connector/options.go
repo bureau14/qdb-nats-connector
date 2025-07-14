@@ -462,20 +462,6 @@ func (o *Options) AckWait() time.Duration { return o.parsedSourceOptions.AckWait
 // Ex: MaxDeliver() → 3
 func (o *Options) MaxDeliver() int { return o.parsedSourceOptions.MaxDeliver }
 
-// Deprecated: use URL() instead
-// Endpoint returns NATS URL (legacy)
-// In: none
-// Out: string - NATS URL
-// Ex: Endpoint() → "nats://localhost:4222"
-func (o *Options) Endpoint() string { return o.parsedSourceOptions.URL }
-
-// Deprecated: use TopicFilter() instead
-// Topic returns first topic (legacy)
-// In: none
-// Out: string - topic or empty
-// Ex: Topic() → "sensors.>"
-func (o *Options) Topic() string { return o.TopicFilter() }
-
 // parseCompression converts string→qdb.Compression.
 // In: val string - none|balanced
 // Out: qdb.Compression, error

@@ -17,10 +17,7 @@ import (
 
 // JsonParser: JSON→QuasarDB tables, requires $table field
 type JsonParser struct {
-	// DefaultTable: deprecated, no longer used (table name comes from $table key)
-	DefaultTable string
-	// SubjectToTable: deprecated, no longer used (table name comes from $table key)
-	SubjectToTable map[string]string
+	// No configuration fields needed - all metadata extracted from JSON
 }
 
 // Compile-time check that JsonParser implements the Parser interface
@@ -31,21 +28,9 @@ var _ Parser = (*JsonParser)(nil)
 // Out: *JsonParser, error - parser, always nil
 // Ex: NewJsonParser() → &JsonParser{}, nil
 func NewJsonParser() (*JsonParser, error) {
-	return NewJsonParserWithConfig("", nil)
-}
+	slog.Info("Initializing JSON parser")
 
-// Deprecated: Use NewJsonParser() instead. Will be removed in v2.0.0 (2025-08-01)
-// NewJsonParserWithConfig creates parser with legacy config.
-// In: defaultTable string, subjectMapping map - both ignored
-// Out: *JsonParser, error - parser, always nil
-// Ex: NewJsonParserWithConfig("", nil) → &JsonParser{}, nil
-func NewJsonParserWithConfig(defaultTable string, subjectMapping map[string]string) (*JsonParser, error) {
-	slog.Info("Initializing JSON parser", "default_table", defaultTable, "subject_mappings", len(subjectMapping))
-
-	return &JsonParser{
-		DefaultTable:   defaultTable,
-		SubjectToTable: subjectMapping,
-	}, nil
+	return &JsonParser{}, nil
 }
 
 // Parse transforms JSON to QDB table, requires $table.

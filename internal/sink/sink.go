@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package sink: QuasarDB writer pool for timeseries
+// Package sink: QuasarDB connection & persistence
 // Types: Sink, Options, OptionsProvider
-// Ex: sink.Write(tables) → async write
+// Ex: sink.NewSink(opts).Write(tables) → writes to QDB
 package sink
 
 import (
@@ -17,7 +17,13 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
-// Sink: async QuasarDB writer pool, goroutine-safe
+// Sink: async QuasarDB writer pool that batches timeseries data. Needed for high-throughput writes.
+// Who: connector creates, parser results consumed.
+// Options: connection & worker pool config
+// workers: pool of QDB writers with handles
+// jobs: buffered channel for write batches
+// wg: tracks active worker goroutines
+// closed: atomic shutdown flag
 type Sink struct {
 	Options Options
 	workers []*worker
@@ -26,7 +32,12 @@ type Sink struct {
 	closed  atomic.Bool
 }
 
-// worker: single QDB writer with dedicated handle for thread safety
+// worker: single QDB writer with dedicated handle. Needed for thread-safe QuasarDB operations.
+// Who: Sink creates internally, processes job queue.
+// id: worker identifier for logging
+// handle: exclusive QDB connection handle
+// options: sink configuration
+// handleInitialized: tracks handle lifecycle
 type worker struct {
 	id                int
 	handle            qdb.HandleType

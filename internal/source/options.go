@@ -1,15 +1,19 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package source: NATS JetStream connection & subscriptions
+// Package source: NATS JetStream connection & batch fetching
 // Types: Source, Options, OptionsProvider, MessageBatch, MessageInfo
 // Ex: source.NewSource(opts).FetchBatch(ctx) → messages flow
 package source
 
 import "time"
 
-// Option: functional option for source configuration
+// Option: functional option pattern for source configuration. Needed for flexible option composition.
+// Who: WithX functions return, NewOptions consumes.
 type Option func(Options) Options
 
-// Options: NATS JetStream connection config
+// Options: NATS JetStream configuration for reliable message consumption. Needed for pull-based batch fetching.
+// Who: connector config provides, source consumes via NewSource.
+// Endpoint-ConsumerName: JetStream connection details
+// BatchSize-MaxDeliver: message fetching & acknowledgment policies
 type Options struct {
 	Endpoint     string        `json:"endpoint"`
 	Topic        string        `json:"topic"`
@@ -140,16 +144,20 @@ func WithMaxDeliver(maxDeliver int) Option {
 
 // OptionsProvider: interface for source config decoupling from connector
 type OptionsProvider interface {
+	// URL returns NATS server URL (e.g., "nats://host:4222")
 	URL() string
+	// StreamName returns JetStream stream name for subscription
 	StreamName() string
+	// BatchSize returns max messages per fetch operation
 	BatchSize() int
+	// BatchTimeout returns max wait time for batch completion
 	BatchTimeout() time.Duration
+	// FetchTimeout returns overall timeout for fetch operation
 	FetchTimeout() time.Duration
+	// AckWait returns time before message redelivery
 	AckWait() time.Duration
+	// MaxDeliver returns max delivery attempts before message is dead-lettered
 	MaxDeliver() int
-	// Legacy compatibility
-	Endpoint() string
-	Topic() string
 }
 
 // FromOptionsProvider extracts source config with topic override.

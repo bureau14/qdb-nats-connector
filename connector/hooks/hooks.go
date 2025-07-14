@@ -118,7 +118,7 @@ func (r *HookRegistry) executeHookWithRecovery(ctx context.Context, hook HookFun
 // getWarningThreshold returns the appropriate warning threshold based on hook name
 func (r *HookRegistry) getWarningThreshold(name string) time.Duration {
 	switch name {
-	case "PreRead", "PreWrite", "PreAck", "PreCircuitBreakerStateChange":
+	case "PreRead", "PreWrite", "PreAck", "PreCircuitBreakerStateChange", "PreCircuitBreakerJitter":
 		return PreHookWarningThreshold
 	case "PostRead", "PostWrite", "PostAck", "PostCircuitBreakerStateChange":
 		return PostHookWarningThreshold

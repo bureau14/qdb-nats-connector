@@ -94,3 +94,21 @@ type PostCircuitBreakerRequestRejected struct {
 	State    string
 	Reason   string
 }
+
+// PreCircuitBreakerJitter: operational visibility into recovery delays.
+// Purpose: Track jitter impact during outages for capacity planning.
+// Fires: Only when jitter>0 && (Open||HalfOpen) - avoids noise.
+// Use cases:
+//   - Capacity planning: measure effective throughput during recovery
+//   - Recovery tuning: optimize jitter vs thundering herd tradeoff
+//   - Debug bottlenecks: identify if jitter delays limit recovery speed
+//
+// Context: Execute() protects expensive batch operations (e.g., 500-msg writes),
+// so jitter overhead negligible vs protected operation cost.
+type PreCircuitBreakerJitter struct {
+	WorkerID  string    // Worker applying jitter
+	Resource  string    // Protected resource (e.g., "qdb-sink")
+	State     string    // Current state ("open" or "half-open")
+	JitterMs  int64     // Applied delay in ms (useful for percentile analysis)
+	Timestamp time.Time // When jitter applied
+}

@@ -191,13 +191,22 @@ func (w *worker) processTables(tables []qdb.WriterTable) error {
 		// Push all tables
 		err := w.pushTables(tables)
 		if err != nil {
+			// Check if error is retryable using qdb.IsRetryable()
+			if !qdb.IsRetryable(err) {
+				slog.Error("Non-retryable error, failing immediately", "worker_id", w.id, "error", err, "retryable", false)
+
+				return errors.NewWriteFailedError("sink", fmt.Errorf("permanent failure: %w", err))
+			}
+
 			if attempt < w.options.RetryAttempts-1 {
-				slog.Debug("Retryable error, backing off", "worker_id", w.id, "attempt", attempt+1, "backoff", backoff, "error", err)
+				slog.Debug("Retryable error, backing off", "worker_id", w.id, "attempt", attempt+1, "backoff", backoff, "error", err, "retryable", true)
 
 				continue
 			}
 
-			return errors.NewWriteFailedError("sink", err)
+			slog.Error("Max retries exceeded for retryable error", "worker_id", w.id, "attempts", w.options.RetryAttempts, "error", err, "retryable", true)
+
+			return errors.NewMaxRetriesExceededError("sink", w.options.RetryAttempts)
 		}
 
 		return nil

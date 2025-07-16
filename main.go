@@ -92,7 +92,6 @@ func runMain() int {
 
 	slog.Info("Parsed configuration options", "options", opts)
 
-	// 2. Create JSON parser: default format handler
 	// Create connector (parser is created internally by workers)
 	c, err := connector.NewConnector(opts)
 	if err != nil {

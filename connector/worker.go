@@ -20,7 +20,6 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
-	"github.com/nats-io/nats.go"
 )
 
 // Worker: processes NATS topic→QuasarDB, goroutine-safe
@@ -76,8 +75,13 @@ func NewWorker(id int, topicFilter string, opts Options, manager *resilience.Man
 		return nil, err
 	}
 
-	// Create parser
-	jsonParser, err := parser.NewJsonParser()
+	// Create parser using factory based on command-line options
+	parserOpts := parser.ParserOptions{
+		ParserType:  opts.Parser,
+		ConfigPath:  opts.ParserConfig,
+		ErrorAction: opts.ParseErrorAction,
+	}
+	messageParser, err := parser.NewParserWithOptions(parserOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +105,7 @@ func NewWorker(id int, topicFilter string, opts Options, manager *resilience.Man
 		// Use shared circuit breaker from manager
 		circuitBreaker = manager.ForResource("qdb-cluster", workerID)
 	} else {
-		// Create individual circuit breaker (legacy mode)
+		// Create individual circuit breaker
 		circuitBreaker = resilience.NewCircuitBreaker(
 			opts.CircuitBreakerFailureThreshold,
 			opts.CircuitBreakerSuccessThreshold,
@@ -117,7 +121,7 @@ func NewWorker(id int, topicFilter string, opts Options, manager *resilience.Man
 		workerID:       workerID,
 		topicFilter:    topicFilter,
 		source:         src,
-		parser:         jsonParser,
+		parser:         messageParser,
 		sink:           qdbSink,
 		circuitBreaker: circuitBreaker,
 		hooks:          opts.Hooks,
@@ -198,33 +202,24 @@ func (w *Worker) fetchMessages(ctx context.Context) (*source.MessageBatch, error
 	return batch, nil
 }
 
-// parseMessages transforms NATS→ParseResult, tracks failures.
+// parseMessages transforms NATS→tables, tracks failures.
 // In: batch *source.MessageBatch - messages to parse
-// Out: []parser.ParseResult - valid, []uint64 - failedSequenceNumbers
-// Ex: parseMessages(batch) → [result1, result2], [seq3]
-func (w *Worker) parseMessages(batch *source.MessageBatch) (validResults []parser.ParseResult, failedSequenceNumbers []uint64) {
-	// Convert MessageInfo to *nats.Msg for parser because the parser interface
-	// expects raw NATS messages, not our wrapped MessageInfo. This allows the
-	// parser to remain decoupled from our internal source abstractions.
-	msgs := make([]*nats.Msg, len(batch.Messages))
-	for i, msgInfo := range batch.Messages {
-		msgs[i] = msgInfo.Msg
-	}
+// Out: []qdb.WriterTable - valid tables, []uint64 - failedSequenceNumbers
+// Ex: parseMessages(batch) → [table1, table2], [seq3]
+func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.WriterTable, failedSequenceNumbers []uint64) {
+	// Parse messages individually
+	for _, msgInfo := range batch.Messages {
+		seq := msgInfo.Sequence
 
-	// Parse messages
-	results := w.parser.ParseBatch(msgs)
-
-	// Classify parse results
-	for i, result := range results {
-		seq := batch.Messages[i].Sequence
-
-		if result.Error != nil {
+		// Parse individual message
+		tables, err := w.parser.Parse(msgInfo.Msg)
+		if err != nil {
 			// Log parse error with details for debugging
 			slog.Warn("Message parse failed",
 				"worker_id", w.id,
 				"sequence", seq,
-				"error", result.Error,
-				"subject", batch.Messages[i].Msg.Subject)
+				"error", err,
+				"subject", msgInfo.Msg.Subject)
 
 			// Simply NACK for retry (no poisoning)
 			failedSequenceNumbers = append(failedSequenceNumbers, seq)
@@ -233,14 +228,11 @@ func (w *Worker) parseMessages(batch *source.MessageBatch) (validResults []parse
 			continue
 		}
 
-		// Update result with correct sequence from batch because the parser
-		// doesn't know about message sequences - it only parses content.
-		// We need the sequence for acknowledgment tracking.
-		result.Sequence = seq
-		validResults = append(validResults, result)
+		// Add all parsed tables to valid results
+		validTables = append(validTables, tables...)
 	}
 
-	return validResults, failedSequenceNumbers
+	return validTables, failedSequenceNumbers
 }
 
 // processBatch executes fetch→parse→write pipeline.
@@ -294,7 +286,7 @@ func (w *Worker) processBatch(ctx context.Context) error {
 	}
 
 	// 2. Parse messages - failures retry automatically
-	validResults, failedSequenceNumbers := w.parseMessages(batch)
+	validTables, failedSequenceNumbers := w.parseMessages(batch)
 
 	// 3. NACK failed parses immediately for retry
 	if len(failedSequenceNumbers) > 0 {
@@ -305,15 +297,12 @@ func (w *Worker) processBatch(ctx context.Context) error {
 	}
 
 	// 4. If no valid messages, we're done
-	if len(validResults) == 0 {
+	if len(validTables) == 0 {
 		return nil
 	}
 
 	// 5. Write valid messages with circuit breaker
-	var tables []qdb.WriterTable
-	for _, result := range validResults {
-		tables = append(tables, result.Tables...)
-	}
+	tables := validTables
 
 	// PreWrite hook
 	rowCount := 0
@@ -363,12 +352,19 @@ func (w *Worker) processBatch(ctx context.Context) error {
 	}
 
 	// 6. ACK or NACK based on write result
-	validSequences := make([]uint64, len(validResults))
-	for i, r := range validResults {
-		validSequences[i] = r.Sequence
+	// Calculate valid sequences by excluding failed ones
+	var validSequences []uint64
+	failedSeqMap := make(map[uint64]bool)
+	for _, seq := range failedSequenceNumbers {
+		failedSeqMap[seq] = true
+	}
+	for _, msgInfo := range batch.Messages {
+		if !failedSeqMap[msgInfo.Sequence] {
+			validSequences = append(validSequences, msgInfo.Sequence)
+		}
 	}
 
-	w.messagesProcessed.Add(uint64(len(validResults)))
+	w.messagesProcessed.Add(uint64(len(validSequences)))
 
 	if err != nil {
 		return w.handleWriteFailure(ctx, batch, validSequences, err)

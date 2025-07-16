@@ -134,11 +134,11 @@ func RandomEndpoint(t *rapid.T) string {
 // ComponentName picks random component for error tests.
 // In: t *rapid.T - test randomizer
 // Out: string - source/sink/parser/etc
-// Ex: ComponentName(t) → "json_parser"
+// Ex: ComponentName(t) → "yaml_parser"
 func ComponentName(t *rapid.T) string {
 	components := []string{
 		"source", "sink", "parser", "connector",
-		"json_parser", "noop_parser", "writer",
+		"yaml_parser", "noop_parser", "writer",
 	}
 
 	return rapid.SampledFrom(components).Draw(t, "component")

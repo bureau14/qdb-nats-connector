@@ -98,7 +98,7 @@ func NewSubscriptionFailedError(component, topic string, err error) *ConnectorEr
 // NewParsingFailedError creates parser failure error.
 // In: component string, err error
 // Out: *ConnectorError
-// Ex: NewParsingFailedError("json-parser", err) → err
+// Ex: NewParsingFailedError("yaml-parser", err) → err
 func NewParsingFailedError(component string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeParsingFailed,

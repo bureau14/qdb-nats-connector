@@ -35,7 +35,7 @@ type ConnectorConfig struct {
 	// QDBUserSecurity is the optional QuasarDB user security credentials
 	QDBUserSecurity string
 
-	// Parser specifies which message parser to use (currently only "json" is supported)
+	// Parser specifies which message parser to use (supported: "yaml", "noop")
 	Parser string
 }
 

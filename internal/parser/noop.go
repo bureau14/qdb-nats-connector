@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
 // Package parser: NATS→QuasarDB message transformation
-// Types: Parser, JsonParser, ParseResult
+// Types: Parser, NoopParser, YAMLParser
 // Ex: parser.Parse(msg) → []WriterTable
 package parser
 
@@ -41,12 +41,4 @@ func (p *NoopParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	slog.Debug("Parsing NATS message", "subject", msg.Subject, "data_len", len(msg.Data))
 
 	return []qdb.WriterTable{}, nil
-}
-
-// ParseBatch delegates to DefaultParseBatch for validation.
-// In: msgs []*nats.Msg - message batch
-// Out: []ParseResult - empty tables or errors
-// Ex: ParseBatch(msgs) → [{[],nil},{[],err}]
-func (p *NoopParser) ParseBatch(msgs []*nats.Msg) []ParseResult {
-	return DefaultParseBatch(p, msgs)
 }

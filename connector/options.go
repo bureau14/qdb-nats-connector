@@ -59,6 +59,11 @@ type Options struct {
 	//   >0: Maximum number of concurrent requests before closing circuit
 	CircuitBreakerHalfOpenMax int `mapstructure:"circuit-breaker-half-open-max"`
 
+	// Parser configuration
+	Parser           string `mapstructure:"parser"`
+	ParserConfig     string `mapstructure:"parser-config"`
+	ParseErrorAction string `mapstructure:"parse-error-action"`
+
 	// Hooks for observability/testing
 	Hooks *hooks.HookRegistry `json:"-"`
 
@@ -127,6 +132,9 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("circuit-breaker-jitter-max", 100*time.Millisecond)
 	v.SetDefault("circuit-breaker-half-open-base", 1)
 	v.SetDefault("circuit-breaker-half-open-max", 32)
+	v.SetDefault("parser", "noop")
+	v.SetDefault("parser-config", "")
+	v.SetDefault("parse-error-action", "drop")
 
 	var showHelp bool
 
@@ -168,14 +176,10 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.Int("circuit-breaker-half-open-base", 1, "Initial requests allowed in half-open state")
 	fs.Int("circuit-breaker-half-open-max", 32, "Maximum requests before closing circuit")
 
-	// Check for deprecated --config flag and warn user
-	for _, arg := range args {
-		if arg == "--config" {
-			fmt.Fprintf(os.Stderr, "WARNING: --config flag is no longer supported. Please use command-line arguments or environment variables instead.\n")
-
-			break
-		}
-	}
+	// Parser flags
+	fs.String("parser", "noop", "Parser type: yaml|noop")
+	fs.String("parser-config", "", "Path to parser configuration file (required for yaml parser)")
+	fs.String("parse-error-action", "drop", "Action on parse error: drop|fail")
 
 	err := fs.Parse(args)
 	if err != nil {
@@ -186,6 +190,20 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 		printHelp()
 
 		return nil, nil
+	}
+
+	// Bind parser flags individually
+	err = v.BindPFlag("parser", fs.Lookup("parser"))
+	if err != nil {
+		return nil, fmt.Errorf("error binding parser flag: %w", err)
+	}
+	err = v.BindPFlag("parser-config", fs.Lookup("parser-config"))
+	if err != nil {
+		return nil, fmt.Errorf("error binding parser-config flag: %w", err)
+	}
+	err = v.BindPFlag("parse-error-action", fs.Lookup("parse-error-action"))
+	if err != nil {
+		return nil, fmt.Errorf("error binding parse-error-action flag: %w", err)
 	}
 
 	// Bind flags to viper - this handles precedence automatically
@@ -342,6 +360,47 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 		return errors.NewInvalidConfigError("connector", "circuit breaker jitter max cannot exceed half the timeout")
 	}
 
+	// Validate parser configuration
+	validParsers := map[string]bool{"yaml": true, "noop": true}
+	if !validParsers[opts.Parser] {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("invalid parser type: %s (valid: yaml, noop)", opts.Parser))
+	}
+
+	// Validate parse error action
+	validErrorActions := map[string]bool{"drop": true, "fail": true}
+	if !validErrorActions[opts.ParseErrorAction] {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("invalid parse-error-action: %s (valid: drop, fail)", opts.ParseErrorAction))
+	}
+
+	// Validate YAML parser requirements
+	if opts.Parser == "yaml" && opts.ParserConfig == "" {
+		return errors.NewInvalidConfigError("connector",
+			"yaml parser requires --parser-config flag pointing to a YAML configuration file")
+	}
+
+	// Validate parser config path security
+	if opts.ParserConfig != "" {
+		// Check for path traversal attempts
+		if strings.Contains(opts.ParserConfig, "..") {
+			return errors.NewInvalidConfigError("connector",
+				"parser-config path must not contain '..' (path traversal)")
+		}
+
+		// Verify file exists and is readable
+		_, err := os.Stat(opts.ParserConfig)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return errors.NewInvalidConfigError("connector",
+					fmt.Sprintf("parser-config file not found: %s", opts.ParserConfig))
+			}
+
+			return errors.NewInvalidConfigError("connector",
+				fmt.Sprintf("cannot access parser-config file: %v", err))
+		}
+	}
+
 	return nil
 }
 
@@ -467,18 +526,14 @@ func (o *Options) MaxDeliver() int { return o.parsedSourceOptions.MaxDeliver }
 // Out: qdb.Compression, error
 // Ex: parseCompression("none") → CompNone, nil
 func parseCompression(val string) (qdb.Compression, error) {
-	// Check for deprecated "fast" compression and warn user
-	if val == "fast" {
-		fmt.Fprintf(os.Stderr, "WARNING: 'fast' compression is no longer supported. Please use 'none' or 'balanced' instead.\n")
-	}
-
 	switch val {
 	case "none":
 		return qdb.CompNone, nil
 	case "balanced":
 		return qdb.CompBalanced, nil
 	default:
-		return qdb.CompNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid compression value: %s (valid values: none, balanced)", val))
+		return qdb.CompNone, errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("invalid compression value: %s (valid values: none, balanced)", val))
 	}
 }
 

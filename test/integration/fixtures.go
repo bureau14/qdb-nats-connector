@@ -78,8 +78,6 @@ func TableSchemaGen() *rapid.Generator[TableSchema] {
 				}
 			}
 
-			// All columns are blob type to match JSON parser output
-			// JSON parser converts strings to blob type (TsColumnTypes[0])
 			columns[i] = qdb.WriterColumn{
 				ColumnName: colName,
 				ColumnType: qdb.TsColumnTypes[0], // blob type

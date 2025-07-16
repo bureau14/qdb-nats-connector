@@ -1,0 +1,69 @@
+# Finance OHLC market data YAML parser configuration
+# Parses JSON messages with timestamp, stock_id, open, high, low, close, volume fields
+
+output:
+  table_name: "finance_ohlc"
+  columns:
+    - name: "stock_id"
+      type: "string"
+    - name: "open"
+      type: "double"
+    - name: "high"
+      type: "double"
+    - name: "low"
+      type: "double"
+    - name: "close"
+      type: "double"
+    - name: "volume"
+      type: "int64"
+
+transformations:
+  # Parse incoming JSON message
+  - step: "parse_json"
+    config: {}
+
+  # Extract and convert timestamp field
+  - step: "extract_timestamp"
+    config:
+      source: "timestamp"
+      target: "timestamp"
+      format: "rfc3339"
+
+  # Extract stock identifier
+  - step: "extract_field"
+    config:
+      source: "stock_id"
+      target: "stock_id"
+      type: "string"
+
+  # Extract OHLC price data
+  - step: "extract_field"
+    config:
+      source: "open"
+      target: "open"
+      type: "float64"
+
+  - step: "extract_field"
+    config:
+      source: "high"
+      target: "high"
+      type: "float64"
+
+  - step: "extract_field"
+    config:
+      source: "low"
+      target: "low"
+      type: "float64"
+
+  - step: "extract_field"
+    config:
+      source: "close"
+      target: "close"
+      type: "float64"
+
+  # Extract volume data
+  - step: "extract_field"
+    config:
+      source: "volume"
+      target: "volume"
+      type: "int64"

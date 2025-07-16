@@ -1,0 +1,61 @@
+# Network device metrics YAML parser configuration
+# Parses JSON messages with timestamp, device_id, bytes_in/out, packets_dropped, latency_ms fields
+
+output:
+  table_name: "network_metrics"
+  columns:
+    - name: "device_id"
+      type: "string"
+    - name: "bytes_in"
+      type: "int64"
+    - name: "bytes_out"
+      type: "int64"
+    - name: "packets_dropped"
+      type: "int64"
+    - name: "latency_ms"
+      type: "double"
+
+transformations:
+  # Parse incoming JSON message
+  - step: "parse_json"
+    config: {}
+
+  # Extract and convert timestamp field
+  - step: "extract_timestamp"
+    config:
+      source: "timestamp"
+      target: "timestamp"
+      format: "rfc3339"
+
+  # Extract device identifier
+  - step: "extract_field"
+    config:
+      source: "device_id"
+      target: "device_id"
+      type: "string"
+
+  # Extract network traffic metrics
+  - step: "extract_field"
+    config:
+      source: "bytes_in"
+      target: "bytes_in"
+      type: "int64"
+
+  - step: "extract_field"
+    config:
+      source: "bytes_out"
+      target: "bytes_out"
+      type: "int64"
+
+  - step: "extract_field"
+    config:
+      source: "packets_dropped"
+      target: "packets_dropped"
+      type: "int64"
+
+  # Extract latency metric
+  - step: "extract_field"
+    config:
+      source: "latency_ms"
+      target: "latency_ms"
+      type: "float64"

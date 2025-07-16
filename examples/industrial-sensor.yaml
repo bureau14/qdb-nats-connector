@@ -1,0 +1,36 @@
+# Industrial sensor monitoring YAML parser configuration
+# Parses JSON messages with timestamp, sensor_id, and measurement fields
+
+output:
+  table_name: "industrial_sensors"
+  columns:
+    - name: "sensor_id"
+      type: "string"
+    - name: "measurement"
+      type: "double"
+
+transformations:
+  # Parse incoming JSON message
+  - step: "parse_json"
+    config: {}
+
+  # Extract and convert timestamp field
+  - step: "extract_timestamp"
+    config:
+      source: "timestamp"
+      target: "timestamp"
+      format: "rfc3339"
+
+  # Extract sensor identifier
+  - step: "extract_field"
+    config:
+      source: "sensor_id"
+      target: "sensor_id"
+      type: "string"
+
+  # Extract temperature measurement
+  - step: "extract_field"
+    config:
+      source: "measurement"
+      target: "measurement"
+      type: "float64"

@@ -9,10 +9,10 @@ SUBJECT="network.metrics"
 NUM_MESSAGES=100
 
 usage() {
-    echo "Usage: $0 {create-stream|load|run}"
-    echo "  create-stream  - Create NATS JetStream stream"
-    echo "  load          - Generate and load data into NATS JetStream"
-    echo "  run           - Run qdb-nats-connector and show all data"
+    echo "Usage: $0 {create|load|run}"
+    echo "  create  - Create NATS JetStream stream and QuasarDB table"
+    echo "  load    - Generate and load data into NATS JetStream"
+    echo "  run     - Run qdb-nats-connector and show all data"
     exit 1
 }
 
@@ -51,14 +51,22 @@ EOF
     echo "Generated $NUM_MESSAGES network metrics messages in $DATA_FILE"
 }
 
-create_stream() {
+create() {
+    echo "Creating NATS JetStream stream and QuasarDB table..."
+    
+    # Create NATS stream
     echo "Creating NATS JetStream stream: $STREAM_NAME"
     if nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
-        echo "Stream $STREAM_NAME already exists, deleting..."
-        nats stream delete "$STREAM_NAME" --force
+        echo "Warning: Stream $STREAM_NAME already exists, skipping NATS stream creation."
+    else
+        nats stream add "$STREAM_NAME" --subjects "network.>" --retention limits --defaults
+        echo "Stream $STREAM_NAME created successfully."
     fi
-    nats stream add "$STREAM_NAME" --subjects "network.>" --retention limits --defaults
-    echo "Stream $STREAM_NAME created successfully."
+    
+    # Create QuasarDB table
+    echo "Creating QuasarDB table: network_metrics"
+    qdbsh -c "CREATE TABLE network_metrics(device_id STRING, bytes_in INT64, bytes_out INT64, packets_dropped INT64, latency_ms DOUBLE)" 2>&1 | grep -v "already exists" || true
+    echo "QuasarDB table creation completed."
 }
 
 load() {
@@ -76,7 +84,7 @@ load() {
     
     # Check if stream exists
     if ! nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
-        echo "Error: Stream $STREAM_NAME does not exist. Run '$0 create-stream' first."
+        echo "Error: Stream $STREAM_NAME does not exist. Run '$0 create' first."
         exit 1
     fi
     
@@ -110,7 +118,7 @@ run() {
 }
 
 case "${1:-}" in
-    create-stream) create_stream ;;
+    create) create ;;
     load) load ;;
     run) run ;;
     *) usage ;;

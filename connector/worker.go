@@ -288,6 +288,16 @@ func (w *Worker) processBatch(ctx context.Context) error {
 	// 2. Parse messages - failures retry automatically
 	validTables, failedSequenceNumbers := w.parseMessages(batch)
 
+	// 2.5. Merge tables with the same name to prevent "already exists" errors
+	if len(validTables) > 0 {
+		mergedTables, err := qdb.MergeWriterTables(validTables)
+		if err != nil {
+			slog.Error("Failed to merge tables", "worker_id", w.id, "error", err, "num_tables", len(validTables))
+			return err
+		}
+		validTables = mergedTables
+	}
+
 	// 3. NACK failed parses immediately for retry
 	if len(failedSequenceNumbers) > 0 {
 		err := batch.NackFunc(failedSequenceNumbers)

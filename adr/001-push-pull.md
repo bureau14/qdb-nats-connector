@@ -23,49 +23,47 @@ Within pull-based consumption, we evaluated several architectural approaches:
 
 ## Decision
 
-We chose **pull-based consumption with independent workers**, where:
-- Each process can consume any subset of topics via CLI configuration
-- Each topic filter gets its own JetStream consumer and dedicated goroutine
-- No coordination between processes or workers
-- Complete isolation between topic processing pipelines
+We chose **pull-based consumption**. The connector's scalability and parallelism are achieved by running multiple instances of the connector process. NATS JetStream handles the load balancing of messages between these instances.
+
+Each connector process can be configured to handle one or more topic subscriptions. For each subscription, the connector creates a **durable pull consumer**. The name of this durable consumer should be shared across all connector instances that are intended to share the workload for that subscription.
+
+When multiple connector instances (workers) pull from the same durable consumer name, NATS JetStream ensures that each batch of messages is delivered to only one worker, thus distributing the load automatically.
+
+This model provides a simple, robust, and horizontally scalable architecture that is idiomatic to both NATS and modern cloud-native deployments.
 
 ## Architectural Details
 
 ### Worker Model
 
-Each process spawns one goroutine per configured topic filter. Each goroutine maintains:
-- Its own JetStream pull consumer
-- Dedicated parser instance
-- Dedicated QuasarDB handle
-- Independent error tracking
+Each connector process is a "worker". A single process can be configured to handle multiple topic subscriptions.
 
 ```
-Process Instance
-├── Topic: "sensors.temp.>" → Goroutine 1 → Consumer "prefix-sensors-temp"
-├── Topic: "sensors.pressure.>" → Goroutine 2 → Consumer "prefix-sensors-pressure"
-└── Topic: "metrics.cpu.>" → Goroutine 3 → Consumer "prefix-metrics-cpu"
+# Process Instance 1 (handles two topics)
+--topic "sensors.temp.>" --durable-name "temp-processor"
+--topic "sensors.pressure.>" --durable-name "pressure-processor"
+
+# Process Instance 2 (also handles temp data, sharing the load)
+--topic "sensors.temp.>" --durable-name "temp-processor"
 ```
+
+In this example:
+- The load for `sensors.temp.>` is shared between Process 1 and Process 2 because they use the same durable consumer name (`temp-processor`).
+- The load for `sensors.pressure.>` is handled exclusively by Process 1.
 
 ### Consumer Management
 
-- Consumers are created dynamically by each process on startup
-- Consumer names follow pattern: `{consumer-prefix}-{sanitized-topic}`
-- Each consumer maintains independent ACK state
-- No consumer sharing between processes or goroutines
+- Consumers are durable and defined on the JetStream server.
+- The connector instances are configured with the durable name and stream name to attach to.
+- This allows workers to be added or removed dynamically, with NATS managing the state.
+- The `--durable-name` flag provides explicit control over which workers share which queues.
 
-### Topic Distribution
+### Topic Distribution & Scaling
 
-Operators control topic distribution via CLI flags:
-```bash
-# Instance 1: Temperature and pressure data
---topic "sensors.temp.>" --topic "sensors.pressure.>"
+Operators scale the system by running more connector processes.
+- **To add capacity for a topic**: Start a new connector instance pointing to the same stream and using the same durable consumer name.
+- **To partition work**: Use different durable consumer names for different data types or geographic regions.
+- This aligns perfectly with container orchestration platforms like Kubernetes, where scaling is achieved by increasing the replica count of the connector deployment.
 
-# Instance 2: Metrics and events
---topic "metrics.>" --topic "events.>"
-
-# Instance 3: Geographic partitioning
---topic "*.us-east.>" --topic "*.eu-west.>"
-```
 
 ## Rationale
 

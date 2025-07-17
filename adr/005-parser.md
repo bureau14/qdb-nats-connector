@@ -72,10 +72,9 @@ transformations:
   - step: "parse_json"
     config: {}
     
-  - step: "extract_timestamp"
+  - step: "extract_index"
     config:
       source: "T"  # Compact field name in JSON
-      target: "timestamp"
       format: "MM/dd/yyyy HH:mm:ss.SSS"
 
   - step: "extract_field"
@@ -137,8 +136,8 @@ Building Block Architecture:
 **Performance Benefits:**
 - **No external process overhead**: Everything runs in-process
 - **Minimal abstraction cost**: Direct function calls between blocks
-- **Optimized data flow**: Batch processing with minimal memory copying
-- **JIT compilation**: YAML configs compiled to optimized execution plans
+- **Optimized data flow**: The parser prepares data for a batch write, which is then executed in a single, efficient operation.
+- **Simplified State Management**: Because each worker process handles a batch synchronously, the parser's internal state (`ParseState`) does not need to be goroutine-safe. This eliminates the need for complex concurrent buffering strategies or `sync.Pool` for state objects, leading to a simpler and more maintainable implementation.
 
 ## Consequences
 

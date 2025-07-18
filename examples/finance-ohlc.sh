@@ -6,7 +6,7 @@ DATA_FILE="$SCRIPT_DIR/finance-ohlc-data.jsonl"
 CONFIG_FILE="$SCRIPT_DIR/finance-ohlc.yaml"
 STREAM_NAME="FINANCE_STREAM"
 SUBJECT="finance.ohlc"
-NUM_MESSAGES=100
+NUM_MESSAGES=1000
 
 usage() {
     echo "Usage: $0 {create|load|run}"
@@ -14,6 +14,11 @@ usage() {
     echo "  load    - Generate and load data into NATS JetStream"
     echo "  run     - Run qdb-nats-connector and show all data"
     exit 1
+}
+
+# Function to compress individual messages using gzip and encode as base64
+compress_message() {
+    echo -n "$1" | gzip -c | base64 -w 0
 }
 
 generate() {
@@ -25,7 +30,6 @@ generate() {
 EOF
     for ((i=0; i<NUM_MESSAGES; i++)); do
         timestamp=$((START_TIMESTAMP + i * 60))
-        iso_timestamp=$(date -u -r $timestamp "+%Y-%m-%dT%H:%M:%SZ")
         stock_idx=$((i % 5))
         stock_id="${STOCKS[$stock_idx]}"
         base_price="${BASE_PRICES[$stock_idx]}"
@@ -36,14 +40,22 @@ EOF
         low=$(awk "BEGIN {printf \"%.2f\", $open - rand() * $movement}")
         close=$(awk "BEGIN {printf \"%.2f\", $low + rand() * ($high - $low)}")
         volume=$(awk "BEGIN {printf \"%.0f\", 10000 + rand() * 4990000}")
-        echo "{\"timestamp\": \"$iso_timestamp\", \"stock_id\": \"$stock_id\", \"open\": $open, \"high\": $high, \"low\": $low, \"close\": $close, \"volume\": $volume}" >> "$DATA_FILE"
+        # Map stocks to exchanges for realistic data
+        case "$stock_id" in
+            "AAPL"|"MSFT"|"AMZN") exchange="NASDAQ" ;;
+            "GOOGL"|"TSLA") exchange="NASDAQ" ;;
+            *) exchange="NYSE" ;;
+        esac
+        json_message="{\"market\": {\"exchange\": \"$exchange\", \"symbol\": \"$stock_id\"}, \"timestamp\": $timestamp, \"o\": $open, \"h\": $high, \"l\": $low, \"c\": $close, \"v\": $volume}"
+        compressed_message=$(compress_message "$json_message")
+        echo "$compressed_message" >> "$DATA_FILE"
     done
     echo "Generated $NUM_MESSAGES OHLC messages in $DATA_FILE"
 }
 
 create() {
     echo "Creating NATS JetStream stream and QuasarDB table..."
-    
+
     # Create NATS stream
     echo "Creating NATS JetStream stream: $STREAM_NAME"
     if nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
@@ -52,10 +64,19 @@ create() {
         nats stream add "$STREAM_NAME" --subjects "finance.>" --retention limits --defaults
         echo "Stream $STREAM_NAME created successfully."
     fi
-    
+
+    # Create consumer for the connector
+    echo "Creating NATS consumer: finance-connector"
+    if nats consumer info "$STREAM_NAME" finance-connector >/dev/null 2>&1; then
+        echo "Warning: Consumer finance-connector already exists, skipping consumer creation."
+    else
+        nats consumer add "$STREAM_NAME" finance-connector --pull --deliver all --ack explicit --defaults
+        echo "Consumer finance-connector created successfully."
+    fi
+
     # Create QuasarDB table
     echo "Creating QuasarDB table: finance_ohlc"
-    qdbsh -c "CREATE TABLE finance_ohlc(stock_id STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64)" 2>&1 | grep -v "already exists" || true
+    qdbsh -c "CREATE TABLE finance_ohlc(stock_id STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64, trading_pair STRING)" 2>&1 | grep -v "already exists" || true
     echo "QuasarDB table creation completed."
 }
 
@@ -79,9 +100,10 @@ load() {
     fi
 
     lines_count=$(wc -l < "$DATA_FILE")
-    echo "Publishing $lines_count OHLC messages..."
+    echo "Publishing $lines_count compressed OHLC messages..."
     while IFS= read -r line; do
-        echo "$line" | nats pub "$SUBJECT" --force-stdin -q
+        # Decode base64 and publish raw gzipped bytes
+        echo "$line" | base64 -d | nats pub "$SUBJECT" --force-stdin -q
     done < "$DATA_FILE"
     echo "Data loaded successfully. Stream info:"
     nats stream info "$STREAM_NAME"
@@ -102,7 +124,8 @@ run() {
         --nats nats://localhost:4222 \
         --qdb qdb://127.0.0.1:2836 \
         --stream "$STREAM_NAME" \
-        --topic "$SUBJECT" \
+        --consumer finance-connector \
+        --workers 2 \
         --parser yaml \
         --parser-config "$CONFIG_FILE"
 }

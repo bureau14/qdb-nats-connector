@@ -6,7 +6,7 @@ DATA_FILE="$SCRIPT_DIR/network-metrics-data.jsonl"
 CONFIG_FILE="$SCRIPT_DIR/network-metrics.yaml"
 STREAM_NAME="NETWORK_STREAM"
 SUBJECT="network.metrics"
-NUM_MESSAGES=100
+NUM_MESSAGES=1000
 
 usage() {
     echo "Usage: $0 {create|load|run}"
@@ -28,7 +28,9 @@ generate() {
 EOF
     for ((i=0; i<NUM_MESSAGES; i++)); do
         timestamp=$((START_TIMESTAMP + i * 30))
-        iso_timestamp=$(date -u -r $timestamp "+%Y-%m-%dT%H:%M:%SZ")
+        # Generate random nanoseconds for high-precision timestamps
+        nanos=$(awk "BEGIN {printf \"%09d\", rand() * 1000000000}")
+        nano_timestamp=$(date -u -r $timestamp "+%Y-%m-%dT%H:%M:%S.${nanos}Z")
         device_idx=$((i % 5))
         device_id="${DEVICES[$device_idx]}"
         # Set device-specific parameters
@@ -46,14 +48,29 @@ EOF
         bytes_out=$(awk "BEGIN {printf \"%.0f\", $bytes_base * 0.8 + rand() * $bytes_range * 0.8}")
         packets_dropped=$(awk "BEGIN {printf \"%.0f\", rand() * $drop_max}")
         latency_ms=$(awk "BEGIN {printf \"%.1f\", $lat_base + rand() * $lat_range}")
-        echo "{\"timestamp\": \"$iso_timestamp\", \"device_id\": \"$device_id\", \"bytes_in\": $bytes_in, \"bytes_out\": $bytes_out, \"packets_dropped\": $packets_dropped, \"latency_ms\": $latency_ms}" >> "$DATA_FILE"
+        # Map devices to datacenter and rack
+        case "$device_id" in
+            "router-01"|"switch-01") datacenter="DC1"; rack="R42" ;;
+            "router-02"|"switch-02") datacenter="DC1"; rack="R43" ;;
+            "firewall-01") datacenter="DC2"; rack="R01" ;;
+            *) datacenter="DC1"; rack="R44" ;;
+        esac
+        # Randomly omit errors section 20% of the time for testing error handling
+        missing_field_chance=$(awk "BEGIN {srand(); printf \"%.0f\", rand() * 100}")
+        if [ "$missing_field_chance" -lt 20 ]; then
+            # Omit errors section entirely
+            echo "{\"device\": {\"info\": {\"id\": \"$device_id\"}}, \"datacenter\": \"$datacenter\", \"rack\": \"$rack\", \"timestamp\": \"$nano_timestamp\", \"metrics\": {\"network\": {\"inbound\": {\"bytes\": $bytes_in}, \"outbound\": {\"bytes\": $bytes_out}}, \"performance\": {\"latency_percentiles\": {\"p99\": $latency_ms}}}}" >> "$DATA_FILE"
+        else
+            # Include errors section with deeply nested structure
+            echo "{\"device\": {\"info\": {\"id\": \"$device_id\"}}, \"datacenter\": \"$datacenter\", \"rack\": \"$rack\", \"timestamp\": \"$nano_timestamp\", \"metrics\": {\"network\": {\"inbound\": {\"bytes\": $bytes_in}, \"outbound\": {\"bytes\": $bytes_out}}, \"performance\": {\"latency_percentiles\": {\"p99\": $latency_ms}}}, \"errors\": {\"packets\": {\"dropped\": $packets_dropped}}}" >> "$DATA_FILE"
+        fi
     done
     echo "Generated $NUM_MESSAGES network metrics messages in $DATA_FILE"
 }
 
 create() {
     echo "Creating NATS JetStream stream and QuasarDB table..."
-    
+
     # Create NATS stream
     echo "Creating NATS JetStream stream: $STREAM_NAME"
     if nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
@@ -62,32 +79,41 @@ create() {
         nats stream add "$STREAM_NAME" --subjects "network.>" --retention limits --defaults
         echo "Stream $STREAM_NAME created successfully."
     fi
-    
+
+    # Create consumer for the connector
+    echo "Creating NATS consumer: network-connector"
+    if nats consumer info "$STREAM_NAME" network-connector >/dev/null 2>&1; then
+        echo "Warning: Consumer network-connector already exists, skipping consumer creation."
+    else
+        nats consumer add "$STREAM_NAME" network-connector --pull --deliver all --ack explicit --defaults
+        echo "Consumer network-connector created successfully."
+    fi
+
     # Create QuasarDB table
     echo "Creating QuasarDB table: network_metrics"
-    qdbsh -c "CREATE TABLE network_metrics(device_id STRING, bytes_in INT64, bytes_out INT64, packets_dropped INT64, latency_ms DOUBLE)" 2>&1 | grep -v "already exists" || true
+    qdbsh -c "CREATE TABLE network_metrics(device_id STRING, bytes_in INT64, bytes_out INT64, packets_dropped INT64, latency_ms DOUBLE, device_path STRING)" 2>&1 | grep -v "already exists" || true
     echo "QuasarDB table creation completed."
 }
 
 load() {
     echo "Generating and loading data into NATS JetStream..."
-    
+
     # First generate the data
     generate
-    
+
     # Then load it
     echo "Loading data from $DATA_FILE into subject $SUBJECT..."
     if [[ ! -f "$DATA_FILE" ]]; then
         echo "Error: Data file $DATA_FILE not found."
         exit 1
     fi
-    
+
     # Check if stream exists
     if ! nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
         echo "Error: Stream $STREAM_NAME does not exist. Run '$0 create' first."
         exit 1
     fi
-    
+
     lines_count=$(wc -l < "$DATA_FILE")
     echo "Publishing $lines_count network metrics messages..."
     while IFS= read -r line; do
@@ -112,7 +138,8 @@ run() {
         --nats nats://localhost:4222 \
         --qdb qdb://127.0.0.1:2836 \
         --stream "$STREAM_NAME" \
-        --topic "$SUBJECT" \
+        --consumer network-connector \
+        --workers 2 \
         --parser yaml \
         --parser-config "$CONFIG_FILE"
 }

@@ -1,5 +1,6 @@
 # Industrial sensor monitoring YAML parser configuration
-# Parses JSON messages with timestamp, sensor_id, and measurement fields
+# Parses JSON messages with nested sensor metadata and temperature measurements
+# Demonstrates error handling for malformed temperature readings
 
 output:
   table_name: "industrial_sensors"
@@ -8,29 +9,50 @@ output:
       type: "string"
     - name: "measurement"
       type: "double"
+    - name: "sensor_tag"
+      type: "string"
 
 transformations:
   # Parse incoming JSON message
   - step: "parse_json"
     config: {}
 
-  # Extract and convert timestamp field
-  - step: "extract_timestamp"
+  # Extract and convert timestamp field (custom format)
+  - step: "extract_index"
     config:
       source: "timestamp"
-      target: "timestamp"
-      format: "rfc3339"
+      format: "2006-01-02 15:04:05"
 
-  # Extract sensor identifier
+  # Extract sensor identifier from nested sensor metadata
   - step: "extract_field"
     config:
-      source: "sensor_id"
+      source: "sensor.id"
       target: "sensor_id"
       type: "string"
 
-  # Extract temperature measurement
+  # Extract building and floor information
   - step: "extract_field"
     config:
-      source: "measurement"
+      source: "building"
+      target: "building"
+      type: "string"
+
+  - step: "extract_field"
+    config:
+      source: "floor"
+      target: "floor"
+      type: "string"
+
+  # Extract temperature measurement with error handling
+  - step: "safe_parse_number"
+    config:
+      source: "temp"
       target: "measurement"
-      type: "float64"
+      on_error: "null"
+
+  # Create composite sensor tag field
+  - step: "compute_field"
+    config:
+      operation: "concat"
+      target: "sensor_tag"
+      fields: ["building", "-", "floor", "-", "sensor_id"]

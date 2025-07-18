@@ -1,5 +1,6 @@
 # Finance OHLC market data YAML parser configuration
-# Parses JSON messages with timestamp, stock_id, open, high, low, close, volume fields
+# Parses JSON messages with nested market metadata and OHLC price data
+# Demonstrates gzip compression handling for high-volume market data
 
 output:
   table_name: "finance_ohlc"
@@ -16,54 +17,74 @@ output:
       type: "double"
     - name: "volume"
       type: "int64"
+    - name: "trading_pair"
+      type: "string"
 
 transformations:
+  # Decompress gzipped message first
+  - step: "decompress"
+    config:
+      algorithm: "gzip"
+
   # Parse incoming JSON message
   - step: "parse_json"
     config: {}
 
-  # Extract and convert timestamp field
-  - step: "extract_timestamp"
+  # Extract and convert timestamp field (Unix timestamp)
+  - step: "extract_index"
     config:
       source: "timestamp"
-      target: "timestamp"
-      format: "rfc3339"
+      format: "unix"
 
-  # Extract stock identifier
+  # Extract stock identifier from nested market metadata
   - step: "extract_field"
     config:
-      source: "stock_id"
+      source: "market.symbol"
       target: "stock_id"
+      type: "string"
+
+  # Extract exchange from nested market metadata
+  - step: "extract_field"
+    config:
+      source: "market.exchange"
+      target: "exchange"
       type: "string"
 
   # Extract OHLC price data
   - step: "extract_field"
     config:
-      source: "open"
+      source: "o"
       target: "open"
       type: "float64"
 
   - step: "extract_field"
     config:
-      source: "high"
+      source: "h"
       target: "high"
       type: "float64"
 
   - step: "extract_field"
     config:
-      source: "low"
+      source: "l"
       target: "low"
       type: "float64"
 
   - step: "extract_field"
     config:
-      source: "close"
+      source: "c"
       target: "close"
       type: "float64"
 
   # Extract volume data
   - step: "extract_field"
     config:
-      source: "volume"
+      source: "v"
       target: "volume"
       type: "int64"
+
+  # Create composite trading pair field
+  - step: "compute_field"
+    config:
+      operation: "concat"
+      target: "trading_pair"
+      fields: ["exchange", ":", "stock_id"]

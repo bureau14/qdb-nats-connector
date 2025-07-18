@@ -1,5 +1,6 @@
 # Network device metrics YAML parser configuration
-# Parses JSON messages with timestamp, device_id, bytes_in/out, packets_dropped, latency_ms fields
+# Parses JSON messages with deep nested device hierarchy and network performance metrics
+# Demonstrates complex nested structure navigation and error handling for missing optional fields
 
 output:
   table_name: "network_metrics"
@@ -14,48 +15,70 @@ output:
       type: "int64"
     - name: "latency_ms"
       type: "double"
+    - name: "device_path"
+      type: "string"
 
 transformations:
   # Parse incoming JSON message
   - step: "parse_json"
     config: {}
 
-  # Extract and convert timestamp field
-  - step: "extract_timestamp"
+  # Extract and convert timestamp field (high-precision RFC3339Nano)
+  - step: "extract_index"
     config:
       source: "timestamp"
-      target: "timestamp"
-      format: "rfc3339"
+      format: "rfc3339nano"
 
-  # Extract device identifier
+  # Extract device identifier from nested device hierarchy
   - step: "extract_field"
     config:
-      source: "device_id"
+      source: "device.info.id"
       target: "device_id"
       type: "string"
 
-  # Extract network traffic metrics
+  # Extract network traffic metrics from deep nested structure
   - step: "extract_field"
     config:
-      source: "bytes_in"
+      source: "metrics.network.inbound.bytes"
       target: "bytes_in"
       type: "int64"
 
   - step: "extract_field"
     config:
-      source: "bytes_out"
+      source: "metrics.network.outbound.bytes"
       target: "bytes_out"
       type: "int64"
 
   - step: "extract_field"
     config:
-      source: "packets_dropped"
+      source: "errors.packets.dropped"
       target: "packets_dropped"
       type: "int64"
+      on_error: "skip"
 
-  # Extract latency metric
+  # Extract datacenter and rack information
   - step: "extract_field"
     config:
-      source: "latency_ms"
+      source: "datacenter"
+      target: "datacenter"
+      type: "string"
+
+  - step: "extract_field"
+    config:
+      source: "rack"
+      target: "rack"
+      type: "string"
+
+  # Extract latency metric from deep nested structure
+  - step: "extract_field"
+    config:
+      source: "metrics.performance.latency_percentiles.p99"
       target: "latency_ms"
       type: "float64"
+
+  # Create composite device path field
+  - step: "compute_field"
+    config:
+      operation: "concat"
+      target: "device_path"
+      fields: ["datacenter", "/", "rack", "/", "device_id"]

@@ -1,14 +1,15 @@
-# ADR-001: Pull-Based Message Consumption with Independent Workers
+# ADR-001: Pull-Based Message Consumption with Worker Pool
 
-Date: 2025-07-04
+Date: 2025-07-04  
+Updated: 2025-07-17 (Simplified to single consumer model)
 
 ## Status
 
-Accepted
+Accepted (Updated)
 
 ## Context
 
-The NATS connector needs to efficiently consume messages from NATS and write them to QuasarDB. Our primary customer operates multiple processes pulling from different NATS topics and requires flexible topic distribution across connector instances. Additionally, QuasarDB already provides server-side batching through its async push mechanism, making client-side batching layers an anti-pattern.
+The NATS connector needs to efficiently consume messages from NATS and write them to QuasarDB. Our primary customer operates multiple processes pulling from NATS streams. Additionally, QuasarDB already provides server-side batching through its async push mechanism, making client-side batching layers an anti-pattern.
 
 Two primary consumption patterns were available:
 
@@ -19,15 +20,18 @@ Within pull-based consumption, we evaluated several architectural approaches:
 
 1. **Coordinator Pattern**: Single process with one consumer distributing work to internal goroutines
 2. **Queue Groups**: Multiple processes sharing consumers via JetStream queue groups
-3. **Independent Workers**: Each process manages independent consumers for its assigned topics
+3. **Shared Consumers**: Multiple processes share the same consumer for horizontal scaling
 
 ## Decision
 
-We chose **pull-based consumption**. The connector's scalability and parallelism are achieved by running multiple instances of the connector process. NATS JetStream handles the load balancing of messages between these instances.
+We chose **pull-based consumption** with a **single shared consumer** model. The connector's scalability and parallelism are achieved through:
 
-Each connector process can be configured to handle one or more topic subscriptions. For each subscription, the connector creates a **durable pull consumer**. The name of this durable consumer should be shared across all connector instances that are intended to share the workload for that subscription.
+1. **Internal worker pool**: Each connector process spawns multiple worker goroutines
+2. **Horizontal scaling**: Multiple connector processes can use the same consumer name
 
-When multiple connector instances (workers) pull from the same durable consumer name, NATS JetStream ensures that each batch of messages is delivered to only one worker, thus distributing the load automatically.
+The connector uses a single durable pull consumer for the entire stream. The stream configuration determines what subjects are captured - there is no topic filtering at the connector level.
+
+When multiple workers (either within a process or across processes) pull from the same durable consumer, NATS JetStream ensures that each batch of messages is delivered to only one worker, thus distributing the load automatically.
 
 This model provides a simple, robust, and horizontally scalable architecture that is idiomatic to both NATS and modern cloud-native deployments.
 
@@ -35,34 +39,36 @@ This model provides a simple, robust, and horizontally scalable architecture tha
 
 ### Worker Model
 
-Each connector process is a "worker". A single process can be configured to handle multiple topic subscriptions.
+Each connector process manages a pool of worker goroutines that pull from a single shared consumer.
 
 ```
-# Process Instance 1 (handles two topics)
---topic "sensors.temp.>" --durable-name "temp-processor"
---topic "sensors.pressure.>" --durable-name "pressure-processor"
+# Process Instance 1 (4 workers)
+--stream EVENTS --consumer qdb-connector --workers 4
 
-# Process Instance 2 (also handles temp data, sharing the load)
---topic "sensors.temp.>" --durable-name "temp-processor"
+# Process Instance 2 (also 4 workers, sharing the same consumer)
+--stream EVENTS --consumer qdb-connector --workers 4
 ```
 
 In this example:
-- The load for `sensors.temp.>` is shared between Process 1 and Process 2 because they use the same durable consumer name (`temp-processor`).
-- The load for `sensors.pressure.>` is handled exclusively by Process 1.
+- 8 total workers (4 per process) share the workload from the EVENTS stream
+- NATS JetStream distributes messages across all workers automatically
+- The stream configuration (not the connector) determines what subjects are processed
 
 ### Consumer Management
 
-- Consumers are durable and defined on the JetStream server.
-- The connector instances are configured with the durable name and stream name to attach to.
-- This allows workers to be added or removed dynamically, with NATS managing the state.
-- The `--durable-name` flag provides explicit control over which workers share which queues.
+- A single durable consumer is defined on the JetStream stream
+- The connector is configured with a consumer name via `--consumer`
+- Multiple workers within a process are configured via `--workers`
+- Workers can be added or removed dynamically, with NATS managing the state
+- Multiple processes using the same consumer name automatically share the workload
 
-### Topic Distribution & Scaling
+### Scaling
 
-Operators scale the system by running more connector processes.
-- **To add capacity for a topic**: Start a new connector instance pointing to the same stream and using the same durable consumer name.
-- **To partition work**: Use different durable consumer names for different data types or geographic regions.
-- This aligns perfectly with container orchestration platforms like Kubernetes, where scaling is achieved by increasing the replica count of the connector deployment.
+Operators scale the system in two ways:
+1. **Vertical scaling**: Increase `--workers` within a process
+2. **Horizontal scaling**: Run more connector processes with the same consumer name
+
+This aligns perfectly with container orchestration platforms like Kubernetes, where scaling is achieved by increasing the replica count of the connector deployment.
 
 
 ## Rationale
@@ -87,59 +93,69 @@ Operators scale the system by running more connector processes.
 - **Problem**: More complex than independent consumers
 - **Problem**: Message ordering becomes unpredictable across workers
 
-#### Chosen: Independent Workers
-- **Benefit**: Natural cloud-based scaling - add containers with different topic subsets
-- **Benefit**: Complete fault isolation - one topic's issues don't affect others
-- **Benefit**: Simple mental model - each topic has its own processing pipeline
-- **Benefit**: Flexible deployment - same binary handles any topic combination
-- **Benefit**: Matches existing Kinesis connector architecture
+#### Chosen: Shared Consumers
+- **Benefit**: True horizontal scaling - multiple instances share workload automatically
+- **Benefit**: Natural cloud-based scaling - add containers to increase capacity
+- **Benefit**: Flexible deployment - explicit mappings or shared prefix
+- **Benefit**: Simple mental model - JetStream handles distribution
+- **Benefit**: Aligns with JetStream's design philosophy
 
 ### Design Trade-offs
 
-1. **Multiple Consumers vs Resource Usage**
-   - **Cost**: Each consumer maintains separate ACK state in JetStream
-   - **Benefit**: Independent progress tracking per topic type
-   - **Mitigation**: Consumers are lightweight; even 100 consumers have minimal overhead
+1. **Single Consumer vs Topic Isolation**
+   - **Cost**: All messages share the same consumer state
+   - **Benefit**: Simpler operations, better load distribution
+   - **Mitigation**: Stream configuration provides subject filtering
 
-2. **Fixed Worker Count vs Dynamic Scaling**
-   - **Decision**: One goroutine per topic (no configurable worker count)
-   - **Rationale**: Simplicity over configuration complexity
-   - **Note**: Goroutines are lightweight; 20 goroutines for 20 topics is fine
+2. **Configurable Worker Count**
+   - **Decision**: Operators can tune worker count per process
+   - **Rationale**: Balance between resource usage and throughput
+   - **Default**: 1 worker for backward compatibility
 
-3. **Sequential Batch Processing**
-   - **Decision**: No parallelism within batch parsing
-   - **Rationale**: CPU cache efficiency outweighs parallel overhead for typical batch sizes
-   - **Future**: Can add intra-batch parallelism if profiling shows need
+3. **Shared Work Queue**
+   - **Decision**: All workers pull from the same queue
+   - **Rationale**: Better load distribution than static assignment
+   - **Trade-off**: Less predictable message ordering
 
 ## Consequences
 
 ### Positive Consequences
 
-1. **Operational Flexibility**: Any process can handle any topics via simple CLI flags
-2. **Horizontal Scalability**: Add/remove processes without coordination
-3. **Fault Isolation**: Topic failures don't cascade
-4. **Simple State Management**: Each consumer tracks its own progress
-5. **Clear Monitoring**: Per-topic metrics and lag tracking
+1. **Operational Simplicity**: Single consumer to manage per stream
+2. **Horizontal Scalability**: Add/remove workers or processes without coordination
+3. **Better Load Distribution**: Workers share the queue evenly
+4. **Simple State Management**: One consumer tracks all progress
+5. **Clear Monitoring**: Stream-level metrics and lag tracking
 6. **Kubernetes Native**: Works with StatefulSets, Deployments, and HPA
 
 ### Negative Consequences
 
-1. **No Automatic Load Balancing**: Operators must manually distribute topics
-2. **Consumer Proliferation**: Many topics mean many consumers to monitor
-3. **No Shared State**: Cannot easily move topics between processes without replay
-4. **Memory Multiplication**: Each worker has its own parser and QDB handle
+1. **Less Granular Control**: Cannot isolate specific subjects to specific workers
+2. **Shared Fate**: All messages share the same consumer state
+3. **Memory Usage**: Each worker has its own parser and QDB handle
 
 ### Operational Implications
 
-1. **Topic Assignment**: Operators explicitly control which instance handles which topics
-2. **Scaling**: Add instances with non-overlapping topic filters
-3. **Monitoring**: Track consumer lag per topic, not per process
-4. **Debugging**: Each topic's processing is independent - check specific consumer logs
+1. **Stream Configuration**: Subject filtering happens at the stream level
+2. **Scaling**: Increase workers or add instances for more throughput
+3. **Monitoring**: Track consumer lag at the stream level
+4. **Debugging**: All workers share the same consumer logs
+
+## Update Notes (2025-07-17)
+
+The implementation has been simplified to a single consumer model:
+
+1. **Removed Topic Filtering**: Stream configuration handles subject filtering
+2. **Single Consumer**: Replaced per-topic consumers with one shared consumer
+3. **Worker Pool**: Added configurable worker count for parallel processing
+4. **Simplified Scaling**: Just increase workers or add more processes
+
+This simplification improves operational simplicity while maintaining scalability.
 
 ## Future Considerations
 
-1. **Single Consumer Mode**: Source interface abstraction allows future addition of single-consumer-multiple-topics mode if needed
+1. **Dynamic Worker Scaling**: Could add auto-scaling based on consumer lag
 
-2. **Dynamic Rebalancing**: Could add coordinator service for automatic topic distribution (separate from connectors)
+2. **Work Stealing**: Could implement work stealing between workers for better load distribution
 
 3. **Checkpointing**: Currently using JetStream's built-in consumer state. Could add QuasarDB-based checkpointing for reducing dependency.

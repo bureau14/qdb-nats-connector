@@ -22,8 +22,8 @@ Usage: qdb-nats-connector [options]
 NATS JetStream Options:
     -n, --nats <host>:<port>         NATS cluster endpoint (e.g. 10.192.172.166:4222)
     --stream <name>                  JetStream stream name (required)
-    -t, --topic <topic>              Topic filter (can be repeated)
-    --consumer-prefix <prefix>       Consumer name prefix (default: qdb-connector)
+    --consumer <name>                Consumer name (default: qdb-connector)
+    -w, --workers <n>                Number of concurrent workers (default: 4)
     --batch-size <n>                 Messages per fetch (default: 100)
     --batch-timeout <duration>       Max wait for batch (default: 1s)
     --fetch-timeout <duration>       Total fetch timeout (default: 5s)
@@ -50,7 +50,7 @@ General Options:
 
 Environment Variables:
     All options can be set via environment variables with QDB_NATS_ prefix.
-    Examples: QDB_NATS_NATS_ENDPOINT, QDB_NATS_STREAM, QDB_NATS_QDB_CLUSTER_URI
+    Examples: QDB_NATS_NATS, QDB_NATS_STREAM, QDB_NATS_CONSUMER, QDB_NATS_WORKERS
 `
 
 // usage prints CLI help & exits

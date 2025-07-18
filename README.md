@@ -11,11 +11,10 @@ The qdb-nats-connector subscribes to NATS JetStream subjects and writes the rece
 ## Features
 
 - **Pull-based JetStream consumption** with configurable batch sizes
-- **Worker-based processing** - one worker per topic filter for parallel processing
+- **Worker-based processing** - worker pool for parallel processing
 - **Automatic consumer management** with sequence tracking and recovery
 - **Selective acknowledgment** for efficient error handling
 - **Circuit breaker pattern** to prevent cascade failures
-- **JSON parser** with required `$table` field routing
 - **Configurable batching** for optimal performance
 - **Graceful shutdown** with proper connection draining
 - **Persistent progress tracking** across restarts
@@ -26,15 +25,15 @@ The qdb-nats-connector subscribes to NATS JetStream subjects and writes the rece
 The connector uses a three-phase processing pipeline:
 
 1. **Fetch Phase**: Pull messages from JetStream in configurable batches
-2. **Parse Phase**: Transform messages to QuasarDB tables (currently JSON only)
+2. **Parse Phase**: Transform messages to QuasarDB tables (YAML and noop parsers)
 3. **Write Phase**: Batch write to QuasarDB with selective ACK/NACK
 
 ### Components
 
 - **Source**: JetStream pull consumer with circuit breaker and sequence tracking
-- **Parser**: Pluggable message transformation (JSON parser included)
+- **Parser**: Pluggable message transformation (YAML and noop parsers included)
 - **Sink**: QuasarDB batch writer with connection pooling
-- **Worker**: Orchestrates the pipeline for a single topic filter
+- **Worker**: Processes messages from the shared work queue
 - **Connector**: Manages multiple workers and graceful shutdown
 
 ## Quick Start
@@ -66,11 +65,10 @@ go build -o qdb-nats-connector
 ## Configuration
 
 The connector supports configuration through:
-1. Configuration file (YAML)
-2. Environment variables (prefix: `QDB_NATS_`)
-3. Command-line flags
+1. Environment variables (prefix: `QDB_NATS_`)
+2. Command-line flags
 
-Precedence: CLI flags > Environment variables > Config file > Defaults
+Precedence: CLI flags > Environment variables > Defaults
 
 ### Command-line Options
 
@@ -78,8 +76,8 @@ Precedence: CLI flags > Environment variables > Config file > Defaults
 # NATS JetStream options
 --nats <url>                    # NATS endpoint (default: nats://127.0.0.1:4222)
 --stream <name>                 # JetStream stream name (required)
---topic <filter>                # Topic filter, can be repeated (required)
---consumer-prefix <prefix>      # Consumer name prefix (default: qdb-connector)
+--consumer <name>               # Consumer name (default: qdb-connector)
+--workers <count>               # Number of concurrent workers (default: 1)
 --batch-size <size>             # Messages per fetch (default: 100)
 --batch-timeout <duration>      # Max wait for batch (default: 1s)
 --fetch-timeout <duration>      # Total fetch timeout (default: 5s)
@@ -91,46 +89,24 @@ Precedence: CLI flags > Environment variables > Config file > Defaults
 --qdb <uri>                    # QuasarDB endpoint (required)
 --qdb-pubkey-file <path>       # Cluster public key file
 --qdb-user-sec-file <path>     # User security file
---qdb-compression <mode>       # Compression: none|fast|balanced
+--qdb-compression <mode>       # Compression: none|balanced
 --qdb-encryption <mode>        # Encryption: none|aes
 --qdb-push-mode <mode>         # Push mode: transactional|async|fast
 --qdb-client-max-parallelism <n> # Max parallel operations
 --qdb-client-inbuf-size <size>   # Input buffer size
 
+# Parser options
+--parser <type>                # Parser type: yaml|noop (default: noop)
+--parser-config <path>         # YAML parser configuration file
+
 # Error handling options
 --error-ttl <duration>         # Error tracking TTL (default: 1h)
 
 # Other options
---config <path>                # Configuration file path
 --pid <path>                   # PID file path
 --help                         # Show help message
 ```
 
-### Configuration File Example
-
-```yaml
-nats:
-  endpoint: nats://localhost:4222
-  stream: DATA_STREAM
-  topics:
-    - sensors.>
-    - metrics.>
-  consumer_prefix: qdb-connector
-  batch_size: 100
-  batch_timeout: 1s
-  fetch_timeout: 5s
-  ack_wait: 30s
-  max_deliver: 3
-
-qdb:
-  cluster_uri: qdb://localhost:2836
-  compression: none
-  encryption: none
-  push_mode: async
-
-max_retries: 3
-error_ttl: 1h
-```
 
 ### Environment Variables
 
@@ -142,50 +118,58 @@ export QDB_NATS_NATS_STREAM=DATA_STREAM
 export QDB_NATS_QDB_CLUSTER_URI=qdb://localhost:2836
 ```
 
-## Message Format
+## Parsers
 
-Messages must be valid JSON with the following structure:
+### Noop Parser (Default)
 
-```json
-{
-  "$table": "sensor_data",           // Required: target table name
-  "$timestamp": "2024-01-01T12:00:00.000000000Z", // Optional: RFC3339 timestamp
-  "temperature": 23.5,               // Numeric fields → Double columns
-  "location": "room1",               // String fields → Blob columns
-  "active": true                     // Boolean fields → Blob columns ("true"/"false")
-}
+The noop parser is a pass-through parser that accepts any message format and performs no transformation. Messages are validated but returned as empty tables. This parser is useful for testing and scenarios where message processing is handled elsewhere.
+
+### YAML Parser
+
+The YAML parser provides a flexible, high-performance alternative with <5% overhead vs hardcoded parsers. It uses a building-block architecture for declarative message transformation.
+
+```bash
+# Use YAML parser
+./qdb-nats-connector \
+  --parser yaml \
+  --parser-config /path/to/parser.yaml \
+  --nats nats://localhost:4222 \
+  --stream DATA_STREAM \
+  --qdb qdb://localhost:2836
 ```
 
-### Type Mapping
+Key features:
+- **Building blocks**: Pre-compiled transformation functions (decompress, parse_json, extract_field, etc.)
+- **Parallel processing**: Optional worker pools for increased throughput
+- **Error handling**: Configurable drop/fail modes
+- **Type safety**: Automatic conversions with overflow protection
+- **Performance**: Object pooling and zero-allocation design
 
-- **Numbers** (int, float64) → QuasarDB Double columns
-- **Strings** → QuasarDB Blob columns (UTF-8 bytes)
-- **Booleans** → QuasarDB Blob columns ("true" or "false")
-- **Arrays/Objects** → Not supported (parsing error)
-- **Null values** → Skipped
+See [YAML Parser Documentation](docs/YAML_PARSER.md) for complete configuration guide and examples.
 
 ## Usage Example
 
 ```bash
-# Start connector with single topic
+# Start connector with default worker
 ./qdb-nats-connector \
   --nats nats://localhost:4222 \
   --stream DATA_STREAM \
-  --topic "sensors.>" \
+  --consumer qdb-connector \
   --qdb qdb://localhost:2836
 
-# Start with multiple topics and configuration
+# Start with multiple workers
 ./qdb-nats-connector \
-  --config /etc/qdb-nats/config.yaml \
-  --topic "sensors.>" \
-  --topic "metrics.>" \
-  --topic "logs.>"
+  --nats nats://localhost:4222 \
+  --stream DATA_STREAM \
+  --consumer qdb-connector \
+  --workers 4 \
+  --qdb qdb://localhost:2836
 
 # With security
 ./qdb-nats-connector \
   --nats nats://localhost:4222 \
   --stream SECURE_STREAM \
-  --topic "data.>" \
+  --consumer secure-connector \
   --qdb qdb://localhost:2836 \
   --qdb-pubkey-file /path/to/cluster_public.key \
   --qdb-user-sec-file /path/to/user_private.key \
@@ -219,11 +203,11 @@ nats stream create DATA_STREAM \
 
 The connector creates durable pull consumers with automatic recovery:
 
-- **Consumer naming**: `<prefix>-<topic-hash>` (e.g., `qdb-connector-a1b2c3d4`)
+- **Consumer naming**: Uses the specified consumer name (e.g., `qdb-connector`)
 - **Sequence tracking**: Persisted to `.sequences/` directory
 - **Automatic recreation**: On configuration mismatch or missing consumer
 - **Delivery semantics**: At-least-once with selective acknowledgment
-- **Consumer per topic**: Each topic filter gets its own consumer for isolation
+- **Single shared consumer**: All workers pull from the same consumer for better load distribution
 
 ### Monitoring Consumers
 
@@ -232,7 +216,7 @@ The connector creates durable pull consumers with automatic recovery:
 nats consumer list DATA_STREAM
 
 # Check consumer info
-nats consumer info DATA_STREAM qdb-connector-12345678
+nats consumer info DATA_STREAM qdb-connector
 
 # View pending messages
 nats consumer report DATA_STREAM
@@ -303,8 +287,9 @@ The connector logs key events:
 
 - [Architecture Guide](docs/ARCHITECTURE.md) - Internal design and components
 - [API Reference](docs/API.md) - Parser and component interfaces
-- [Configuration Guide](docs/CONFIGURATION.md) - Detailed configuration options
 - [Migration Guide](docs/MIGRATION.md) - Upgrading from v1 to v2
+- [YAML Parser Guide](docs/YAML_PARSER.md) - Comprehensive YAML parser documentation
+- [YAML Parser Examples](examples/) - Example configurations for common scenarios
 
 ## Development
 
@@ -322,7 +307,8 @@ internal/
     options.go        # Source configuration
   parser/
     parser.go         # Parser interface
-    json.go           # JSON parser implementation
+    yaml.go           # YAML parser implementation
+    noop.go           # Noop parser implementation
   sink/
     sink.go           # QuasarDB writer
     options.go        # Sink configuration
@@ -331,7 +317,6 @@ internal/
 docs/
   ARCHITECTURE.md      # Architecture documentation
   API.md              # API reference
-  CONFIGURATION.md    # Configuration guide
   MIGRATION.md        # Migration guide
 ```
 

@@ -17,57 +17,48 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
-// Sink: async QuasarDB writer pool that batches timeseries data. Needed for high-throughput writes.
+// Sink: synchronous QuasarDB writer with single handle. Needed for direct writes with proper backpressure.
 // Who: connector creates, parser results consumed.
-// Options: connection & worker pool config
-// workers: pool of QDB writers with handles
-// jobs: buffered channel for write batches
-// wg: tracks active worker goroutines
+// Options: connection config
+// handle: single QDB connection handle
+// mu: protects handle during concurrent writes (handles are not goroutine-safe)
 // closed: atomic shutdown flag
 type Sink struct {
 	Options Options
-	workers []*worker
-	jobs    chan []qdb.WriterTable
-	wg      sync.WaitGroup
+	handle  qdb.HandleType
+	mu      sync.Mutex
 	closed  atomic.Bool
 }
 
-// worker: single QDB writer with dedicated handle. Needed for thread-safe QuasarDB operations.
-// Who: Sink creates internally, processes job queue.
-// id: worker identifier for logging
-// handle: exclusive QDB connection handle
-// options: sink configuration
-// handleInitialized: tracks handle lifecycle
-type worker struct {
-	id                int
-	handle            qdb.HandleType
-	options           Options
-	handleInitialized bool
-}
-
-// NewSink creates writer pool with workers & job queue.
-// In: opts Options - cluster URI, workers, queue size
-// Out: *Sink, error - pool ready or config/connection err
-// Ex: NewSink(opts) → &Sink{workers:4,jobs:chan[100]}, nil
+// NewSink creates synchronous writer with single QDB handle.
+// In: opts Options - cluster URI, connection config
+// Out: *Sink, error - ready for writes or config/connection err
+// Ex: NewSink(opts) → &Sink{handle}, nil
 func NewSink(opts Options) (*Sink, error) {
-	slog.Info("Initializing new sink", "num_workers", opts.NumWriters)
-
-	// Defer QDB API initialization to first worker creation because
-	// early initialization causes unwanted logging in tests
+	slog.Info("Initializing new sink")
 
 	err := validateSinkOptions(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	s := createSinkInstance(opts)
-
-	err = s.initializeWorkers()
+	// Create single QDB handle
+	handleOpts, err := buildHandleOptions(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	slog.Info("Sink initialized successfully", "workers", len(s.workers))
+	handle, err := createHandle(handleOpts)
+	if err != nil {
+		return nil, errors.NewConnectionFailedError("sink", opts.ClusterUri, err)
+	}
+
+	s := &Sink{
+		Options: opts,
+		handle:  handle,
+	}
+
+	slog.Info("Sink initialized successfully")
 
 	return s, nil
 }
@@ -81,36 +72,33 @@ func (s *Sink) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Close drains queue, waits workers, closes handles.
+// Close releases QDB handle.
 // In: none
-// Out: none - blocks until shutdown complete
-// Ex: Close() → jobs closed, workers done, handles released
+// Out: none - closes handle immediately
+// Ex: Close() → handle released
 func (s *Sink) Close() {
 	if s.closed.Swap(true) {
 		return // Already closed
 	}
 
-	slog.Info("Closing sink", "workers", len(s.workers))
+	slog.Info("Closing sink")
 
-	// 1. Close job queue: prevent new writes
-	close(s.jobs)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// 2. Wait workers: drain pending writes
-	s.wg.Wait()
-
-	// 3. Close handles: release QDB connections
-	for _, w := range s.workers {
-		w.close()
+	err := s.handle.Close()
+	if err != nil {
+		slog.Error("Failed to close QDB handle", "error", err)
 	}
 
 	slog.Info("Sink closed successfully")
 }
 
-// Write queues tables for async QDB write.
-// In: tables []WriterTable - timeseries data
-// Out: error - nil or closed/empty/queue full
-// Ex: Write(tables) → nil (queued for workers)
-func (s *Sink) Write(tables []qdb.WriterTable) error {
+// Write performs synchronous QDB write with retry logic.
+// In: ctx context.Context - cancellation context, tables []WriterTable - timeseries data
+// Out: error - nil or write/retry failure
+// Ex: Write(ctx, tables) → nil (data written to QDB)
+func (s *Sink) Write(ctx context.Context, tables []qdb.WriterTable) error {
 	if s.closed.Load() {
 		return errors.NewWriteFailedError("sink", fmt.Errorf("sink is closed"))
 	}
@@ -119,59 +107,14 @@ func (s *Sink) Write(tables []qdb.WriterTable) error {
 		return errors.NewWriteFailedError("sink", fmt.Errorf("no tables provided"))
 	}
 
-	select {
-	case s.jobs <- tables:
-		return nil
-	default:
-		return errors.NewQueueFullError("sink", len(s.jobs))
-	}
+	return s.writeWithRetry(ctx, tables)
 }
 
-// newWorker creates worker with QDB handle.
-// In: id int, opts Options
-// Out: *worker, error - worker|connection error
-// Ex: newWorker(0, opts) → worker with handle
-func newWorker(id int, opts Options) (*worker, error) {
-	handleOpts, err := buildHandleOptions(opts)
-	if err != nil {
-		return nil, err
-	}
-
-	handle, err := createHandle(handleOpts)
-	if err != nil {
-		return nil, err
-	}
-
-	return &worker{
-		id:                id,
-		handle:            handle,
-		options:           opts,
-		handleInitialized: true,
-	}, nil
-}
-
-// run processes jobs until channel closed.
-// In: jobs <-chan []*qdb.WriterTable, wg *sync.WaitGroup
-// Ex: run(jobs, wg) → processes until channel closed
-func (w *worker) run(jobs <-chan []qdb.WriterTable, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	slog.Info("Worker started", "worker_id", w.id)
-	defer slog.Info("Worker stopped", "worker_id", w.id)
-
-	for tables := range jobs {
-		err := w.processTables(tables)
-		if err != nil {
-			slog.Error("Failed to process tables", "worker_id", w.id, "error", err, "num_tables", len(tables))
-		}
-	}
-}
-
-// processTables writes tables with exp backoff.
-// In: tables []*qdb.WriterTable
-// Out: error - write|retry exhausted
-// Ex: processTables(tables) → nil
-func (w *worker) processTables(tables []qdb.WriterTable) error {
+// writeWithRetry performs synchronous write with exponential backoff.
+// In: ctx context.Context - cancellation context, tables []qdb.WriterTable - data to write
+// Out: error - write failure or retry exhausted
+// Ex: writeWithRetry(ctx, tables) → nil (successful write)
+func (s *Sink) writeWithRetry(ctx context.Context, tables []qdb.WriterTable) error {
 	if len(tables) == 0 {
 		return nil
 	}
@@ -179,146 +122,103 @@ func (w *worker) processTables(tables []qdb.WriterTable) error {
 	backoff := 3 * time.Second
 	maxBackoff := 300 * time.Second
 
-	for attempt := range w.options.RetryAttempts {
+	for attempt := range s.Options.RetryAttempts {
 		if attempt > 0 {
-			time.Sleep(backoff)
+			// Check context cancellation during backoff
+			select {
+			case <-ctx.Done():
+				return errors.NewWriteFailedError("sink", fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err()))
+			case <-time.After(backoff):
+				// Continue with retry
+			}
+
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
 		}
 
+		// Check context before attempting write
+		select {
+		case <-ctx.Done():
+			return errors.NewWriteFailedError("sink", fmt.Errorf("context cancelled before write attempt: %w", ctx.Err()))
+		default:
+			// Continue with write
+		}
+
 		// Push all tables
-		err := w.pushTables(tables)
+		err := s.pushTables(tables)
 		if err != nil {
 			// Check if error is retryable using qdb.IsRetryable()
 			if !qdb.IsRetryable(err) {
-				slog.Error("Non-retryable error, failing immediately", "worker_id", w.id, "error", err, "retryable", false)
+				slog.Error("Non-retryable error, failing immediately", "error", err, "retryable", false)
 
 				return errors.NewWriteFailedError("sink", fmt.Errorf("permanent failure: %w", err))
 			}
 
-			if attempt < w.options.RetryAttempts-1 {
-				slog.Debug("Retryable error, backing off", "worker_id", w.id, "attempt", attempt+1, "backoff", backoff, "error", err, "retryable", true)
+			if attempt < s.Options.RetryAttempts-1 {
+				slog.Debug("Retryable error, backing off", "attempt", attempt+1, "backoff", backoff, "error", err, "retryable", true)
 
 				continue
 			}
 
-			slog.Error("Max retries exceeded for retryable error", "worker_id", w.id, "attempts", w.options.RetryAttempts, "error", err, "retryable", true)
+			slog.Error("Max retries exceeded for retryable error", "attempts", s.Options.RetryAttempts, "error", err, "retryable", true)
 
-			return errors.NewMaxRetriesExceededError("sink", w.options.RetryAttempts)
+			return errors.NewMaxRetriesExceededError("sink", s.Options.RetryAttempts)
 		}
 
 		return nil
 	}
 
-	return errors.NewMaxRetriesExceededError("sink", w.options.RetryAttempts)
+	return errors.NewMaxRetriesExceededError("sink", s.Options.RetryAttempts)
 }
 
-// pushTables writes batch to QDB.
-// In: tables []*qdb.WriterTable
+// pushTables writes batch to QDB with mutex protection.
+// In: tables []qdb.WriterTable - data to write
 // Out: error - QDB write error
 // Ex: pushTables(tables) → nil
-func (w *worker) pushTables(tables []qdb.WriterTable) error {
-	slog.Debug("Worker pushing tables to QDB", "worker_id", w.id, "num_tables", len(tables))
+func (s *Sink) pushTables(tables []qdb.WriterTable) error {
+	slog.Debug("Pushing tables to QDB", "num_tables", len(tables))
+
+	// Protect handle access with mutex since handles are not goroutine-safe
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Create writer options with push mode and deduplication mode
-	writerOpts := qdb.NewWriterOptions().WithPushMode(w.options.PushMode).WithDeduplicationMode(w.options.DeduplicationMode)
+	writerOpts := qdb.NewWriterOptions().WithPushMode(s.Options.PushMode).WithDeduplicationMode(s.Options.DeduplicationMode)
 	writer := qdb.NewWriter(writerOpts)
 
 	// Add all tables to the writer
 	for i, table := range tables {
-		slog.Debug("Adding table to writer", "worker_id", w.id, "table_index", i, "table_name", table.TableName)
+		slog.Debug("Adding table to writer", "table_index", i, "table_name", table.TableName)
 		err := writer.SetTable(table)
 		if err != nil {
-			slog.Error("Failed to set table in writer", "worker_id", w.id, "table_name", table.TableName, "error", err)
+			slog.Error("Failed to set table in writer", "table_name", table.TableName, "error", err)
 
 			return err
 		}
 	}
 
 	// Push to QuasarDB
-	slog.Debug("Pushing data to QuasarDB", "worker_id", w.id)
-	err := writer.Push(w.handle)
+	slog.Debug("Pushing data to QuasarDB")
+	err := writer.Push(s.handle)
 	if err != nil {
-		slog.Error("Failed to push to QuasarDB", "worker_id", w.id, "error", err)
+		slog.Error("Failed to push to QuasarDB", "error", err)
 	} else {
-		slog.Debug("Successfully pushed to QuasarDB", "worker_id", w.id)
+		slog.Debug("Successfully pushed to QuasarDB")
 	}
 
 	return err
 }
 
-// close releases QuasarDB handle
-// In: none - uses w.handle
-// Out: none - handle closed
-// Ex: close() → handle released
-func (w *worker) close() {
-	if w.handleInitialized {
-		_ = w.handle.Close()
-	}
-}
-
 // validateSinkOptions ensures configuration safety before sink creation.
 // Separated from NewSink to fail fast on invalid config without side effects.
 // In: opts Options - user-provided configuration
-// Out: error if NumWriters ≤0 or ClusterUri empty
-// Ex: validateSinkOptions(opts{NumWriters:0}) → "num_writers must be positive"
+// Out: error if ClusterUri empty
+// Ex: validateSinkOptions(opts{ClusterUri:""}) → "cluster_uri is required"
 func validateSinkOptions(opts Options) error {
-	if opts.NumWriters <= 0 {
-		return errors.NewInvalidConfigError("sink", "num_writers must be positive")
-	}
-
 	if opts.ClusterUri == "" {
 		return errors.NewInvalidConfigError("sink", "cluster_uri is required")
-	}
-
-	return nil
-}
-
-// createSinkInstance allocates sink structure without starting workers.
-// Separated to enable clean error handling if worker creation fails.
-// In: opts Options - validated configuration
-// Out: *Sink with allocated channels/slices, no active goroutines
-// Ex: createSinkInstance(opts) → &Sink{workers:[4]nil, jobs:chan[1000]}
-func createSinkInstance(opts Options) *Sink {
-	return &Sink{
-		Options: opts,
-		workers: make([]*worker, opts.NumWriters),
-		jobs:    make(chan []qdb.WriterTable, opts.QueueSize),
-	}
-}
-
-// initializeWorkers establishes QuasarDB connections and starts worker pool.
-// Separated from NewSink to enable cleanup on partial initialization failure.
-// In: receiver *Sink with allocated structures
-// Out: error if any worker fails to connect, cleans up on failure
-// Ex: initializeWorkers() → starts NumWriters goroutines with QDB handles
-func (s *Sink) initializeWorkers() error {
-	// Create workers with dedicated QDB handles for thread safety because
-	// QDB handles are not goroutine-safe. Each worker needs its own handle.
-
-	for i := range s.Options.NumWriters {
-		// Create worker with dedicated QDB handle for thread safety
-		w, err := newWorker(i, s.Options)
-		if err != nil {
-			// Clean up previously created workers
-			for j := range i {
-				s.workers[j].close()
-			}
-
-			return errors.NewConnectionFailedError("sink", s.Options.ClusterUri, err)
-		}
-		s.workers[i] = w
-
-		// Start goroutine for concurrent batch processing
-		s.wg.Add(1)
-		go w.run(s.jobs, &s.wg)
-
-		// Delay prevents connection storm to QDB cluster
-		if i < s.Options.NumWriters-1 && s.Options.WorkerCreationDelay > 0 {
-			time.Sleep(s.Options.WorkerCreationDelay)
-		}
 	}
 
 	return nil

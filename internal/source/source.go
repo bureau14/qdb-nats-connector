@@ -70,6 +70,13 @@ func NewSource(opts Options) (*Source, error) {
 // 2. Close - terminate connection
 // Ex: Close() → connection closed gracefully
 func (s *Source) Close() {
+	// Check if connection exists before attempting to close
+	if s.NatsConn == nil {
+		slog.Info("NATS source already closed or not connected")
+
+		return
+	}
+
 	slog.Info("Draining NATS source")
 	// 1. Drain: wait for pending messages
 	err := s.NatsConn.Drain()
@@ -87,10 +94,10 @@ func (s *Source) Close() {
 // Out: error - nil or connection/subscription failure
 // Ex: Connect(ctx) → nil (connected+subscribed)
 func (s *Source) Connect(ctx context.Context) error {
-	slog.Info("Establishing connection with NATS endpoint", "nats_endpoint", s.Options.Endpoint)
+	slog.Info("Establishing NATS connection")
 	nc, err := nats.Connect(s.Options.Endpoint)
 	if err != nil {
-		slog.Error("Error while establishing connection", "nats_endpoint", s.Options.Endpoint, "error", err)
+		slog.Error("Failed to establish NATS connection", "error", err)
 
 		return errors.NewConnectionFailedError("source", s.Options.Endpoint, err)
 	}
@@ -109,18 +116,15 @@ func (s *Source) Connect(ctx context.Context) error {
 	// Create pull subscription
 	slog.Info("Creating JetStream pull subscription",
 		"stream", s.Options.StreamName,
-		"consumer", s.Options.ConsumerName,
-		"subject", s.Options.Topic)
+		"consumer", s.Options.ConsumerName)
 
-	sub, err := js.PullSubscribe(s.Options.Topic, s.Options.ConsumerName,
+	sub, err := js.PullSubscribe("", s.Options.ConsumerName,
 		nats.BindStream(s.Options.StreamName),
-		nats.AckWait(s.Options.AckWait),
-		nats.MaxDeliver(s.Options.MaxDeliver),
 	)
 	if err != nil {
 		slog.Error("Failed to create pull subscription", "error", err)
 
-		return errors.NewSubscriptionFailedError("source", s.Options.Topic, err)
+		return errors.NewSubscriptionFailedError("source", s.Options.ConsumerName, err)
 	}
 	s.Subscription = sub
 
@@ -139,7 +143,6 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 			nats.ErrInvalidConnection)
 	}
 
-	// Fetch messages using JetStream pull
 	msgs, err := s.Subscription.Fetch(s.Options.BatchSize,
 		nats.MaxWait(s.Options.BatchTimeout))
 	if err != nil {
@@ -189,17 +192,20 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 // Out: error if any ACK fails
 // Ex: ackMessages(msgs, []uint64{1,2,3}) → nil
 func (s *Source) ackMessages(messageInfos []MessageInfo, sequences []uint64) error {
+	// Build map for O(1) lookup
+	msgMap := make(map[uint64]*MessageInfo, len(messageInfos))
+	for i := range messageInfos {
+		msgMap[messageInfos[i].Sequence] = &messageInfos[i]
+	}
+
+	// ACK messages by sequence
 	for _, seq := range sequences {
-		for _, msgInfo := range messageInfos {
-			if msgInfo.Sequence == seq {
-				err := msgInfo.Msg.Ack()
-				if err != nil {
-					slog.Error("Failed to ACK message", "sequence", seq, "error", err)
+		if msgInfo, ok := msgMap[seq]; ok {
+			err := msgInfo.Msg.Ack()
+			if err != nil {
+				slog.Error("Failed to ACK message", "sequence", seq, "error", err)
 
-					return err
-				}
-
-				break
+				return err
 			}
 		}
 	}
@@ -212,17 +218,20 @@ func (s *Source) ackMessages(messageInfos []MessageInfo, sequences []uint64) err
 // Out: error if any NACK fails
 // Ex: nackMessages(msgs, []uint64{4,5}) → nil
 func (s *Source) nackMessages(messageInfos []MessageInfo, sequences []uint64) error {
+	// Build map for O(1) lookup
+	msgMap := make(map[uint64]*MessageInfo, len(messageInfos))
+	for i := range messageInfos {
+		msgMap[messageInfos[i].Sequence] = &messageInfos[i]
+	}
+
+	// NACK messages by sequence
 	for _, seq := range sequences {
-		for _, msgInfo := range messageInfos {
-			if msgInfo.Sequence == seq {
-				err := msgInfo.Msg.Nak()
-				if err != nil {
-					slog.Error("Failed to NACK message", "sequence", seq, "error", err)
+		if msgInfo, ok := msgMap[seq]; ok {
+			err := msgInfo.Msg.Nak()
+			if err != nil {
+				slog.Error("Failed to NACK message", "sequence", seq, "error", err)
 
-					return err
-				}
-
-				break
+				return err
 			}
 		}
 	}

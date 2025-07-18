@@ -14,11 +14,14 @@ import (
 	"time"
 
 	"github.com/bureau14/qdb-nats-connector/connector/resilience"
+	"github.com/bureau14/qdb-nats-connector/internal/source"
 )
 
 // Connector: orchestrates NATS→QuasarDB pipeline, goroutine-safe
 type Connector struct {
-	workers        []*Worker // topic processors
+	source         *source.Source            // Single shared source
+	workers        []*Worker                 // Worker pool
+	workCh         chan *source.MessageBatch // Work distribution channel
 	breakerManager *resilience.Manager
 	wg             sync.WaitGroup
 	cancel         context.CancelFunc
@@ -61,16 +64,28 @@ func NewConnector(opts *Options) (*Connector, error) {
 		)
 	}
 
-	// Create workers - one per topic filter
-	workers := make([]*Worker, len(opts.NatsTopicFilters))
+	// Create single shared source
+	sourceOpts := source.FromOptionsProvider(opts)
+	sourceOpts.ConsumerName = opts.ConsumerName()
+	src, err := source.NewSource(sourceOpts)
+	if err != nil {
+		return nil, err
+	}
 
-	for i, topicFilter := range opts.NatsTopicFilters {
-		worker, err := NewWorker(i, topicFilter, *opts, breakerManager)
+	// Create buffered work channel (size = workers * 2)
+	workCh := make(chan *source.MessageBatch, opts.GetWorkers()*2)
+
+	// Create workers - multiple workers for horizontal scaling
+	workers := make([]*Worker, opts.GetWorkers())
+
+	for i := range opts.GetWorkers() {
+		worker, err := NewWorker(i, opts, workCh, breakerManager)
 		if err != nil {
 			// Cleanup created workers
 			for j := range i {
 				_ = workers[j].shutdown()
 			}
+			src.Close()
 
 			return nil, err
 		}
@@ -78,7 +93,9 @@ func NewConnector(opts *Options) (*Connector, error) {
 	}
 
 	return &Connector{
+		source:         src,
 		workers:        workers,
+		workCh:         workCh,
 		breakerManager: breakerManager,
 	}, nil
 }
@@ -118,8 +135,22 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 
 	slog.Info("Starting connector with workers", "worker_count", len(c.workers))
 
+	// Connect to source before starting workers
+	err := c.source.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.source.Close()
+
 	// Error channel for worker failures
 	errCh := make(chan error, len(c.workers))
+
+	// Start fetchLoop goroutine
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.fetchLoop(ctx)
+	}()
 
 	// Start workers
 	for _, worker := range c.workers {
@@ -134,7 +165,11 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 	}
 
 	// Start health monitor
-	go c.monitorWorkers(ctx)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.monitorWorkers(ctx)
+	}()
 
 	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -202,9 +237,66 @@ func (c *Connector) monitorWorkers(ctx context.Context) {
 		case <-ticker.C:
 			for _, w := range c.workers {
 				if !w.isHealthy() {
-					slog.Warn("Worker unhealthy", "topic", w.topicFilter)
+					slog.Warn("Worker unhealthy", "worker_id", w.id)
 					// Workers auto-recover via consumer recreation
 				}
+			}
+		}
+	}
+}
+
+// fetchLoop continuously fetches message batches from the source and distributes them to workers
+// In: ctx context.Context - cancellation
+// Out: none - writes to workCh, closes it when done
+// Ex: go c.fetchLoop(ctx) → distributes work to workers
+func (c *Connector) fetchLoop(ctx context.Context) {
+	defer close(c.workCh) // Creator closes channel
+
+	// Exponential backoff for fetch errors
+	backoffBase := 100 * time.Millisecond
+	backoffMax := 5 * time.Second
+	currentBackoff := backoffBase
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Fetch batch from source
+			batch, err := c.source.FetchBatch(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					// Context was cancelled, exit gracefully
+					return
+				}
+				// Log error and apply backoff
+				slog.Error("Failed to fetch batch", "error", err, "backoff", currentBackoff)
+
+				// Sleep with context check
+				select {
+				case <-time.After(currentBackoff):
+					// Double backoff up to max
+					currentBackoff *= 2
+					if currentBackoff > backoffMax {
+						currentBackoff = backoffMax
+					}
+				case <-ctx.Done():
+					return
+				}
+
+				continue
+			}
+
+			// Reset backoff on success
+			currentBackoff = backoffBase
+
+			// Send batch to workers
+			select {
+			case c.workCh <- batch:
+				// Successfully sent batch to worker
+			case <-ctx.Done():
+				// Context cancelled while sending
+				return
 			}
 		}
 	}

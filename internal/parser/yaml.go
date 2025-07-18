@@ -15,7 +15,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
@@ -36,12 +35,13 @@ type ParseState struct {
 	TableName string                 // From configuration
 
 	// For performance: pre-allocated buffers - reused across messages, goroutine-safe
-	tmpBuf       []byte      // Reusable byte buffer
-	timestampBuf []time.Time // Goroutine-safe timestamp buffer
-	doubleBufs   [][]float64 // [col_idx][1]float64 - goroutine-safe
-	blobBufs     [][][]byte  // [col_idx][1][]byte - goroutine-safe
-	int64Bufs    [][]int64   // [col_idx][1]int64 - goroutine-safe
-	stringBufs   [][]string  // [col_idx][1]string - goroutine-safe
+	tmpBuf        []byte      // Reusable byte buffer
+	indexBuf      []time.Time // Goroutine-safe index buffer
+	doubleVals    []float64   // [col_idx]float64 - goroutine-safe
+	blobVals      [][]byte    // [col_idx][]byte - goroutine-safe
+	int64Vals     []int64     // [col_idx]int64 - goroutine-safe
+	stringVals    []string    // [col_idx]string - goroutine-safe
+	timestampVals []time.Time // [col_idx]time.Time - goroutine-safe
 }
 
 // TransformationStep: Transform function modifying state
@@ -53,7 +53,7 @@ type TransformationStep func(*ParseState) error
 var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, error){
 	"decompress":        makeDecompressStep,
 	"parse_json":        makeParseJSONStep,
-	"extract_timestamp": makeExtractTimestampStep,
+	"extract_index":     makeExtractIndexStep,
 	"extract_field":     makeExtractFieldStep,
 	"compute_field":     makeComputeFieldStep,
 	"safe_parse_number": makeSafeParseNumberStep,
@@ -104,8 +104,8 @@ type YAMLParser struct {
 	pipeline    []TransformationStep
 	errorAction string
 
-	// Performance optimizations - object pool for ParseState
-	statePool sync.Pool
+	// Performance optimizations - single ParseState instance per parser
+	state *ParseState
 
 	// Column mapping - pre-computed at startup
 	columnTypes []qdb.TsColumnType
@@ -192,38 +192,29 @@ func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser
 	parser.columnTypes = columnTypes
 	parser.columns = columns
 
-	// Initialize state pool for performance
-	parser.statePool = sync.Pool{
-		New: func() interface{} {
-			state := &ParseState{
-				Fields:       make(map[string]interface{}, 16),
-				Errors:       make([]error, 0, 4),
-				tmpBuf:       make([]byte, 0, 1024),
-				timestampBuf: make([]time.Time, 1),
-				doubleBufs:   make([][]float64, len(columns)),
-				blobBufs:     make([][][]byte, len(columns)),
-				int64Bufs:    make([][]int64, len(columns)),
-				stringBufs:   make([][]string, len(columns)),
-			}
+	// Initialize single ParseState instance for performance
+	parser.state = &ParseState{
+		Fields:        make(map[string]interface{}, 16),
+		Errors:        make([]error, 0, 4),
+		tmpBuf:        make([]byte, 0, 1024),
+		indexBuf:      make([]time.Time, 1),
+		doubleVals:    make([]float64, len(columns)),
+		blobVals:      make([][]byte, len(columns)),
+		int64Vals:     make([]int64, len(columns)),
+		stringVals:    make([]string, len(columns)),
+		timestampVals: make([]time.Time, len(columns)),
+	}
 
-			// Initialize buffers based on column types
-			for i, colType := range columnTypes {
-				switch colType {
-				case qdb.TsColumnDouble:
-					state.doubleBufs[i] = make([]float64, 1)
-				case qdb.TsColumnBlob:
-					state.blobBufs[i] = make([][]byte, 1)
-				case qdb.TsColumnInt64:
-					state.int64Bufs[i] = make([]int64, 1)
-				case qdb.TsColumnString:
-					state.stringBufs[i] = make([]string, 1)
-				case qdb.TsColumnTimestamp, qdb.TsColumnUninitialized, qdb.TsColumnSymbol:
-					// No pre-allocation needed for these types
-				}
-			}
-
-			return state
-		},
+	// Initialize blob buffers - other types are already allocated with make()
+	for i, colType := range columnTypes {
+		switch colType {
+		case qdb.TsColumnBlob:
+			parser.state.blobVals[i] = make([]byte, 0, 1024) // Pre-allocate with capacity
+		case qdb.TsColumnDouble, qdb.TsColumnInt64, qdb.TsColumnString, qdb.TsColumnTimestamp:
+			// These are already allocated with make() above
+		case qdb.TsColumnUninitialized, qdb.TsColumnSymbol:
+			// No pre-allocation needed for these types
+		}
 	}
 
 	return parser, nil
@@ -241,22 +232,18 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		return nil, errors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty message data"))
 	}
 
-	// Get state from pool
-	state := p.statePool.Get().(*ParseState)
-	defer p.statePool.Put(state)
-
 	// Reset state for reuse - clears fields without reallocating
-	p.resetParseState(state)
+	p.resetParseState(p.state)
 
 	// Initialize state with message data and configured table name
-	state.Message = msg
-	state.Data = msg.Data
-	state.TableName = p.config.Output.TableName
+	p.state.Message = msg
+	p.state.Data = msg.Data
+	p.state.TableName = p.config.Output.TableName
 
 	// Execute pipeline - runs each transformation step in sequence.
 	// Per ADR-005: direct function calls, no reflection
 	for _, step := range p.pipeline {
-		err := step(state)
+		err := step(p.state)
 		if err != nil {
 			if p.errorAction == "fail" {
 				return nil, errors.NewParsingFailedError("yaml_parser", err)
@@ -264,26 +251,26 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 			// For "drop" mode, log error and continue - allows partial
 			// data extraction when some fields fail (ADR-005)
 			slog.Warn("Pipeline step failed", "error", err, "subject", msg.Subject)
-			state.Errors = append(state.Errors, err)
+			p.state.Errors = append(p.state.Errors, err)
 		}
 	}
 
 	// Check if parsing failed - in "fail" mode any error stops processing
-	if len(state.Errors) > 0 && p.errorAction == "fail" {
-		return nil, errors.NewParsingFailedError("yaml_parser", state.Errors[0])
+	if len(p.state.Errors) > 0 && p.errorAction == "fail" {
+		return nil, errors.NewParsingFailedError("yaml_parser", p.state.Errors[0])
 	}
 
 	// Create WriterTable - uses pre-allocated buffers for performance
-	table, err := p.createWriterTable(state)
+	table, err := p.createWriterTable(p.state)
 	if err != nil {
 		return nil, err
 	}
 
 	slog.Debug("Successfully parsed YAML message",
-		"table", state.TableName,
+		"table", p.state.TableName,
 		"columns", len(p.columns),
 		"subject", msg.Subject,
-		"errors", len(state.Errors))
+		"errors", len(p.state.Errors))
 
 	return []qdb.WriterTable{table}, nil
 }
@@ -293,17 +280,15 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 // Out: qdb.WriterTable - single-row table
 // Ex: createWriterTable(state) → table
 func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, error) {
-	// Set timestamp - uses parsed timestamp or current time as fallback
+	// Set index - uses parsed index or current time as fallback
 	var ts time.Time
-	if parsedTs, ok := state.Fields["timestamp"].(time.Time); ok {
+	if parsedTs, ok := state.Fields["$timestamp"].(time.Time); ok {
 		ts = parsedTs
 	} else {
 		ts = time.Now()
 	}
-	// Use goroutine-safe timestamp buffer - critical fix for race condition.
-	// Previously timestamp was stored in shared parser struct causing races.
-	// Now each ParseState has its own buffer.
-	state.timestampBuf[0] = ts
+	// Use goroutine-safe index buffer.
+	state.indexBuf[0] = ts
 
 	// Create table with pre-defined schema - columns were validated at startup
 	table, err := qdb.NewWriterTable(state.TableName, p.columns)
@@ -311,7 +296,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 		return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
 	}
 
-	table.SetIndex(state.timestampBuf)
+	table.SetIndex(state.indexBuf)
 
 	// Map fields to columns using pre-allocated buffers - thread-safe and efficient
 	for i, col := range p.config.Output.Columns {
@@ -325,9 +310,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 		switch p.columnTypes[i] {
 		case qdb.TsColumnDouble:
 			if v, ok := value.(float64); ok {
-				// Use goroutine-safe buffer for performance
-				state.doubleBufs[i][0] = v
-				data := qdb.NewColumnDataDouble(state.doubleBufs[i])
+				// Use direct value storage for performance
+				state.doubleVals[i] = v
+				data := qdb.NewColumnDataDouble([]float64{state.doubleVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
@@ -337,9 +322,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 			}
 		case qdb.TsColumnBlob:
 			if v, ok := value.([]byte); ok {
-				// Use goroutine-safe buffer for performance
-				state.blobBufs[i][0] = v
-				data := qdb.NewColumnDataBlob(state.blobBufs[i])
+				// Use direct value storage for performance
+				state.blobVals[i] = v
+				data := qdb.NewColumnDataBlob([][]byte{state.blobVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
@@ -349,9 +334,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 			}
 		case qdb.TsColumnInt64:
 			if v, ok := value.(int64); ok {
-				// Use goroutine-safe buffer for performance
-				state.int64Bufs[i][0] = v
-				data := qdb.NewColumnDataInt64(state.int64Bufs[i])
+				// Use direct value storage for performance
+				state.int64Vals[i] = v
+				data := qdb.NewColumnDataInt64([]int64{state.int64Vals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
@@ -361,9 +346,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 			}
 		case qdb.TsColumnString:
 			if v, ok := value.(string); ok {
-				// Use goroutine-safe buffer for performance
-				state.stringBufs[i][0] = v
-				data := qdb.NewColumnDataString(state.stringBufs[i])
+				// Use direct value storage for performance
+				state.stringVals[i] = v
+				data := qdb.NewColumnDataString([]string{state.stringVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
@@ -372,8 +357,17 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				slog.Debug("Column type mismatch - skipping column", "column", col.Name, "expected", "string", "actual", fmt.Sprintf("%T", value), "table", state.TableName)
 			}
 		case qdb.TsColumnTimestamp:
-			// Timestamp columns handled separately via SetIndex
-			continue
+			if v, ok := value.(time.Time); ok {
+				// Use direct value storage for performance
+				state.timestampVals[i] = v
+				data := qdb.NewColumnDataTimestamp([]time.Time{state.timestampVals[i]})
+				err := table.SetData(i, &data)
+				if err != nil {
+					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
+				}
+			} else {
+				slog.Debug("Column type mismatch - skipping column", "column", col.Name, "expected", "timestamp", "actual", fmt.Sprintf("%T", value), "table", state.TableName)
+			}
 		case qdb.TsColumnUninitialized:
 			// Skip uninitialized columns - should not occur with validation
 			continue
@@ -403,7 +397,7 @@ func (p *YAMLParser) resetParseState(state *ParseState) {
 	// Reset slices without reallocation - critical for object pool efficiency
 	state.Errors = state.Errors[:0]
 	state.tmpBuf = state.tmpBuf[:0]
-	state.timestampBuf = state.timestampBuf[:1]
+	state.indexBuf = state.indexBuf[:1]
 }
 
 // LoadYAMLConfig reads YAML parser config.
@@ -635,21 +629,18 @@ func makeParseJSONStep(config map[string]interface{}) (TransformationStep, error
 	}, nil
 }
 
-// makeExtractTimestampStep extracts timestamp field.
-// In: config[source,target,format] - field names
+// makeExtractIndexStep extracts the timeseries index.
+// In: config[source,format] - field names
 // Out: TransformationStep - converts to time.Time
-// Ex: makeExtractTimestampStep({"source": "ts"}) → step
+// Ex: makeExtractIndexStep({"source": "ts"}) → step
 // Per ADR-005: handles various timestamp formats
-func makeExtractTimestampStep(config map[string]interface{}) (TransformationStep, error) {
+func makeExtractIndexStep(config map[string]interface{}) (TransformationStep, error) {
 	source, ok := config["source"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "extract_timestamp step requires 'source' string")
+		return nil, errors.NewInvalidConfigError("yaml_parser", "extract_index step requires 'source' string")
 	}
 
-	target, ok := config["target"].(string)
-	if !ok {
-		target = "timestamp" // Default target
-	}
+	target := "$timestamp" // Always use $timestamp for the index
 
 	format, ok := config["format"].(string)
 	if !ok {
@@ -659,7 +650,7 @@ func makeExtractTimestampStep(config map[string]interface{}) (TransformationStep
 	return func(state *ParseState) error {
 		value, exists := state.Fields[source]
 		if !exists {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in extract_timestamp step", source))
+			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in extract_index step", source))
 		}
 
 		var ts time.Time
@@ -673,11 +664,11 @@ func makeExtractTimestampStep(config map[string]interface{}) (TransformationStep
 		case float64:
 			ts = time.Unix(int64(v), 0)
 		default:
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("cannot extract timestamp from type %T in extract_timestamp step", value))
+			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("cannot extract index from type %T in extract_index step", value))
 		}
 
 		if err != nil {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse timestamp in extract_timestamp step: %w", err))
+			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse index in extract_index step: %w", err))
 		}
 
 		state.Fields[target] = ts

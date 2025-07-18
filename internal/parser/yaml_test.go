@@ -37,7 +37,12 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 		// Create temporary invalid YAML file
 		tempFile, err := os.CreateTemp("", "invalid.yaml")
 		require.NoError(t, err)
-		defer os.Remove(tempFile.Name())
+		defer func() {
+			err := os.Remove(tempFile.Name())
+			if err != nil {
+				t.Logf("Failed to remove temp file: %v", err)
+			}
+		}()
 
 		_, err = tempFile.WriteString("invalid: yaml: content: [}")
 		require.NoError(t, err)
@@ -337,7 +342,7 @@ func TestYAMLParserValidParsing(t *testing.T) {
 			humid := rapid.Float64Range(0, 100).Draw(t, "humidity")
 			location := rapid.String().Draw(t, "location")
 
-			jsonData := fmt.Sprintf(`{"temp": %f, "humid": %f, "loc": "%s"}`, temp, humid, location)
+			jsonData := fmt.Sprintf(`{"temp": %f, "humid": %f, "loc": %q}`, temp, humid, location)
 			msg := &nats.Msg{
 				Subject: util.RandomTopicName(),
 				Data:    []byte(jsonData),
@@ -366,9 +371,8 @@ func TestYAMLParserTimestamp(t *testing.T) {
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
-			{Step: "extract_timestamp", Config: map[string]interface{}{
+			{Step: "extract_index", Config: map[string]interface{}{
 				"source": "ts",
-				"target": "timestamp",
 				"format": "rfc3339",
 			}},
 			{Step: "extract_field", Config: map[string]interface{}{
@@ -708,4 +712,19 @@ func compressGzip(t *testing.T, data []byte) []byte {
 	require.NoError(t, err)
 
 	return buf.Bytes()
+}
+
+// assertYAMLParserConfigError is a helper function to test configuration error cases
+func assertYAMLParserConfigError(t *testing.T, config YAMLConfig, expectedComponent string, expectedCode connectorErrors.ErrorCode) {
+	opts := ParserOptions{
+		ErrorAction: "drop",
+	}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	assert.Nil(t, parser)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, expectedComponent, connErr.Component)
+	assert.Equal(t, expectedCode, connErr.Code)
 }

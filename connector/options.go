@@ -25,15 +25,15 @@ type Options struct {
 	PidFile string `mapstructure:"pid"`
 
 	// NATS options
-	NatsEndpoint       string        `mapstructure:"nats"`
-	NatsStreamName     string        `mapstructure:"stream"`
-	NatsTopicFilters   []string      `mapstructure:"topic"`
-	NatsConsumerPrefix string        `mapstructure:"consumer-prefix"`
-	NatsBatchSize      int           `mapstructure:"batch-size"`
-	NatsBatchTimeout   time.Duration `mapstructure:"batch-timeout"`
-	NatsFetchTimeout   time.Duration `mapstructure:"fetch-timeout"`
-	NatsAckWait        time.Duration `mapstructure:"ack-wait"`
-	NatsMaxDeliver     int           `mapstructure:"max-deliver"`
+	NatsEndpoint     string        `mapstructure:"nats"`
+	NatsStreamName   string        `mapstructure:"stream"`
+	NatsConsumerName string        `mapstructure:"consumer"`
+	NatsBatchSize    int           `mapstructure:"batch-size"`
+	NatsBatchTimeout time.Duration `mapstructure:"batch-timeout"`
+	NatsFetchTimeout time.Duration `mapstructure:"fetch-timeout"`
+	NatsAckWait      time.Duration `mapstructure:"ack-wait"`
+	NatsMaxDeliver   int           `mapstructure:"max-deliver"`
+	Workers          int           `mapstructure:"workers"`
 
 	// QDB options
 	QdbClusterUri           string `mapstructure:"qdb"`
@@ -70,16 +70,16 @@ type Options struct {
 	// Internal parsed options for OptionsProvider interface
 	parsedSinkOptions   sink.Options
 	parsedSourceOptions struct {
-		URL            string
-		StreamName     string
-		TopicFilters   []string
-		ConsumerPrefix string
-		BatchSize      int
-		BatchTimeout   time.Duration
-		FetchTimeout   time.Duration
-		AckWait        time.Duration
-		MaxDeliver     int
+		URL          string
+		StreamName   string
+		ConsumerName string
+		BatchSize    int
+		BatchTimeout time.Duration
+		FetchTimeout time.Duration
+		AckWait      time.Duration
+		MaxDeliver   int
 	}
+	initialized bool // tracks if parsedOptions have been set
 }
 
 var (
@@ -114,7 +114,8 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 
 	// Set defaults
 	v.SetDefault("nats", nats.DefaultURL)
-	v.SetDefault("consumer-prefix", "qdb-connector")
+	v.SetDefault("consumer", "qdb-connector")
+	v.SetDefault("workers", 4)
 	v.SetDefault("batch-size", 100)
 	v.SetDefault("batch-timeout", time.Second)
 	v.SetDefault("fetch-timeout", 5*time.Second)
@@ -144,13 +145,13 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	// NATS flags
 	fs.StringP("nats", "n", nats.DefaultURL, "NATS cluster endpoint (e.g. 10.192.172.166:4222)")
 	fs.String("stream", "", "JetStream stream name")
-	fs.String("consumer-prefix", "qdb-connector", "Consumer name prefix")
+	fs.String("consumer", "qdb-connector", "Consumer name")
+	fs.IntP("workers", "w", 4, "Number of concurrent workers")
 	fs.Int("batch-size", 100, "Messages per fetch")
 	fs.Duration("batch-timeout", time.Second, "Max wait for batch")
 	fs.Duration("fetch-timeout", 5*time.Second, "Total fetch timeout")
 	fs.Duration("ack-wait", 30*time.Second, "Message ACK timeout")
 	fs.Int("max-deliver", 3, "Max delivery attempts")
-	fs.StringSliceP("topic", "t", []string{}, "Topic filter (can be repeated)")
 
 	// General flags
 	fs.Int("max-retries", 3, "Poison message threshold")
@@ -220,7 +221,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	}
 
 	// Parse and set the typed fields
-	err = parseAndSetFields(opts)
+	err = parseAndSetFields(opts, v)
 	if err != nil {
 		return nil, err
 	}
@@ -234,69 +235,16 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	return opts, nil
 }
 
+// Initialize ensures parsedSourceOptions and parsedSinkOptions are populated from raw fields.
+// This is called automatically by OptionsProvider methods but can be called explicitly.
+// Safe to call multiple times.
+func (o *Options) Initialize() error {
+	return o.parseAndSetFields(nil)
+}
+
 // parseAndSetFields parses string fields into typed fields and sets internal options
-func parseAndSetFields(opts *Options) error {
-	// Set internal parsed source options
-	opts.parsedSourceOptions.URL = opts.NatsEndpoint
-	opts.parsedSourceOptions.StreamName = opts.NatsStreamName
-	opts.parsedSourceOptions.TopicFilters = opts.NatsTopicFilters
-	opts.parsedSourceOptions.ConsumerPrefix = opts.NatsConsumerPrefix
-	opts.parsedSourceOptions.BatchSize = opts.NatsBatchSize
-	opts.parsedSourceOptions.BatchTimeout = opts.NatsBatchTimeout
-	opts.parsedSourceOptions.FetchTimeout = opts.NatsFetchTimeout
-	opts.parsedSourceOptions.AckWait = opts.NatsAckWait
-	opts.parsedSourceOptions.MaxDeliver = opts.NatsMaxDeliver
-
-	// Set sink options
-	opts.parsedSinkOptions.ClusterUri = opts.QdbClusterUri
-	opts.parsedSinkOptions.ClusterPublicKeyFile = opts.QdbClusterPublicKeyFile
-	opts.parsedSinkOptions.UserSecurityFile = opts.QdbUserSecurityFile
-
-	// Parse compression
-	if opts.QdbCompression != "" {
-		comp, err := parseCompression(opts.QdbCompression)
-		if err != nil {
-			return err
-		}
-		opts.parsedSinkOptions.Compression = comp
-	}
-
-	// Parse encryption
-	if opts.QdbEncryption != "" {
-		enc, err := parseEncryption(opts.QdbEncryption)
-		if err != nil {
-			return err
-		}
-		opts.parsedSinkOptions.Encryption = &enc
-	}
-
-	// Parse push mode
-	if opts.QdbPushMode != "" {
-		pushMode, err := parsePushMode(opts.QdbPushMode)
-		if err != nil {
-			return err
-		}
-		opts.parsedSinkOptions.PushMode = pushMode
-	}
-
-	// Parse deduplication mode
-	if opts.QdbDeduplicationMode != "" {
-		dedupMode, err := parseDeduplicationMode(opts.QdbDeduplicationMode)
-		if err != nil {
-			return err
-		}
-		opts.parsedSinkOptions.DeduplicationMode = dedupMode
-	}
-
-	// Set performance settings
-	if opts.QdbClientMaxParallelism > 0 {
-		opts.parsedSinkOptions.ClientMaxParallelism = &opts.QdbClientMaxParallelism
-	}
-	if opts.QdbClientMaxInBufSize > 0 {
-		opts.parsedSinkOptions.ClientMaxInBufSize = &opts.QdbClientMaxInBufSize
-	}
-
-	return nil
+func parseAndSetFields(opts *Options, v *viper.Viper) error {
+	return opts.parseAndSetFields(v)
 }
 
 // validateOptions validates required config fields.
@@ -312,8 +260,8 @@ func parseAndSetFields(opts *Options) error {
 //
 //	validateOptions(opts) // → nil if valid
 func validateOptions(opts *Options) *errors.ConnectorError {
-	if len(opts.NatsTopicFilters) == 0 {
-		return errors.NewNoTopicProvidedError("connector")
+	if opts.Workers <= 0 {
+		return errors.NewInvalidConfigError("connector", "workers must be positive")
 	}
 
 	if opts.NatsStreamName == "" {
@@ -408,37 +356,59 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 // In: none
 // Out: string - cluster URI
 // Ex: ClusterUri() → "qdb://localhost:2836"
-func (o *Options) ClusterUri() string { return o.parsedSinkOptions.ClusterUri }
+func (o *Options) ClusterUri() string {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.ClusterUri
+}
 
 // ClusterPublicKeyFile returns public key path
 // In: none
 // Out: string - path or empty
 // Ex: ClusterPublicKeyFile() → "/etc/qdb/cluster.pub"
-func (o *Options) ClusterPublicKeyFile() string { return o.parsedSinkOptions.ClusterPublicKeyFile }
+func (o *Options) ClusterPublicKeyFile() string {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.ClusterPublicKeyFile
+}
 
 // UserSecurityFile returns user auth file path
 // In: none
 // Out: string - path or empty
 // Ex: UserSecurityFile() → "/etc/qdb/user.key"
-func (o *Options) UserSecurityFile() string { return o.parsedSinkOptions.UserSecurityFile }
+func (o *Options) UserSecurityFile() string {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.UserSecurityFile
+}
 
 // Encryption returns QDB encryption mode
 // In: none
 // Out: *qdb.Encryption - nil=none
 // Ex: Encryption() → &EncryptAES
-func (o *Options) Encryption() *qdb.Encryption { return o.parsedSinkOptions.Encryption }
+func (o *Options) Encryption() *qdb.Encryption {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.Encryption
+}
 
 // Compression returns QDB compression mode
 // In: none
 // Out: qdb.Compression - none|balanced
 // Ex: Compression() → CompBalanced
-func (o *Options) Compression() qdb.Compression { return o.parsedSinkOptions.Compression }
+func (o *Options) Compression() qdb.Compression {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.Compression
+}
 
 // DeduplicationMode returns QDB deduplication mode
 // In: none
 // Out: qdb.WriterDeduplicationMode - disabled|drop|upsert
 // Ex: DeduplicationMode() → WriterDeduplicationModeDrop
 func (o *Options) DeduplicationMode() qdb.WriterDeduplicationMode {
+	o.ensureInitialized()
+
 	return o.parsedSinkOptions.DeduplicationMode
 }
 
@@ -446,80 +416,187 @@ func (o *Options) DeduplicationMode() qdb.WriterDeduplicationMode {
 // In: none
 // Out: *uint - nil=default
 // Ex: ClientMaxParallelism() → &8
-func (o *Options) ClientMaxParallelism() *uint { return o.parsedSinkOptions.ClientMaxParallelism }
+func (o *Options) ClientMaxParallelism() *uint {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.ClientMaxParallelism
+}
 
 // ClientMaxInBufSize returns max QDB buffer
 // In: none
 // Out: *uint - nil=default
 // Ex: ClientMaxInBufSize() → &1048576
-func (o *Options) ClientMaxInBufSize() *uint { return o.parsedSinkOptions.ClientMaxInBufSize }
+func (o *Options) ClientMaxInBufSize() *uint {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.ClientMaxInBufSize
+}
 
 // Timeout returns QDB operation timeout
 // In: none
 // Out: *time.Duration - nil=default
 // Ex: Timeout() → &30s
-func (o *Options) Timeout() *time.Duration { return o.parsedSinkOptions.Timeout }
+func (o *Options) Timeout() *time.Duration {
+	o.ensureInitialized()
 
-// WorkerCreationDelay returns worker stagger delay
-// In: none
-// Out: time.Duration - delay
-// Ex: WorkerCreationDelay() → 100ms
-func (o *Options) WorkerCreationDelay() time.Duration { return o.parsedSinkOptions.WorkerCreationDelay }
+	return o.parsedSinkOptions.Timeout
+}
 
 // URL returns NATS server endpoint
 // In: none
 // Out: string - NATS URL
 // Ex: URL() → "nats://localhost:4222"
-func (o *Options) URL() string { return o.parsedSourceOptions.URL }
+func (o *Options) URL() string {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.URL
+}
 
 // StreamName returns JetStream stream name
 // In: none
 // Out: string - stream name
 // Ex: StreamName() → "EVENTS"
-func (o *Options) StreamName() string { return o.parsedSourceOptions.StreamName }
+func (o *Options) StreamName() string {
+	o.ensureInitialized()
 
-// TopicFilter returns first topic filter
-// In: none
-// Out: string - topic or empty
-// Ex: TopicFilter() → "sensors.>"
-func (o *Options) TopicFilter() string {
-	if len(o.parsedSourceOptions.TopicFilters) > 0 {
-		return o.parsedSourceOptions.TopicFilters[0]
-	}
-
-	return ""
+	return o.parsedSourceOptions.StreamName
 }
 
-// ConsumerName returns JetStream consumer prefix
+// ConsumerName returns JetStream consumer name
 // In: none
-// Out: string - prefix
+// Out: string - consumer name
 // Ex: ConsumerName() → "qdb-connector"
-func (o *Options) ConsumerName() string { return o.parsedSourceOptions.ConsumerPrefix }
+func (o *Options) ConsumerName() string {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.ConsumerName
+}
+
+// GetWorkers returns number of concurrent workers
+// In: none
+// Out: int - worker count
+// Ex: GetWorkers() → 4
+func (o *Options) GetWorkers() int { return o.Workers }
 
 // BatchSize returns messages per fetch.
 // Out: int - batch size
 // Ex: BatchSize() → 100
-func (o *Options) BatchSize() int { return o.parsedSourceOptions.BatchSize }
+func (o *Options) BatchSize() int {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.BatchSize
+}
 
 // BatchTimeout returns max wait for batch.
 // Out: time.Duration - timeout
 // Ex: BatchTimeout() → 1s
-func (o *Options) BatchTimeout() time.Duration { return o.parsedSourceOptions.BatchTimeout }
+func (o *Options) BatchTimeout() time.Duration {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.BatchTimeout
+}
 
 // FetchTimeout returns total fetch timeout.
 // Out: time.Duration - timeout
 // Ex: FetchTimeout() → 5s
-func (o *Options) FetchTimeout() time.Duration { return o.parsedSourceOptions.FetchTimeout }
+func (o *Options) FetchTimeout() time.Duration {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.FetchTimeout
+}
 
 // AckWait returns message ACK timeout.
 // Out: time.Duration - timeout
 // Ex: AckWait() → 30s
-func (o *Options) AckWait() time.Duration { return o.parsedSourceOptions.AckWait }
+func (o *Options) AckWait() time.Duration {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.AckWait
+}
 
 // MaxDeliver returns max redelivery count.
 // Out: int - max attempts
 // Ex: MaxDeliver() → 3
-func (o *Options) MaxDeliver() int { return o.parsedSourceOptions.MaxDeliver }
+func (o *Options) MaxDeliver() int {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.MaxDeliver
+}
+
+// parseAndSetFields parses string fields into typed fields and sets internal options
+func (o *Options) parseAndSetFields(v *viper.Viper) error {
+	// Set internal parsed source options
+	o.parsedSourceOptions.URL = o.NatsEndpoint
+	o.parsedSourceOptions.StreamName = o.NatsStreamName
+	o.parsedSourceOptions.ConsumerName = o.NatsConsumerName
+	o.parsedSourceOptions.BatchSize = o.NatsBatchSize
+	o.parsedSourceOptions.BatchTimeout = o.NatsBatchTimeout
+	o.parsedSourceOptions.FetchTimeout = o.NatsFetchTimeout
+	o.parsedSourceOptions.AckWait = o.NatsAckWait
+	o.parsedSourceOptions.MaxDeliver = o.NatsMaxDeliver
+
+	// Set sink options
+	o.parsedSinkOptions.ClusterUri = o.QdbClusterUri
+	o.parsedSinkOptions.ClusterPublicKeyFile = o.QdbClusterPublicKeyFile
+	o.parsedSinkOptions.UserSecurityFile = o.QdbUserSecurityFile
+
+	// Parse compression
+	if o.QdbCompression != "" {
+		comp, err := parseCompression(o.QdbCompression)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.Compression = comp
+	}
+
+	// Parse encryption
+	if o.QdbEncryption != "" {
+		enc, err := parseEncryption(o.QdbEncryption)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.Encryption = &enc
+	}
+
+	// Parse push mode
+	if o.QdbPushMode != "" {
+		pushMode, err := parsePushMode(o.QdbPushMode)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.PushMode = pushMode
+	}
+
+	// Parse deduplication mode
+	if o.QdbDeduplicationMode != "" {
+		dedupMode, err := parseDeduplicationMode(o.QdbDeduplicationMode)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.DeduplicationMode = dedupMode
+	}
+
+	// Set performance settings
+	if o.QdbClientMaxParallelism > 0 {
+		o.parsedSinkOptions.ClientMaxParallelism = &o.QdbClientMaxParallelism
+	}
+	if o.QdbClientMaxInBufSize > 0 {
+		o.parsedSinkOptions.ClientMaxInBufSize = &o.QdbClientMaxInBufSize
+	}
+
+	o.initialized = true
+
+	return nil
+}
+
+// ensureInitialized checks if parsed options are set and initializes them if not
+func (o *Options) ensureInitialized() {
+	if !o.initialized {
+		// Ignore error since this is a fallback for programmatic creation
+		// Errors would have been caught during validation in LoadConfig
+		_ = o.parseAndSetFields(nil)
+	}
+}
 
 // parseCompression converts string→qdb.Compression.
 // In: val string - none|balanced

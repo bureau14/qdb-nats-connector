@@ -14,12 +14,12 @@ import (
 // Who: WithX functions return, NewOptions consumes.
 type Option func(Options) Options
 
-// Options: QuasarDB sink configuration with auth, connection, and worker pool settings. Needed for customizable high-performance writes.
+// Options: QuasarDB sink configuration with auth, connection, and retry settings. Needed for customizable synchronous writes.
 // Who: connector config provides, sink consumes via NewSink.
 // ClusterUri-UserSecret: QDB connection & auth credentials
 // Encryption-DeduplicationMode: data handling policies
 // ClientMaxParallelism-ClientMaxInBufSize: QDB client tuning
-// NumWriters-WorkerCreationDelay: worker pool configuration
+// RetryAttempts-Timeout: write retry configuration
 type Options struct {
 	ClusterUri           string `json:"cluster_uri"`
 	ClusterPublicKeyFile string `json:"cluster_public_key_file"`
@@ -41,27 +41,21 @@ type Options struct {
 	ClientMaxParallelism *uint
 	ClientMaxInBufSize   *uint
 
-	// Worker pool configuration
-	NumWriters          int            `json:"num_writers"`
-	QueueSize           int            `json:"queue_size"`
-	RetryAttempts       int            `json:"retry_attempts"`
-	Timeout             *time.Duration `json:"timeout"`
-	WorkerCreationDelay time.Duration  `json:"worker_creation_delay"`
+	// Retry configuration
+	RetryAttempts int            `json:"retry_attempts"`
+	Timeout       *time.Duration `json:"timeout"`
 }
 
 // NewOptions applies options to default sink config.
 // In: opts ...Option - functional options
-// Out: Options - async push, 4 workers, queue=100
+// Out: Options - async push, 10 retries
 // Ex: NewOptions(WithClusterUri("qdb://host")) → Options{}
 func NewOptions(opts ...Option) Options {
 	options := Options{
-		PushMode:            qdb.WriterPushModeAsync,
-		Compression:         qdb.CompNone,
-		DeduplicationMode:   qdb.WriterDeduplicationModeDrop,
-		NumWriters:          4,
-		QueueSize:           100,
-		RetryAttempts:       10,
-		WorkerCreationDelay: 0,
+		PushMode:          qdb.WriterPushModeAsync,
+		Compression:       qdb.CompNone,
+		DeduplicationMode: qdb.WriterDeduplicationModeDrop,
+		RetryAttempts:     10,
 	}
 	for _, opt := range opts {
 		options = opt(options)
@@ -214,30 +208,6 @@ func WithClientMaxInBufSize(size uint) Option {
 	}
 }
 
-// WithNumWriters sets worker pool size.
-// In: num int - worker count
-// Out: Option
-// Ex: WithNumWriters(8) // 8 parallel writers
-func WithNumWriters(num int) Option {
-	return func(o Options) Options {
-		o.NumWriters = num
-
-		return o
-	}
-}
-
-// WithQueueSize sets message buffer size.
-// In: size int - queue capacity
-// Out: Option
-// Ex: WithQueueSize(1000) // buffer 1k msgs
-func WithQueueSize(size int) Option {
-	return func(o Options) Options {
-		o.QueueSize = size
-
-		return o
-	}
-}
-
 // WithRetryAttempts sets max retries.
 // In: attempts int - retry limit
 // Out: Option
@@ -257,18 +227,6 @@ func WithRetryAttempts(attempts int) Option {
 func WithTimeout(timeout time.Duration) Option {
 	return func(o Options) Options {
 		o.Timeout = &timeout
-
-		return o
-	}
-}
-
-// WithWorkerCreationDelay sets delay between worker creation.
-// In: delay time.Duration - delay between workers
-// Out: Option
-// Ex: WithWorkerCreationDelay(time.Second) // 1s delay
-func WithWorkerCreationDelay(delay time.Duration) Option {
-	return func(o Options) Options {
-		o.WorkerCreationDelay = delay
 
 		return o
 	}
@@ -294,8 +252,6 @@ type OptionsProvider interface {
 	ClientMaxInBufSize() *uint
 	// Timeout returns connection timeout duration (nil for default)
 	Timeout() *time.Duration
-	// WorkerCreationDelay returns delay between worker initialization
-	WorkerCreationDelay() time.Duration
 }
 
 // FromOptionsProvider extracts sink config from provider.
@@ -311,7 +267,6 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithEncryption(p.Encryption()),
 		WithCompression(p.Compression()),
 		WithDeduplicationMode(p.DeduplicationMode()),
-		WithWorkerCreationDelay(p.WorkerCreationDelay()),
 	}
 
 	// Use Go 1.21+ slice operations for conditional appends

@@ -430,8 +430,8 @@ func RunConnectorForSubject(subject string, cfg ConnectorConfig) error {
 	// Build command line arguments for configuration
 	args := []string{
 		"--nats", cfg.NATSEndpoint,
-		"--topic", subject,
 		"--stream", "TEST_STREAM", // Required for JetStream
+		"--consumer", "test-consumer",
 		"--qdb", cfg.QDBEndpoint,
 	}
 

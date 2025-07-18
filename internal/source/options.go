@@ -16,7 +16,6 @@ type Option func(Options) Options
 // BatchSize-MaxDeliver: message fetching & acknowledgment policies
 type Options struct {
 	Endpoint     string        `json:"endpoint"`
-	Topic        string        `json:"topic"`
 	StreamName   string        `json:"stream_name"`
 	ConsumerName string        `json:"consumer_name"`
 	BatchSize    int           `json:"batch_size"`
@@ -53,18 +52,6 @@ func NewOptions(opts ...Option) Options {
 func WithEndpoint(endpoint string) Option {
 	return func(o Options) Options {
 		o.Endpoint = endpoint
-
-		return o
-	}
-}
-
-// WithTopic sets NATS subscription subject.
-// In: topic string - supports wildcards
-// Out: Option
-// Ex: WithTopic("data.*")
-func WithTopic(topic string) Option {
-	return func(o Options) Options {
-		o.Topic = topic
 
 		return o
 	}
@@ -160,14 +147,13 @@ type OptionsProvider interface {
 	MaxDeliver() int
 }
 
-// FromOptionsProvider extracts source config with topic override.
-// In: p OptionsProvider - config, topicFilter string - worker topic
-// Out: Options - JetStream config with custom topic
-// Ex: FromOptionsProvider(opts, "sensors.*") → Options{topic:"sensors.*"}
-func FromOptionsProvider(p OptionsProvider, topicFilter string) Options {
+// FromOptionsProvider extracts source config.
+// In: p OptionsProvider - config
+// Out: Options - JetStream config
+// Ex: FromOptionsProvider(opts) → Options{}
+func FromOptionsProvider(p OptionsProvider) Options {
 	opts := []Option{
 		WithEndpoint(p.URL()),
-		WithTopic(topicFilter),
 		WithStreamName(p.StreamName()),
 		WithBatchSize(p.BatchSize()),
 		WithBatchTimeout(p.BatchTimeout()),

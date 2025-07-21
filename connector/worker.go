@@ -35,6 +35,10 @@ type Worker struct {
 	lastFetch    time.Time
 	batchTimeout time.Duration
 
+	// Shutdown synchronization
+	activeBatches sync.WaitGroup
+	closing       atomic.Bool
+
 	// Metrics (using atomic for thread safety)
 	messagesProcessed atomic.Uint64
 	parseFailures     atomic.Uint64
@@ -174,6 +178,14 @@ func (w *Worker) GetStats() (messagesProcessed, parseFailures, writeFailures uin
 // Out: error - processing failure
 // Ex: processBatchFromChannel(ctx, batch) → nil
 func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.MessageBatch) error {
+	// Track active batch processing for safe shutdown
+	w.activeBatches.Add(1)
+	defer w.activeBatches.Done()
+
+	// Check if we're shutting down - return early if so
+	if w.closing.Load() {
+		return nil
+	}
 	// PreRead hook
 	preReadData := &hooks.PreReadData{
 		WorkerID:  w.workerID,
@@ -355,6 +367,8 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 // Out: []qdb.WriterTable - valid tables, []uint64 - failedSequenceNumbers
 // Ex: parseMessages(batch) → [table1, table2], [seq3]
 func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.WriterTable, failedSequenceNumbers []uint64) {
+	// Process batch of messages
+
 	// Parse messages individually
 	for _, msgInfo := range batch.Messages {
 		seq := msgInfo.Sequence
@@ -362,7 +376,6 @@ func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.Wr
 		// Parse individual message
 		tables, err := w.parser.Parse(msgInfo.Msg)
 		if err != nil {
-			// Log parse error with details for debugging
 			slog.Warn("Message parse failed",
 				"worker_id", w.id,
 				"sequence", seq,
@@ -404,6 +417,13 @@ func (w *Worker) isHealthy() bool {
 // Out: error - always nil
 // Ex: shutdown() → nil
 func (w *Worker) shutdown() error {
+	// Signal no new work should be processed
+	w.closing.Store(true)
+
+	// Wait for in-flight batches to complete
+	w.activeBatches.Wait()
+
+	// Now safe to close resources
 	if w.sink != nil {
 		w.sink.Close()
 	}
@@ -425,10 +445,10 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 		Count:     len(validSequences),
 		Timestamp: time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PreAck", preAckData)
-	if err != nil {
+	hookErr := w.hooks.Execute(ctx, "PreAck", preAckData)
+	if hookErr != nil {
 		// Log the error but continue with NACK to prevent infinite redelivery
-		slog.Error("PreAck hook failed, continuing with NACK", "worker_id", w.id, "error", err)
+		slog.Error("PreAck hook failed, continuing with NACK", "worker_id", w.id, "error", hookErr)
 	}
 
 	cbErr := batch.NackFunc(validSequences)
@@ -447,9 +467,9 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 		Error:       cbErr,
 		Timestamp:   time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PostAck", postAckData)
-	if err != nil {
-		slog.Error("PostAck hook failed", "worker_id", w.id, "error", err)
+	hookErr = w.hooks.Execute(ctx, "PostAck", postAckData)
+	if hookErr != nil {
+		slog.Error("PostAck hook failed", "worker_id", w.id, "error", hookErr)
 	}
 
 	if cbErr != nil {

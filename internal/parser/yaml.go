@@ -104,9 +104,6 @@ type YAMLParser struct {
 	pipeline    []TransformationStep
 	errorAction string
 
-	// Performance optimizations - single ParseState instance per parser
-	state *ParseState
-
 	// Column mapping - pre-computed at startup
 	columnTypes []qdb.TsColumnType
 	columns     []qdb.WriterColumn
@@ -180,6 +177,12 @@ func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser
 		return nil, err
 	}
 
+	// Validate column synchronization to prevent buffer overflow issues
+	err = validateColumnSynchronization(config.Output.Columns, columns, columnTypes)
+	if err != nil {
+		return nil, err
+	}
+
 	parser := &YAMLParser{
 		config:      config,
 		pipeline:    pipeline,
@@ -192,30 +195,7 @@ func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser
 	parser.columnTypes = columnTypes
 	parser.columns = columns
 
-	// Initialize single ParseState instance for performance
-	parser.state = &ParseState{
-		Fields:        make(map[string]interface{}, 16),
-		Errors:        make([]error, 0, 4),
-		tmpBuf:        make([]byte, 0, 1024),
-		indexBuf:      make([]time.Time, 1),
-		doubleVals:    make([]float64, len(columns)),
-		blobVals:      make([][]byte, len(columns)),
-		int64Vals:     make([]int64, len(columns)),
-		stringVals:    make([]string, len(columns)),
-		timestampVals: make([]time.Time, len(columns)),
-	}
-
-	// Initialize blob buffers - other types are already allocated with make()
-	for i, colType := range columnTypes {
-		switch colType {
-		case qdb.TsColumnBlob:
-			parser.state.blobVals[i] = make([]byte, 0, 1024) // Pre-allocate with capacity
-		case qdb.TsColumnDouble, qdb.TsColumnInt64, qdb.TsColumnString, qdb.TsColumnTimestamp:
-			// These are already allocated with make() above
-		case qdb.TsColumnUninitialized, qdb.TsColumnSymbol:
-			// No pre-allocation needed for these types
-		}
-	}
+	// Remove shared state - now allocated per Parse() call for memory safety
 
 	return parser, nil
 }
@@ -232,18 +212,20 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		return nil, errors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty message data"))
 	}
 
-	// Reset state for reuse - clears fields without reallocating
-	p.resetParseState(p.state)
+	// Process YAML message through transformation pipeline
+
+	// Create new ParseState per call to prevent memory corruption
+	state := p.newParseState()
 
 	// Initialize state with message data and configured table name
-	p.state.Message = msg
-	p.state.Data = msg.Data
-	p.state.TableName = p.config.Output.TableName
+	state.Message = msg
+	state.Data = msg.Data
+	state.TableName = p.config.Output.TableName
 
 	// Execute pipeline - runs each transformation step in sequence.
 	// Per ADR-005: direct function calls, no reflection
 	for _, step := range p.pipeline {
-		err := step(p.state)
+		err := step(state)
 		if err != nil {
 			if p.errorAction == "fail" {
 				return nil, errors.NewParsingFailedError("yaml_parser", err)
@@ -251,26 +233,20 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 			// For "drop" mode, log error and continue - allows partial
 			// data extraction when some fields fail (ADR-005)
 			slog.Warn("Pipeline step failed", "error", err, "subject", msg.Subject)
-			p.state.Errors = append(p.state.Errors, err)
+			state.Errors = append(state.Errors, err)
 		}
 	}
 
 	// Check if parsing failed - in "fail" mode any error stops processing
-	if len(p.state.Errors) > 0 && p.errorAction == "fail" {
-		return nil, errors.NewParsingFailedError("yaml_parser", p.state.Errors[0])
+	if len(state.Errors) > 0 && p.errorAction == "fail" {
+		return nil, errors.NewParsingFailedError("yaml_parser", state.Errors[0])
 	}
 
-	// Create WriterTable - uses pre-allocated buffers for performance
-	table, err := p.createWriterTable(p.state)
+	// Create WriterTable - uses per-call allocated buffers for memory safety
+	table, err := p.createWriterTable(state)
 	if err != nil {
 		return nil, err
 	}
-
-	slog.Debug("Successfully parsed YAML message",
-		"table", p.state.TableName,
-		"columns", len(p.columns),
-		"subject", msg.Subject,
-		"errors", len(p.state.Errors))
 
 	return []qdb.WriterTable{table}, nil
 }
@@ -288,6 +264,11 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 		ts = time.Now()
 	}
 	// Use goroutine-safe index buffer.
+	if len(state.indexBuf) == 0 {
+		slog.Error("CRITICAL: indexBuf is empty!")
+		return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("indexBuf is empty"))
+	}
 	state.indexBuf[0] = ts
 
 	// Create table with pre-defined schema - columns were validated at startup
@@ -299,17 +280,25 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 	table.SetIndex(state.indexBuf)
 
 	// Map fields to columns using pre-allocated buffers - thread-safe and efficient
-	for i, col := range p.config.Output.Columns {
-		value, exists := state.Fields[col.Name]
+	for i, col := range p.columns {
+		value, exists := state.Fields[col.ColumnName]
 		if !exists {
-			slog.Debug("Column field not found in parsed data", "column", col.Name, "table", state.TableName)
-
 			continue
 		}
 
 		switch p.columnTypes[i] {
 		case qdb.TsColumnDouble:
 			if v, ok := value.(float64); ok {
+				// Check buffer bounds before accessing
+				if i >= len(state.doubleVals) {
+					slog.Error("Buffer overflow detected in double column!",
+						"column_index", i,
+						"buffer_len", len(state.doubleVals),
+						"column_name", col.ColumnName)
+
+					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.doubleVals)))
+				}
 				// Use direct value storage for performance
 				state.doubleVals[i] = v
 				data := qdb.NewColumnDataDouble([]float64{state.doubleVals[i]})
@@ -317,11 +306,19 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
 				}
-			} else {
-				slog.Debug("Column type mismatch - skipping column", "column", col.Name, "expected", "double", "actual", fmt.Sprintf("%T", value), "table", state.TableName)
 			}
 		case qdb.TsColumnBlob:
 			if v, ok := value.([]byte); ok {
+				// Check buffer bounds before accessing
+				if i >= len(state.blobVals) {
+					slog.Error("Buffer overflow detected in blob column!",
+						"column_index", i,
+						"buffer_len", len(state.blobVals),
+						"column_name", col.ColumnName)
+
+					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.blobVals)))
+				}
 				// Use direct value storage for performance
 				state.blobVals[i] = v
 				data := qdb.NewColumnDataBlob([][]byte{state.blobVals[i]})
@@ -329,11 +326,19 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
 				}
-			} else {
-				slog.Debug("Column type mismatch - skipping column", "column", col.Name, "expected", "blob", "actual", fmt.Sprintf("%T", value), "table", state.TableName)
 			}
 		case qdb.TsColumnInt64:
 			if v, ok := value.(int64); ok {
+				// Check buffer bounds before accessing
+				if i >= len(state.int64Vals) {
+					slog.Error("Buffer overflow detected in int64 column!",
+						"column_index", i,
+						"buffer_len", len(state.int64Vals),
+						"column_name", col.ColumnName)
+
+					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.int64Vals)))
+				}
 				// Use direct value storage for performance
 				state.int64Vals[i] = v
 				data := qdb.NewColumnDataInt64([]int64{state.int64Vals[i]})
@@ -341,11 +346,19 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
 				}
-			} else {
-				slog.Debug("Column type mismatch - skipping column", "column", col.Name, "expected", "int64", "actual", fmt.Sprintf("%T", value), "table", state.TableName)
 			}
 		case qdb.TsColumnString:
 			if v, ok := value.(string); ok {
+				// Check buffer bounds before accessing
+				if i >= len(state.stringVals) {
+					slog.Error("Buffer overflow detected in string column!",
+						"column_index", i,
+						"buffer_len", len(state.stringVals),
+						"column_name", col.ColumnName)
+
+					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.stringVals)))
+				}
 				// Use direct value storage for performance
 				state.stringVals[i] = v
 				data := qdb.NewColumnDataString([]string{state.stringVals[i]})
@@ -353,11 +366,19 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
 				}
-			} else {
-				slog.Debug("Column type mismatch - skipping column", "column", col.Name, "expected", "string", "actual", fmt.Sprintf("%T", value), "table", state.TableName)
 			}
 		case qdb.TsColumnTimestamp:
 			if v, ok := value.(time.Time); ok {
+				// Check buffer bounds before accessing
+				if i >= len(state.timestampVals) {
+					slog.Error("Buffer overflow detected in timestamp column!",
+						"column_index", i,
+						"buffer_len", len(state.timestampVals),
+						"column_name", col.ColumnName)
+
+					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.timestampVals)))
+				}
 				// Use direct value storage for performance
 				state.timestampVals[i] = v
 				data := qdb.NewColumnDataTimestamp([]time.Time{state.timestampVals[i]})
@@ -365,8 +386,6 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				if err != nil {
 					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
 				}
-			} else {
-				slog.Debug("Column type mismatch - skipping column", "column", col.Name, "expected", "timestamp", "actual", fmt.Sprintf("%T", value), "table", state.TableName)
 			}
 		case qdb.TsColumnUninitialized:
 			// Skip uninitialized columns - should not occur with validation
@@ -380,24 +399,47 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 	return table, nil
 }
 
-// resetParseState clears state for pool reuse.
-// In: state *ParseState - used state
-// Out: state ready for reuse
-// Ex: resetParseState(state) → cleared
-func (p *YAMLParser) resetParseState(state *ParseState) {
-	state.Message = nil
-	state.Data = nil
-	state.TableName = ""
+// newParseState creates a new ParseState instance for each Parse() call.
+// This prevents memory corruption by ensuring each message gets its own buffers.
+// In: none
+// Out: *ParseState - new state with properly sized buffers
+// Ex: newParseState() → fresh state
+func (p *YAMLParser) newParseState() *ParseState {
+	columnsLen := len(p.columns)
 
-	// Clear map without reallocation - maintains capacity for reuse
-	for k := range state.Fields {
-		delete(state.Fields, k)
+	state := &ParseState{
+		Fields:        make(map[string]interface{}, 16),
+		Errors:        make([]error, 0, 4),
+		tmpBuf:        make([]byte, 0, 1024),
+		indexBuf:      make([]time.Time, 1),
+		doubleVals:    make([]float64, columnsLen),
+		blobVals:      make([][]byte, columnsLen),
+		int64Vals:     make([]int64, columnsLen),
+		stringVals:    make([]string, columnsLen),
+		timestampVals: make([]time.Time, columnsLen),
 	}
 
-	// Reset slices without reallocation - critical for object pool efficiency
-	state.Errors = state.Errors[:0]
-	state.tmpBuf = state.tmpBuf[:0]
-	state.indexBuf = state.indexBuf[:1]
+	// Initialize blob buffers - other types are already allocated with make()
+	for i, colType := range p.columnTypes {
+		// Safety check
+		if i >= len(state.blobVals) {
+			slog.Error("CRITICAL: Column index exceeds blobVals buffer!",
+				"column_index", i,
+				"blobVals_len", len(state.blobVals))
+			continue
+		}
+
+		switch colType {
+		case qdb.TsColumnBlob:
+			state.blobVals[i] = make([]byte, 0, 1024) // Pre-allocate with capacity
+		case qdb.TsColumnDouble, qdb.TsColumnInt64, qdb.TsColumnString, qdb.TsColumnTimestamp:
+			// These are already allocated with make() above
+		case qdb.TsColumnUninitialized, qdb.TsColumnSymbol:
+			// No pre-allocation needed for these types
+		}
+	}
+
+	return state
 }
 
 // LoadYAMLConfig reads YAML parser config.
@@ -511,6 +553,60 @@ func createColumnMapping(columns []ColumnSchema) ([]qdb.WriterColumn, []qdb.TsCo
 	return writerColumns, columnTypes, nil
 }
 
+// validateColumnSynchronization ensures p.columns and p.config.Output.Columns are properly synchronized
+// to prevent buffer overflow issues that could cause segfaults.
+// In: configColumns []ColumnSchema - original schema columns
+//     writerColumns []WriterColumn - internal writer columns
+//     columnTypes []TsColumnType - internal column types
+// Out: error - validation failure or nil if synchronized
+// Ex: validateColumnSynchronization(configCols, writerCols, types) → nil
+func validateColumnSynchronization(configColumns []ColumnSchema, writerColumns []qdb.WriterColumn, columnTypes []qdb.TsColumnType) error {
+	// Validate length consistency - critical for preventing buffer overflows
+	if len(configColumns) != len(writerColumns) {
+		return errors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("column count mismatch: schema has %d columns but internal mapping has %d columns",
+				len(configColumns), len(writerColumns)))
+	}
+
+	if len(configColumns) != len(columnTypes) {
+		return errors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("column count mismatch: schema has %d columns but internal types has %d types",
+				len(configColumns), len(columnTypes)))
+	}
+
+	if len(writerColumns) != len(columnTypes) {
+		return errors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("internal column count mismatch: writer has %d columns but types has %d entries",
+				len(writerColumns), len(columnTypes)))
+	}
+
+	// Validate column names and types consistency - ensures proper indexing
+	for i, configCol := range configColumns {
+		// Check column name consistency
+		if configCol.Name != writerColumns[i].ColumnName {
+			return errors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("column name mismatch at index %d: config has '%s' but internal mapping has '%s'",
+					i, configCol.Name, writerColumns[i].ColumnName))
+		}
+
+		// Check column type consistency
+		expectedType := stringToColumnType(configCol.Type)
+		if expectedType != columnTypes[i] {
+			return errors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("column type mismatch at index %d for column '%s': config has type '%s' but internal has type %d",
+					i, configCol.Name, configCol.Type, columnTypes[i]))
+		}
+
+		if expectedType != writerColumns[i].ColumnType {
+			return errors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("writer column type mismatch at index %d for column '%s': expected type %d but writer has type %d",
+					i, configCol.Name, expectedType, writerColumns[i].ColumnType))
+		}
+	}
+
+	return nil
+}
+
 // isValidColumnType validates QDB column type.
 // In: colType string - type name
 // Out: bool - valid for QuasarDB
@@ -571,23 +667,37 @@ func makeDecompressStep(config map[string]interface{}) (TransformationStep, erro
 // Ex: makeGzipDecompressStep() → decompressor
 func makeGzipDecompressStep() TransformationStep {
 	return func(state *ParseState) error {
+		if state == nil {
+			slog.Error("CRITICAL: state is nil in gzip decompress step")
+			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil state in gzip decompress step"))
+		}
+
+		if state.Data == nil {
+			slog.Error("CRITICAL: state.Data is nil in gzip decompress step")
+			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil data in gzip decompress step"))
+		}
+
 		if len(state.Data) == 0 {
 			return nil
 		}
 
 		reader, err := gzip.NewReader(bytes.NewReader(state.Data))
 		if err != nil {
+			slog.Error("Failed to create gzip reader", "error", err)
 			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to create gzip reader in decompress step: %w", err))
 		}
 		defer func() {
 			closeErr := reader.Close()
 			if closeErr != nil {
+				slog.Error("Failed to close gzip reader", "error", closeErr)
 				err = errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to close gzip reader in decompress step: %w", closeErr))
 			}
 		}()
 
 		decompressed, err := io.ReadAll(reader)
 		if err != nil {
+			slog.Error("Failed to decompress gzip data", "error", err)
+
 			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to decompress gzip data in decompress step: %w", err))
 		}
 

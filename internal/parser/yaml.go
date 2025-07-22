@@ -13,12 +13,13 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
-	"github.com/bureau14/qdb-nats-connector/internal/errors"
+	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/nats-io/nats.go"
 	"gopkg.in/yaml.v3"
 )
@@ -28,11 +29,10 @@ import (
 // Fields: accumulated typed values
 // Per ADR-005: modified in-place for performance
 type ParseState struct {
-	Message   *nats.Msg              // Original message (read-only)
-	Data      []byte                 // Current data representation
-	Fields    map[string]interface{} // Accumulated typed values
-	Errors    []error                // Non-fatal errors with context
-	TableName string                 // From configuration
+	Message *nats.Msg              // Original message (read-only)
+	Data    []byte                 // Current data representation
+	Fields  map[string]interface{} // Accumulated typed values
+	Errors  []error                // Non-fatal errors with context
 
 	// For performance: pre-allocated buffers - reused across messages, goroutine-safe
 	tmpBuf        []byte      // Reusable byte buffer
@@ -55,6 +55,7 @@ var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, 
 	"parse_json":        makeParseJSONStep,
 	"extract_index":     makeExtractIndexStep,
 	"extract_field":     makeExtractFieldStep,
+	"extract_table":     makeExtractTableStep,
 	"compute_field":     makeComputeFieldStep,
 	"safe_parse_number": makeSafeParseNumberStep,
 }
@@ -69,8 +70,7 @@ type YAMLConfig struct {
 
 // OutputSchema: QuasarDB table schema
 type OutputSchema struct {
-	TableName string         `yaml:"table_name"`
-	Columns   []ColumnSchema `yaml:"columns"`
+	Columns []ColumnSchema `yaml:"columns"`
 }
 
 // ColumnSchema: column name+type
@@ -206,10 +206,10 @@ func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser
 // Ex: Parse(msg) → [{sensors table}], nil
 func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	if msg == nil {
-		return nil, errors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil message"))
+		return nil, connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil message"))
 	}
 	if len(msg.Data) == 0 {
-		return nil, errors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty message data"))
+		return nil, connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty message data"))
 	}
 
 	// Process YAML message through transformation pipeline
@@ -217,10 +217,9 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 	// Create new ParseState per call to prevent memory corruption
 	state := p.newParseState()
 
-	// Initialize state with message data and configured table name
+	// Initialize state with message data
 	state.Message = msg
 	state.Data = msg.Data
-	state.TableName = p.config.Output.TableName
 
 	// Execute pipeline - runs each transformation step in sequence.
 	// Per ADR-005: direct function calls, no reflection
@@ -228,7 +227,7 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 		err := step(state)
 		if err != nil {
 			if p.errorAction == "fail" {
-				return nil, errors.NewParsingFailedError("yaml_parser", err)
+				return nil, connectorErrors.NewParsingFailedError("yaml_parser", err)
 			}
 			// For "drop" mode, log error and continue - allows partial
 			// data extraction when some fields fail (ADR-005)
@@ -239,7 +238,7 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 
 	// Check if parsing failed - in "fail" mode any error stops processing
 	if len(state.Errors) > 0 && p.errorAction == "fail" {
-		return nil, errors.NewParsingFailedError("yaml_parser", state.Errors[0])
+		return nil, connectorErrors.NewParsingFailedError("yaml_parser", state.Errors[0])
 	}
 
 	// Create WriterTable - uses per-call allocated buffers for memory safety
@@ -266,15 +265,34 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 	// Use goroutine-safe index buffer.
 	if len(state.indexBuf) == 0 {
 		slog.Error("CRITICAL: indexBuf is empty!")
-		return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+
+		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 			fmt.Errorf("indexBuf is empty"))
 	}
 	state.indexBuf[0] = ts
 
+	// Get table name from $table field
+	tableNameField, exists := state.Fields["$table"]
+	if !exists {
+		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name not set - extract_table step is required"))
+	}
+
+	tableName, ok := tableNameField.(string)
+	if !ok {
+		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name must be a string, got %T", tableNameField))
+	}
+
+	if tableName == "" {
+		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name cannot be empty"))
+	}
+
 	// Create table with pre-defined schema - columns were validated at startup
-	table, err := qdb.NewWriterTable(state.TableName, p.columns)
+	table, err := qdb.NewWriterTable(tableName, p.columns)
 	if err != nil {
-		return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
+		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 	}
 
 	table.SetIndex(state.indexBuf)
@@ -296,7 +314,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 						"buffer_len", len(state.doubleVals),
 						"column_name", col.ColumnName)
 
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.doubleVals)))
 				}
 				// Use direct value storage for performance
@@ -304,7 +322,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				data := qdb.NewColumnDataDouble([]float64{state.doubleVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 				}
 			}
 		case qdb.TsColumnBlob:
@@ -316,7 +334,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 						"buffer_len", len(state.blobVals),
 						"column_name", col.ColumnName)
 
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.blobVals)))
 				}
 				// Use direct value storage for performance
@@ -324,7 +342,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				data := qdb.NewColumnDataBlob([][]byte{state.blobVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 				}
 			}
 		case qdb.TsColumnInt64:
@@ -336,7 +354,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 						"buffer_len", len(state.int64Vals),
 						"column_name", col.ColumnName)
 
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.int64Vals)))
 				}
 				// Use direct value storage for performance
@@ -344,7 +362,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				data := qdb.NewColumnDataInt64([]int64{state.int64Vals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 				}
 			}
 		case qdb.TsColumnString:
@@ -356,7 +374,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 						"buffer_len", len(state.stringVals),
 						"column_name", col.ColumnName)
 
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.stringVals)))
 				}
 				// Use direct value storage for performance
@@ -364,7 +382,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				data := qdb.NewColumnDataString([]string{state.stringVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 				}
 			}
 		case qdb.TsColumnTimestamp:
@@ -376,7 +394,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 						"buffer_len", len(state.timestampVals),
 						"column_name", col.ColumnName)
 
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser",
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.timestampVals)))
 				}
 				// Use direct value storage for performance
@@ -384,7 +402,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				data := qdb.NewColumnDataTimestamp([]time.Time{state.timestampVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
-					return qdb.WriterTable{}, errors.NewParsingFailedError("yaml_parser", err)
+					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 				}
 			}
 		case qdb.TsColumnUninitialized:
@@ -426,6 +444,7 @@ func (p *YAMLParser) newParseState() *ParseState {
 			slog.Error("CRITICAL: Column index exceeds blobVals buffer!",
 				"column_index", i,
 				"blobVals_len", len(state.blobVals))
+
 			continue
 		}
 
@@ -449,14 +468,14 @@ func (p *YAMLParser) newParseState() *ParseState {
 func loadYAMLConfig(configPath string) (YAMLConfig, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return YAMLConfig{}, errors.NewInvalidConfigError("yaml_parser",
+		return YAMLConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("failed to read config file: %v", err))
 	}
 
 	var config YAMLConfig
 	err = yaml.Unmarshal(data, &config)
 	if err != nil {
-		return YAMLConfig{}, errors.NewInvalidConfigError("yaml_parser",
+		return YAMLConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("failed to parse YAML config: %v", err))
 	}
 
@@ -470,7 +489,22 @@ func loadYAMLConfig(configPath string) (YAMLConfig, error) {
 // Per ADR-005: pre-compiles at startup for <5% overhead
 func compilePipeline(specs []TransformSpec) ([]TransformationStep, error) {
 	if len(specs) == 0 {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "empty transformation pipeline")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "empty transformation pipeline")
+	}
+
+	// Check for extract_table step
+	hasExtractTable := false
+	for _, spec := range specs {
+		if spec.GetStepName() == "extract_table" {
+			hasExtractTable = true
+
+			break
+		}
+	}
+
+	if !hasExtractTable {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"transformation pipeline must include an extract_table step")
 	}
 
 	steps := make([]TransformationStep, len(specs))
@@ -481,7 +515,7 @@ func compilePipeline(specs []TransformSpec) ([]TransformationStep, error) {
 		stepName := spec.GetStepName()
 		factory, exists := stepRegistry[stepName]
 		if !exists {
-			return nil, errors.NewInvalidConfigError("yaml_parser",
+			return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("unknown transformation step: %s", stepName))
 		}
 
@@ -489,7 +523,7 @@ func compilePipeline(specs []TransformSpec) ([]TransformationStep, error) {
 		// closure over configuration for optimal runtime performance
 		step, err := factory(spec.Config)
 		if err != nil {
-			return nil, errors.NewInvalidConfigError("yaml_parser",
+			return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("failed to create step '%s': %v", stepName, err))
 		}
 
@@ -499,34 +533,62 @@ func compilePipeline(specs []TransformSpec) ([]TransformationStep, error) {
 	return steps, nil
 }
 
+// validateTableName validates table name for security
+// Prevents injection attacks and ensures safe table names
+// Rules: alphanumeric start, alphanumeric/dots/underscores/hyphens only, max 255 chars
+// No path traversal patterns (.., /, \)
+var tableNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$`)
+
+func validateTableName(tableName string) error {
+	if tableName == "" {
+		return connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name cannot be empty"))
+	}
+
+	if len(tableName) > 255 {
+		return connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name too long: %d characters (max 255)", len(tableName)))
+	}
+
+	// Check for path traversal patterns
+	if strings.Contains(tableName, "..") || strings.Contains(tableName, "/") || strings.Contains(tableName, "\\") {
+		return connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name contains invalid path traversal patterns: %s", tableName))
+	}
+
+	// Validate against secure regex pattern
+	if !tableNameRegex.MatchString(tableName) {
+		return connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name '%s' contains invalid characters or format - only alphanumeric, dots, underscores, and hyphens allowed", tableName))
+	}
+
+	return nil
+}
+
 // validateSchema checks QuasarDB compatibility.
 // In: schema OutputSchema - table schema
 // Out: error if invalid schema
 // Ex: validateSchema(schema) → nil
 func validateSchema(schema OutputSchema) error {
-	if schema.TableName == "" {
-		return errors.NewInvalidConfigError("yaml_parser", "table name is required")
-	}
-
 	if len(schema.Columns) == 0 {
-		return errors.NewInvalidConfigError("yaml_parser", "at least one column is required")
+		return connectorErrors.NewInvalidConfigError("yaml_parser", "at least one column is required")
 	}
 
 	// Check for duplicate column names - QuasarDB requires unique names
 	seen := make(map[string]bool)
 	for _, col := range schema.Columns {
 		if col.Name == "" {
-			return errors.NewInvalidConfigError("yaml_parser", "column name cannot be empty")
+			return connectorErrors.NewInvalidConfigError("yaml_parser", "column name cannot be empty")
 		}
 		if seen[col.Name] {
-			return errors.NewInvalidConfigError("yaml_parser",
+			return connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("duplicate column name: %s", col.Name))
 		}
 		seen[col.Name] = true
 
 		// Validate column type - must be supported QuasarDB type
 		if !isValidColumnType(col.Type) {
-			return errors.NewInvalidConfigError("yaml_parser",
+			return connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("invalid column type: %s", col.Type))
 		}
 	}
@@ -556,26 +618,28 @@ func createColumnMapping(columns []ColumnSchema) ([]qdb.WriterColumn, []qdb.TsCo
 // validateColumnSynchronization ensures p.columns and p.config.Output.Columns are properly synchronized
 // to prevent buffer overflow issues that could cause segfaults.
 // In: configColumns []ColumnSchema - original schema columns
-//     writerColumns []WriterColumn - internal writer columns
-//     columnTypes []TsColumnType - internal column types
+//
+//	writerColumns []WriterColumn - internal writer columns
+//	columnTypes []TsColumnType - internal column types
+//
 // Out: error - validation failure or nil if synchronized
 // Ex: validateColumnSynchronization(configCols, writerCols, types) → nil
 func validateColumnSynchronization(configColumns []ColumnSchema, writerColumns []qdb.WriterColumn, columnTypes []qdb.TsColumnType) error {
 	// Validate length consistency - critical for preventing buffer overflows
 	if len(configColumns) != len(writerColumns) {
-		return errors.NewInvalidConfigError("yaml_parser",
+		return connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("column count mismatch: schema has %d columns but internal mapping has %d columns",
 				len(configColumns), len(writerColumns)))
 	}
 
 	if len(configColumns) != len(columnTypes) {
-		return errors.NewInvalidConfigError("yaml_parser",
+		return connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("column count mismatch: schema has %d columns but internal types has %d types",
 				len(configColumns), len(columnTypes)))
 	}
 
 	if len(writerColumns) != len(columnTypes) {
-		return errors.NewInvalidConfigError("yaml_parser",
+		return connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("internal column count mismatch: writer has %d columns but types has %d entries",
 				len(writerColumns), len(columnTypes)))
 	}
@@ -584,7 +648,7 @@ func validateColumnSynchronization(configColumns []ColumnSchema, writerColumns [
 	for i, configCol := range configColumns {
 		// Check column name consistency
 		if configCol.Name != writerColumns[i].ColumnName {
-			return errors.NewInvalidConfigError("yaml_parser",
+			return connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("column name mismatch at index %d: config has '%s' but internal mapping has '%s'",
 					i, configCol.Name, writerColumns[i].ColumnName))
 		}
@@ -592,13 +656,13 @@ func validateColumnSynchronization(configColumns []ColumnSchema, writerColumns [
 		// Check column type consistency
 		expectedType := stringToColumnType(configCol.Type)
 		if expectedType != columnTypes[i] {
-			return errors.NewInvalidConfigError("yaml_parser",
+			return connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("column type mismatch at index %d for column '%s': config has type '%s' but internal has type %d",
 					i, configCol.Name, configCol.Type, columnTypes[i]))
 		}
 
 		if expectedType != writerColumns[i].ColumnType {
-			return errors.NewInvalidConfigError("yaml_parser",
+			return connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("writer column type mismatch at index %d for column '%s': expected type %d but writer has type %d",
 					i, configCol.Name, expectedType, writerColumns[i].ColumnType))
 		}
@@ -649,14 +713,14 @@ func stringToColumnType(colType string) qdb.TsColumnType {
 func makeDecompressStep(config map[string]interface{}) (TransformationStep, error) {
 	algorithm, ok := config["algorithm"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "decompress step requires 'algorithm' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "decompress step requires 'algorithm' string")
 	}
 
 	switch algorithm {
 	case "gzip":
 		return makeGzipDecompressStep(), nil
 	default:
-		return nil, errors.NewInvalidConfigError("yaml_parser",
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("unsupported compression algorithm: %s (supported: gzip)", algorithm))
 	}
 }
@@ -669,12 +733,14 @@ func makeGzipDecompressStep() TransformationStep {
 	return func(state *ParseState) error {
 		if state == nil {
 			slog.Error("CRITICAL: state is nil in gzip decompress step")
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil state in gzip decompress step"))
+
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil state in gzip decompress step"))
 		}
 
 		if state.Data == nil {
 			slog.Error("CRITICAL: state.Data is nil in gzip decompress step")
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil data in gzip decompress step"))
+
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil data in gzip decompress step"))
 		}
 
 		if len(state.Data) == 0 {
@@ -684,13 +750,14 @@ func makeGzipDecompressStep() TransformationStep {
 		reader, err := gzip.NewReader(bytes.NewReader(state.Data))
 		if err != nil {
 			slog.Error("Failed to create gzip reader", "error", err)
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to create gzip reader in decompress step: %w", err))
+
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to create gzip reader in decompress step: %w", err))
 		}
 		defer func() {
 			closeErr := reader.Close()
 			if closeErr != nil {
 				slog.Error("Failed to close gzip reader", "error", closeErr)
-				err = errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to close gzip reader in decompress step: %w", closeErr))
+				err = connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to close gzip reader in decompress step: %w", closeErr))
 			}
 		}()
 
@@ -698,7 +765,7 @@ func makeGzipDecompressStep() TransformationStep {
 		if err != nil {
 			slog.Error("Failed to decompress gzip data", "error", err)
 
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to decompress gzip data in decompress step: %w", err))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to decompress gzip data in decompress step: %w", err))
 		}
 
 		state.Data = decompressed
@@ -715,19 +782,19 @@ func makeGzipDecompressStep() TransformationStep {
 func makeParseJSONStep(config map[string]interface{}) (TransformationStep, error) {
 	return func(state *ParseState) error {
 		if state == nil {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil state in parse_json step"))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil state in parse_json step"))
 		}
 		if state.Data == nil {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil data in parse_json step"))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil data in parse_json step"))
 		}
 		if len(state.Data) == 0 {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty data in parse_json step"))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty data in parse_json step"))
 		}
 
 		var jsonData map[string]interface{}
 		err := json.Unmarshal(state.Data, &jsonData)
 		if err != nil {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse JSON in parse_json step: %w", err))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse JSON in parse_json step: %w", err))
 		}
 
 		// Merge parsed data into fields - accumulates values for later steps
@@ -747,7 +814,7 @@ func makeParseJSONStep(config map[string]interface{}) (TransformationStep, error
 func makeExtractIndexStep(config map[string]interface{}) (TransformationStep, error) {
 	source, ok := config["source"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "extract_index step requires 'source' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_index step requires 'source' string")
 	}
 
 	target := "$timestamp" // Always use $timestamp for the index
@@ -760,7 +827,7 @@ func makeExtractIndexStep(config map[string]interface{}) (TransformationStep, er
 	return func(state *ParseState) error {
 		value, exists := state.Fields[source]
 		if !exists {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in extract_index step", source))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in extract_index step", source))
 		}
 
 		var ts time.Time
@@ -774,14 +841,69 @@ func makeExtractIndexStep(config map[string]interface{}) (TransformationStep, er
 		case float64:
 			ts = time.Unix(int64(v), 0)
 		default:
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("cannot extract index from type %T in extract_index step", value))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("cannot extract index from type %T in extract_index step", value))
 		}
 
 		if err != nil {
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse index in extract_index step: %w", err))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse index in extract_index step: %w", err))
 		}
 
 		state.Fields[target] = ts
+
+		return nil
+	}, nil
+}
+
+// makeExtractTableStep creates table name extraction step.
+// In: config[value,source] - static value or field name
+// Out: TransformationStep - sets state.Fields["$table"]
+// Ex: makeExtractTableStep({"value": "sensors"}) → step
+func makeExtractTableStep(config map[string]interface{}) (TransformationStep, error) {
+	// Two modes:
+	// 1. value: "static_table_name" - for static tables
+	// 2. source: "field_name" - for dynamic tables (default: "$table")
+
+	value, hasValue := config["value"].(string)
+	source, hasSource := config["source"].(string)
+
+	if !hasSource && !hasValue {
+		source = "$table" // Default source
+		hasSource = true
+	}
+
+	if hasValue && hasSource {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"extract_table cannot have both 'value' and 'source'")
+	}
+
+	return func(state *ParseState) error {
+		var tableName string
+
+		if hasValue {
+			tableName = value
+		} else {
+			field, exists := state.Fields[source]
+			if !exists {
+				return connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("source field '%s' not found in extract_table", source))
+			}
+			// Security fix: only allow string fields to prevent injection
+			if fieldStr, ok := field.(string); ok {
+				tableName = fieldStr
+			} else {
+				return connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("table name field '%s' must be a string, got %T", source, field))
+			}
+		}
+
+		// Security validation: prevent injection attacks
+		err := validateTableName(tableName)
+		if err != nil {
+			return err
+		}
+
+		// Store in special field that createWriterTable will read
+		state.Fields["$table"] = tableName
 
 		return nil
 	}, nil
@@ -795,12 +917,12 @@ func makeExtractIndexStep(config map[string]interface{}) (TransformationStep, er
 func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, error) {
 	source, ok := config["source"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'source' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'source' string")
 	}
 
 	target, ok := config["target"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'target' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'target' string")
 	}
 
 	fieldType, ok := config["type"].(string)
@@ -820,7 +942,7 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 				return nil
 			}
 
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to extract field '%s' in extract_field step: %w", source, err))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to extract field '%s' in extract_field step: %w", source, err))
 		}
 
 		// Type conversion - handles string→number, etc per ADR-005
@@ -830,7 +952,7 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 				return nil
 			}
 
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to convert field '%s' to type '%s' in extract_field step: %w", source, fieldType, err))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to convert field '%s' to type '%s' in extract_field step: %w", source, fieldType, err))
 		}
 
 		state.Fields[target] = convertedValue
@@ -847,29 +969,29 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, error) {
 	operation, ok := config["operation"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'operation' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'operation' string")
 	}
 
 	target, ok := config["target"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'target' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'target' string")
 	}
 
 	fieldsInterface, ok := config["fields"]
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'fields' array")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'fields' array")
 	}
 
 	fields, ok := fieldsInterface.([]interface{})
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "compute_field 'fields' must be an array")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field 'fields' must be an array")
 	}
 
 	switch operation {
 	case "concat":
 		return makeStringConcatStep(target, fields), nil
 	default:
-		return nil, errors.NewParsingFailedError("yaml_parser",
+		return nil, connectorErrors.NewParsingFailedError("yaml_parser",
 			fmt.Errorf("unsupported operation in compute_field step: %s", operation))
 	}
 }
@@ -882,12 +1004,12 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep, error) {
 	source, ok := config["source"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "safe_parse_number step requires 'source' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "safe_parse_number step requires 'source' string")
 	}
 
 	target, ok := config["target"].(string)
 	if !ok {
-		return nil, errors.NewInvalidConfigError("yaml_parser", "safe_parse_number step requires 'target' string")
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "safe_parse_number step requires 'target' string")
 	}
 
 	onError, ok := config["on_error"].(string)
@@ -902,7 +1024,7 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 				return nil
 			}
 
-			return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in safe_parse_number step", source))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in safe_parse_number step", source))
 		}
 
 		var number float64
@@ -932,9 +1054,9 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 			case "skip":
 				return nil
 			case "fail":
-				return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse number in safe_parse_number step: %w", err))
+				return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse number in safe_parse_number step: %w", err))
 			default:
-				return errors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse number in safe_parse_number step: %w", err))
+				return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse number in safe_parse_number step: %w", err))
 			}
 		}
 

@@ -7,7 +7,7 @@ package parser
 import (
 	"fmt"
 
-	"github.com/bureau14/qdb-nats-connector/internal/errors"
+	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
 // NewParser creates parser by type.
@@ -30,7 +30,7 @@ func NewParser(parserType string, opts ParserOptions) (Parser, error) {
 		// YAML parser requires configuration file per ADR-005 - contains
 		// transformation pipeline specs and output schema definition
 		if opts.ConfigPath == "" {
-			return nil, errors.NewInvalidConfigError("parser",
+			return nil, connectorErrors.NewInvalidConfigError("parser",
 				"yaml parser requires --parser-config flag pointing to a YAML configuration file\n"+
 					"Example: --parser=yaml --parser-config=examples/simple-yaml-parser.yaml")
 		}
@@ -46,7 +46,7 @@ func NewParser(parserType string, opts ParserOptions) (Parser, error) {
 	case "noop":
 		return NewNoopParser()
 	default:
-		return nil, errors.NewInvalidConfigError("parser", fmt.Sprintf("unknown parser: %s (valid options: yaml, noop)", parserType))
+		return nil, connectorErrors.NewInvalidConfigError("parser", fmt.Sprintf("unknown parser: %s (valid options: yaml, noop)", parserType))
 	}
 }
 

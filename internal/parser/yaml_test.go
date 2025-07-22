@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
@@ -60,11 +61,14 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
 	})
 
-	t.Run("missing table name", func(t *testing.T) {
+	t.Run("missing extract_table step", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "",
-				Columns:   []ColumnSchema{{Name: "col1", Type: "double"}},
+				Columns: []ColumnSchema{{Name: "col1", Type: "double"}},
+			},
+			Transformations: []TransformSpec{
+				{Step: "parse_json"},
+				// Missing extract_table step
 			},
 		}
 
@@ -84,8 +88,10 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 	t.Run("no columns", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "test",
-				Columns:   []ColumnSchema{},
+				Columns: []ColumnSchema{},
+			},
+			Transformations: []TransformSpec{
+				{Step: "extract_table", Config: map[string]interface{}{"value": "test"}},
 			},
 		}
 
@@ -105,11 +111,13 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 	t.Run("duplicate column names", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "test",
 				Columns: []ColumnSchema{
 					{Name: "col1", Type: "double"},
 					{Name: "col1", Type: "string"},
 				},
+			},
+			Transformations: []TransformSpec{
+				{Step: "extract_table", Config: map[string]interface{}{"value": "test"}},
 			},
 		}
 
@@ -129,10 +137,12 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 	t.Run("invalid column type", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "test",
 				Columns: []ColumnSchema{
 					{Name: "col1", Type: "invalid_type"},
 				},
+			},
+			Transformations: []TransformSpec{
+				{Step: "extract_table", Config: map[string]interface{}{"value": "test"}},
 			},
 		}
 
@@ -152,7 +162,6 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 	t.Run("empty column name", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "test",
 				Columns: []ColumnSchema{
 					{Name: "", Type: "double"},
 				},
@@ -175,8 +184,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 	t.Run("unknown transformation step", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "test",
-				Columns:   []ColumnSchema{{Name: "col1", Type: "double"}},
+				Columns: []ColumnSchema{{Name: "col1", Type: "double"}},
 			},
 			Transformations: []TransformSpec{
 				{Step: "unknown_step", Config: map[string]interface{}{}},
@@ -199,8 +207,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 	t.Run("empty pipeline", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "test",
-				Columns:   []ColumnSchema{{Name: "col1", Type: "double"}},
+				Columns: []ColumnSchema{{Name: "col1", Type: "double"}},
 			},
 			Transformations: []TransformSpec{},
 		}
@@ -223,11 +230,11 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 func TestYAMLParserInvalidInputs(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
-			TableName: "test",
-			Columns:   []ColumnSchema{{Name: "value", Type: "double"}},
+			Columns: []ColumnSchema{{Name: "value", Type: "double"}},
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
+			{Step: "extract_table", Config: map[string]interface{}{"value": "test_table"}},
 		},
 	}
 
@@ -288,7 +295,6 @@ func TestYAMLParserInvalidInputs(t *testing.T) {
 func TestYAMLParserValidParsing(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
-			TableName: "sensors",
 			Columns: []ColumnSchema{
 				{Name: "temperature", Type: "double"},
 				{Name: "humidity", Type: "double"},
@@ -312,6 +318,7 @@ func TestYAMLParserValidParsing(t *testing.T) {
 				"target": "location",
 				"type":   "string",
 			}},
+			{Step: "extract_table", Config: map[string]interface{}{"value": "sensors"}},
 		},
 	}
 
@@ -365,7 +372,6 @@ func TestYAMLParserValidParsing(t *testing.T) {
 func TestYAMLParserTimestamp(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
-			TableName: "events",
 			Columns: []ColumnSchema{
 				{Name: "timestamp", Type: "timestamp"},
 				{Name: "value", Type: "double"},
@@ -382,6 +388,7 @@ func TestYAMLParserTimestamp(t *testing.T) {
 				"target": "value",
 				"type":   "float64",
 			}},
+			{Step: "extract_table", Config: map[string]interface{}{"value": "events"}},
 		},
 	}
 
@@ -437,7 +444,6 @@ func TestYAMLParserTimestamp(t *testing.T) {
 func TestYAMLParserComputeField(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
-			TableName: "computed",
 			Columns: []ColumnSchema{
 				{Name: "tag_id", Type: "string"},
 				{Name: "value", Type: "double"},
@@ -485,7 +491,6 @@ func TestYAMLParserComputeField(t *testing.T) {
 func TestYAMLParserNumberParsing(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
-			TableName: "numbers",
 			Columns: []ColumnSchema{
 				{Name: "safe_value", Type: "double"},
 				{Name: "original", Type: "string"},
@@ -549,8 +554,7 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 func TestYAMLParserErrorHandling(t *testing.T) {
 	baseConfig := YAMLConfig{
 		Output: OutputSchema{
-			TableName: "test",
-			Columns:   []ColumnSchema{{Name: "value", Type: "double"}},
+			Columns: []ColumnSchema{{Name: "value", Type: "double"}},
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
@@ -616,11 +620,13 @@ func TestYAMLParserErrorHandling(t *testing.T) {
 func TestYAMLParserInterfaceCompliance(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
-			TableName: "test",
-			Columns:   []ColumnSchema{{Name: "value", Type: "double"}},
+			Columns: []ColumnSchema{{Name: "value", Type: "double"}},
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"value": "sensors",
+			}},
 			{Step: "extract_field", Config: map[string]interface{}{
 				"source": "val",
 				"target": "value",
@@ -660,8 +666,7 @@ func TestYAMLParserTransformationSteps(t *testing.T) {
 	t.Run("decompress step", func(t *testing.T) {
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "test",
-				Columns:   []ColumnSchema{{Name: "value", Type: "string"}},
+				Columns: []ColumnSchema{{Name: "value", Type: "string"}},
 			},
 			Transformations: []TransformSpec{
 				{Step: "decompress", Config: map[string]interface{}{
@@ -722,7 +727,6 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// Test that parser correctly handles when column counts and names match
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "sensors",
 				Columns: []ColumnSchema{
 					{Name: "temp", Type: "double"},
 					{Name: "humidity", Type: "double"},
@@ -731,6 +735,9 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "sensors",
+				}},
 			},
 		}
 
@@ -760,7 +767,6 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// Test that buffer allocation matches column count exactly
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "mixed_types",
 				Columns: []ColumnSchema{
 					{Name: "double_col", Type: "double"},
 					{Name: "int64_col", Type: "int64"},
@@ -810,7 +816,6 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// Test that column names in p.columns match configuration exactly
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "validation_test",
 				Columns: []ColumnSchema{
 					{Name: "sensor_id", Type: "string"},
 					{Name: "measurement_value", Type: "double"},
@@ -848,8 +853,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// This prevents potential divide-by-zero or null pointer issues
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "empty_test",
-				Columns:   []ColumnSchema{}, // Empty columns should be rejected
+				Columns: []ColumnSchema{}, // Empty columns should be rejected
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
@@ -873,7 +877,6 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// This simulates the scenario that caused the original segfault
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "bounds_test",
 				Columns: []ColumnSchema{
 					{Name: "col1", Type: "double"},
 					{Name: "col2", Type: "string"},
@@ -912,7 +915,6 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// Test that column types are consistently mapped from config to internal structures
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "type_consistency_test",
 				Columns: []ColumnSchema{
 					{Name: "double_field", Type: "double"},
 					{Name: "int64_field", Type: "int64"},
@@ -951,7 +953,6 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// This prevents the memory corruption issues
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "memory_safety_test",
 				Columns: []ColumnSchema{
 					{Name: "value", Type: "double"},
 				},
@@ -987,7 +988,6 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		// Test that properly synchronized columns pass validation
 		config := YAMLConfig{
 			Output: OutputSchema{
-				TableName: "valid_sync_test",
 				Columns: []ColumnSchema{
 					{Name: "temperature", Type: "double"},
 					{Name: "pressure", Type: "int64"},
@@ -996,6 +996,9 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "sensors",
+				}},
 			},
 		}
 
@@ -1140,4 +1143,405 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
 		assert.Contains(t, err.Error(), "column count mismatch: schema has 2 columns but internal mapping has 1 columns")
 	})
+}
+
+// TestYAMLParser_ExtractTableStatic tests static table extraction
+func TestYAMLParser_ExtractTableStatic(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "value", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"value": "static_table_name",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "data",
+				"target": "value",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	opts := ParserOptions{ErrorAction: "drop"}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	require.NoError(t, err)
+
+	// Test message
+	testData := `{"data": 42.5}`
+	msg := &nats.Msg{
+		Subject: "test.subject",
+		Data:    []byte(testData),
+	}
+
+	tables, err := parser.Parse(msg)
+	require.NoError(t, err)
+	require.Len(t, tables, 1)
+
+	// Verify table name
+	assert.Equal(t, "static_table_name", tables[0].TableName)
+}
+
+// TestYAMLParser_ExtractTableDynamic tests dynamic table from field
+func TestYAMLParser_ExtractTableDynamic(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "value", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "table_name",
+				"target": "$table",
+				"type":   "string",
+			}},
+			{Step: "extract_table"}, // Uses default source: "$table"
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "data",
+				"target": "value",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	opts := ParserOptions{ErrorAction: "drop"}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	require.NoError(t, err)
+
+	// Test message with dynamic table name
+	testData := `{"table_name": "dynamic_sensors", "data": 25.7}`
+	msg := &nats.Msg{
+		Subject: "test.subject",
+		Data:    []byte(testData),
+	}
+
+	tables, err := parser.Parse(msg)
+	require.NoError(t, err)
+	require.Len(t, tables, 1)
+
+	// Verify dynamic table name
+	assert.Equal(t, "dynamic_sensors", tables[0].TableName)
+}
+
+// TestYAMLParser_ExtractTableFromComputedField tests complex dynamic routing
+func TestYAMLParser_ExtractTableFromComputedField(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "price", Type: "double"},
+				{Name: "symbol", Type: "string"},
+				{Name: "exchange", Type: "string"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "market.exchange",
+				"target": "exchange",
+				"type":   "string",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "market.symbol",
+				"target": "symbol",
+				"type":   "string",
+			}},
+			{Step: "compute_field", Config: map[string]interface{}{
+				"operation": "concat",
+				"target":    "$table",
+				"fields":    []interface{}{"finance", ".", "exchange", ".", "symbol"},
+			}},
+			{Step: "extract_table"}, // Uses computed table name
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "price",
+				"target": "price",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	opts := ParserOptions{ErrorAction: "drop"}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	require.NoError(t, err)
+
+	// Test message with exchange and symbol for computed table name
+	testData := `{"market": {"exchange": "NASDAQ", "symbol": "AAPL"}, "price": 150.25}`
+	msg := &nats.Msg{
+		Subject: "test.subject",
+		Data:    []byte(testData),
+	}
+
+	tables, err := parser.Parse(msg)
+	require.NoError(t, err)
+	require.Len(t, tables, 1)
+
+	// Verify computed table name
+	assert.Equal(t, "finance.NASDAQ.AAPL", tables[0].TableName)
+}
+
+// TestYAMLParser_MissingExtractTableStep tests error case for missing extract_table step
+func TestYAMLParser_MissingExtractTableStep(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "value", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			// Missing extract_table step
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "data",
+				"target": "value",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	opts := ParserOptions{ErrorAction: "drop"}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	assert.Nil(t, parser)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, "yaml_parser", connErr.Component)
+	assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	assert.Contains(t, err.Error(), "transformation pipeline must include an extract_table step")
+}
+
+// TestYAMLParser_EmptyTableName tests error case for empty table name
+func TestYAMLParser_EmptyTableName(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "value", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"value": "", // Empty table name
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "data",
+				"target": "value",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	opts := ParserOptions{ErrorAction: "drop"}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	require.NoError(t, err)
+
+	// Test message
+	testData := `{"data": 42.5}`
+	msg := &nats.Msg{
+		Subject: "test.subject",
+		Data:    []byte(testData),
+	}
+
+	tables, err := parser.Parse(msg)
+	assert.Nil(t, tables)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, "yaml_parser", connErr.Component)
+	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+	assert.Contains(t, err.Error(), "table name cannot be empty")
+}
+
+// TestYAMLParser_MissingSourceField tests error case for missing source field
+func TestYAMLParser_MissingSourceField(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "value", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"source": "non_existent_field", // Field doesn't exist
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "data",
+				"target": "value",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	opts := ParserOptions{ErrorAction: "drop"}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	require.NoError(t, err)
+
+	// Test message without the required field
+	testData := `{"data": 42.5}`
+	msg := &nats.Msg{
+		Subject: "test.subject",
+		Data:    []byte(testData),
+	}
+
+	tables, err := parser.Parse(msg)
+	assert.Nil(t, tables)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, "yaml_parser", connErr.Component)
+	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+	assert.Contains(t, err.Error(), "source field 'non_existent_field' not found in extract_table")
+}
+
+// TestYAMLParser_TableNameSecurityValidation tests security validation for table names
+func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
+	// Test cases for malicious/invalid table names
+	testCases := []struct {
+		name       string
+		tableName  string
+		shouldFail bool
+		errorMsg   string
+	}{
+		// Valid table names
+		{"valid_basic", "sensors", false, ""},
+		{"valid_with_dots", "finance.nasdaq.aapl", false, ""},
+		{"valid_with_underscores", "network_metrics_v2", false, ""},
+		{"valid_with_hyphens", "industrial-sensors", false, ""},
+		{"valid_mixed", "finance.nasdaq_v2.aapl-data", false, ""},
+		{"valid_numeric_start", "5g_network_metrics", false, ""},
+
+		// Security violations - path traversal
+		{"path_traversal_dotdot", "../../../etc/passwd", true, "path traversal"},
+		{"path_traversal_slash", "table/../../secret", true, "path traversal"},
+		{"path_traversal_backslash", "table\\..\\secret", true, "path traversal"},
+
+		// Invalid characters
+		{"invalid_spaces", "table with spaces", true, "invalid characters"},
+		{"invalid_special_chars", "table@#$%", true, "invalid characters"},
+		{"invalid_parentheses", "table()", true, "invalid characters"},
+		{"invalid_brackets", "table[0]", true, "invalid characters"},
+		{"invalid_semicolon", "table;DROP TABLE", true, "invalid characters"},
+		{"invalid_quotes", "table\"name", true, "invalid characters"},
+		{"invalid_backticks", "table`name", true, "invalid characters"},
+
+		// Format violations
+		{"starts_with_dot", ".hidden_table", true, "invalid characters"},
+		{"starts_with_underscore", "_private_table", true, "invalid characters"},
+		{"starts_with_hyphen", "-bad_table", true, "invalid characters"},
+
+		// Length violations
+		{"empty_name", "", true, "cannot be empty"},
+		{"too_long", strings.Repeat("a", 256), true, "too long"},
+
+		// SQL injection attempts
+		{"sql_injection_1", "table'; DROP TABLE users; --", true, "invalid characters"},
+		{"sql_injection_2", "table OR 1=1", true, "invalid characters"},
+		{"sql_injection_3", "table UNION SELECT", true, "invalid characters"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			config := YAMLConfig{
+				Output: OutputSchema{
+					Columns: []ColumnSchema{
+						{Name: "value", Type: "double"},
+					},
+				},
+				Transformations: []TransformSpec{
+					{Step: "parse_json"},
+					{Step: "extract_table", Config: map[string]interface{}{
+						"value": tc.tableName,
+					}},
+					{Step: "extract_field", Config: map[string]interface{}{
+						"source": "data",
+						"target": "value",
+						"type":   "float64",
+					}},
+				},
+			}
+
+			opts := ParserOptions{ErrorAction: "fail"}
+			parser, err := NewYAMLParserFromConfig(config, opts)
+			require.NoError(t, err)
+
+			// Test message
+			testData := `{"data": 42.5}`
+			msg := &nats.Msg{
+				Subject: "test.subject",
+				Data:    []byte(testData),
+			}
+
+			tables, err := parser.Parse(msg)
+
+			if tc.shouldFail {
+				// Should fail with security error
+				assert.Nil(t, tables)
+				require.Error(t, err, "Expected security validation to fail for table name: %s", tc.tableName)
+
+				var connErr *connectorErrors.ConnectorError
+				require.True(t, errors.As(err, &connErr))
+				assert.Equal(t, "yaml_parser", connErr.Component)
+				assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+				assert.Contains(t, err.Error(), tc.errorMsg)
+			} else {
+				// Should succeed with valid table name
+				require.NoError(t, err, "Valid table name should not fail: %s", tc.tableName)
+				require.Len(t, tables, 1)
+				assert.Equal(t, tc.tableName, tables[0].TableName)
+			}
+		})
+	}
+}
+
+// TestYAMLParser_DynamicTableSecurityValidation tests security for dynamic table names
+func TestYAMLParser_DynamicTableSecurityValidation(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "value", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "table_name",
+				"target": "$table",
+				"type":   "string",
+			}},
+			{Step: "extract_table"}, // Uses dynamic table from field
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "data",
+				"target": "value",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	opts := ParserOptions{ErrorAction: "fail"}
+	parser, err := NewYAMLParserFromConfig(config, opts)
+	require.NoError(t, err)
+
+	// Test with malicious table name in dynamic field
+	maliciousData := `{"table_name": "../../../etc/passwd", "data": 42.5}`
+	msg := &nats.Msg{
+		Subject: "test.subject",
+		Data:    []byte(maliciousData),
+	}
+
+	tables, err := parser.Parse(msg)
+	assert.Nil(t, tables)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, "yaml_parser", connErr.Component)
+	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+	assert.Contains(t, err.Error(), "path traversal")
 }

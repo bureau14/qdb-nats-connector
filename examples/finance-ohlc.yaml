@@ -1,9 +1,9 @@
 # Finance OHLC market data YAML parser configuration
-# Parses JSON messages with nested market metadata and OHLC price data
-# Demonstrates gzip compression handling for high-volume market data
+# Routes data to exchange-specific tables: finance.{exchange}.{symbol}
+# Demonstrates dynamic table routing based on message content
+# Example: AAPL on NASDAQ → "finance.NASDAQ.AAPL", MSFT on NYSE → "finance.NYSE.MSFT"
 
 output:
-  table_name: "finance_ohlc"
   columns:
     - name: "stock_id"
       type: "string"
@@ -30,25 +30,36 @@ transformations:
   - step: "parse_json"
     config: {}
 
-  # Extract and convert timestamp field (Unix timestamp)
-  - step: "extract_index"
+  # Extract exchange and symbol for dynamic table routing (must happen first)
+  - step: "extract_field"
     config:
-      source: "timestamp"
-      format: "unix"
+      source: "market.exchange"
+      target: "exchange"
+      type: "string"
 
-  # Extract stock identifier from nested market metadata
   - step: "extract_field"
     config:
       source: "market.symbol"
       target: "stock_id"
       type: "string"
 
-  # Extract exchange from nested market metadata
-  - step: "extract_field"
+  # Create dynamic table name: finance.{exchange}.{symbol}
+  # This enables routing like: NASDAQ.AAPL → "finance.NASDAQ.AAPL"
+  - step: "compute_field"
     config:
-      source: "market.exchange"
-      target: "exchange"
-      type: "string"
+      operation: "concat"
+      target: "$table"
+      fields: ["finance", ".", "exchange", ".", "stock_id"]
+
+  # Extract the computed table name for dynamic routing
+  - step: "extract_table"
+    # Uses default source: "$table"
+
+  # Extract and convert timestamp field (Unix timestamp)
+  - step: "extract_index"
+    config:
+      source: "timestamp"
+      format: "unix"
 
   # Extract OHLC price data
   - step: "extract_field"

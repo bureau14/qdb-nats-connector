@@ -74,10 +74,28 @@ create() {
         echo "Consumer finance-connector created successfully."
     fi
 
-    # Create QuasarDB table
-    echo "Creating QuasarDB table: finance_ohlc"
-    qdbsh -c "CREATE TABLE finance_ohlc(stock_id STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64, trading_pair STRING)" 2>&1 | grep -v "already exists" || true
-    echo "QuasarDB table creation completed."
+    # Create QuasarDB dynamic tables for each exchange.symbol combination
+    echo "Creating QuasarDB dynamic tables for OHLC data routing..."
+    
+    # Define the tables needed based on the stock symbols and their exchanges
+    declare -a DYNAMIC_TABLES=(
+        "finance.NASDAQ.AAPL"
+        "finance.NASDAQ.GOOGL"
+        "finance.NASDAQ.MSFT"
+        "finance.NASDAQ.AMZN"
+        "finance.NASDAQ.TSLA"
+    )
+    
+    # Schema for all OHLC tables
+    TABLE_SCHEMA="(stock_id STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64, trading_pair STRING)"
+    
+    # Create each dynamic table
+    for table_name in "${DYNAMIC_TABLES[@]}"; do
+        echo "Creating table: $table_name"
+        direnv exec . qdbsh -c "CREATE TABLE \"$table_name\"$TABLE_SCHEMA" 2>&1 | grep -v "already exists" || true
+    done
+    
+    echo "QuasarDB dynamic table creation completed."
 }
 
 load() {

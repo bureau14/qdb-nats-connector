@@ -3,7 +3,6 @@
 # Demonstrates complex nested structure navigation and error handling for missing optional fields
 
 output:
-  table_name: "network_metrics"
   columns:
     - name: "device_id"
       type: "string"
@@ -22,6 +21,11 @@ transformations:
   # Parse incoming JSON message
   - step: "parse_json"
     config: {}
+
+  # Static table name for network metrics
+  - step: "extract_table"
+    config:
+      value: "network_metrics"
 
   # Extract and convert timestamp field (high-precision RFC3339Nano)
   - step: "extract_index"

@@ -3,7 +3,6 @@
 # Demonstrates error handling for malformed temperature readings
 
 output:
-  table_name: "industrial_sensors"
   columns:
     - name: "sensor_id"
       type: "string"
@@ -16,6 +15,11 @@ transformations:
   # Parse incoming JSON message
   - step: "parse_json"
     config: {}
+
+  # Static table name for industrial sensors
+  - step: "extract_table"
+    config:
+      value: "industrial_sensors"
 
   # Extract and convert timestamp field (custom format)
   - step: "extract_index"

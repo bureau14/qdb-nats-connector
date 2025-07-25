@@ -191,6 +191,8 @@ func (s *Sink) pushTables(tables []qdb.WriterTable) error {
 	// Add all tables to the writer
 	for i, table := range tables {
 		slog.Debug("Adding table to writer", "table_index", i, "table_name", table.TableName)
+
+		// IMPORTANT: All data in `table` will be pinned using `runtime.Pinner` inside the QuasarDB Go API
 		err := writer.SetTable(table)
 		if err != nil {
 			slog.Error("Failed to set table in writer", "table_name", table.TableName, "error", err)
@@ -201,6 +203,9 @@ func (s *Sink) pushTables(tables []qdb.WriterTable) error {
 
 	// Push to QuasarDB
 	slog.Debug("Pushing data to QuasarDB")
+
+	// IMPORTANT: This function is synchronous, and **always** returns immediately.
+	// It pins all the memory provided
 	err := writer.Push(s.handle)
 	if err != nil {
 		slog.Error("Failed to push to QuasarDB", "error", err)

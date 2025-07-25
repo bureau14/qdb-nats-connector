@@ -255,6 +255,12 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 // Out: qdb.WriterTable - single-row table
 // Ex: createWriterTable(state) → table
 func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, error) {
+
+	// IMPORTANT: *ALL* data set in `qdb.WriterTable` is subject to memory pinning. This means
+	//            that memory must be stable and pinneable. Specifically, we **MUST NOT** use
+	//            strings made using a StringBuilder for example, as they are not backed by a single
+	//            memory region.
+
 	// Set index - uses parsed index or current time as fallback
 	var ts time.Time
 	if parsedTs, ok := state.Fields["$timestamp"].(time.Time); ok {

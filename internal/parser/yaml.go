@@ -2,6 +2,57 @@
 // Package parser: YAML-based message transformation pipelines
 // Types: YAMLParser, YAMLConfig, ParseState
 // Ex: NewYAMLParser(opts).Parse(msg) → []WriterTable
+//
+// CRITICAL MEMORY PINNING GUIDE FOR DEVELOPERS:
+// ============================================
+//
+// This parser creates data that will be written to QuasarDB, which uses a zero-copy
+// architecture with direct memory access from C++. ALL strings created in this parser
+// MUST be compatible with Go's runtime.Pinner to avoid SEGMENTATION FAULTS.
+//
+// BACKGROUND:
+// QuasarDB's Go API vendored in this project uses an optimization where Go strings
+// are pinned in memory and their underlying byte arrays are accessed directly from
+// C++ code. This is achieved through:
+// - unsafe.StringData() to get the raw memory pointer
+// - runtime.Pinner to prevent the Go garbage collector from moving the memory
+// - Direct pointer passing to C++ for zero-copy operations
+//
+// THE PROBLEM:
+// Some Go string creation methods produce strings that are NOT backed by contiguous
+// memory regions. When QuasarDB tries to pin these strings, it causes a SEGFAULT
+// because the memory layout is incompatible with the pinning mechanism.
+//
+// SAFE STRING CREATION METHODS:
+// ✓ Direct concatenation using + operator
+// ✓ fmt.Sprintf() and other fmt functions
+// ✓ String literals
+// ✓ strconv functions
+// ✓ Simple type conversions
+//
+// UNSAFE STRING CREATION METHODS:
+// ✗ strings.Builder - May use internal optimizations with non-contiguous memory
+// ✗ Buffer pools that don't guarantee contiguous memory
+// ✗ Any custom string building that doesn't ensure single memory region
+//
+// DEBUGGING SEGFAULTS:
+// If you encounter segfaults:
+// 1. Check the stack trace for qdb_batch_push_columns
+// 2. Review ALL string creation in the transformation pipeline
+// 3. Replace strings.Builder with direct concatenation
+// 4. Test with large batches to trigger memory pressure
+// 5. Use race detector: go test -race
+//
+// EXAMPLE FIX:
+// WRONG:
+//   var sb strings.Builder
+//   sb.WriteString(prefix)
+//   sb.WriteString(suffix)
+//   result := sb.String()  // MAY SEGFAULT
+//
+// CORRECT:
+//   result := prefix + suffix  // SAFE
+//
 package parser
 
 import (
@@ -255,11 +306,33 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 // Out: qdb.WriterTable - single-row table
 // Ex: createWriterTable(state) → table
 func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, error) {
-
-	// IMPORTANT: *ALL* data set in `qdb.WriterTable` is subject to memory pinning. This means
-	//            that memory must be stable and pinneable. Specifically, we **MUST NOT** use
-	//            strings made using a StringBuilder for example, as they are not backed by a single
-	//            memory region.
+	// CRITICAL MEMORY PINNING REQUIREMENTS:
+	// =====================================
+	// ALL data written to qdb.WriterTable MUST be compatible with Go's runtime.Pinner.
+	// 
+	// TECHNICAL EXPLANATION:
+	// QuasarDB's vendored API uses zero-copy operations to avoid memory allocation overhead.
+	// This is achieved through:
+	// 1. unsafe.StringData() - Gets direct pointer to string's underlying byte array
+	// 2. runtime.Pinner - Prevents GC from moving pinned memory during C++ API calls
+	// 3. PinToC() method - Pins Go memory for safe access from C++ code
+	//
+	// STRING CREATION RULES:
+	// ✓ SAFE: Direct concatenation using + operator (creates contiguous memory)
+	// ✓ SAFE: fmt.Sprintf() and similar formatting functions
+	// ✓ SAFE: String literals and simple conversions
+	// ✗ UNSAFE: strings.Builder (may use internal optimizations with non-contiguous memory)
+	// ✗ UNSAFE: Any string construction that doesn't guarantee single memory region
+	//
+	// FAILURE MODE:
+	// Using incompatible strings causes SEGMENTATION FAULTS when QuasarDB attempts to pin
+	// non-contiguous memory regions. The error typically occurs during batch.Push() operations
+	// when PinToC() tries to access memory that doesn't exist or has been optimized away.
+	//
+	// DEBUGGING TIPS:
+	// - Segfaults in qdb_batch_push_columns indicate string memory issues
+	// - Check all string construction methods in the data pipeline
+	// - Use direct concatenation (+) instead of strings.Builder for safety
 
 	// Set index - uses parsed index or current time as fallback
 	var ts time.Time
@@ -373,6 +446,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 			}
 		case qdb.TsColumnString:
 			if v, ok := value.(string); ok {
+				// MEMORY PINNING CRITICAL POINT:
+				// This string will be pinned by QuasarDB using runtime.Pinner.
+				// It MUST be backed by contiguous memory or SEGFAULT will occur.
 				// Check buffer bounds before accessing
 				if i >= len(state.stringVals) {
 					slog.Error("Buffer overflow detected in string column!",
@@ -1076,9 +1152,24 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 // In: target, fields[] - output field, inputs
 // Out: TransformationStep - joins strings
 // Ex: makeStringConcatStep("tag_id", [facility,":",tag]) → step
+//
+// MEMORY PINNING WARNING:
+// ======================
+// This function uses direct string concatenation (+= operator) which is SAFE for QuasarDB.
+// 
+// DO NOT REFACTOR TO USE strings.Builder!
+// strings.Builder may use internal optimizations that create non-contiguous memory regions,
+// which will cause SEGMENTATION FAULTS when QuasarDB tries to pin the memory for C++ access.
+//
+// The current implementation guarantees contiguous memory allocation required by:
+// - QuasarDB's PinToC() method
+// - unsafe.StringData() pointer access
+// - runtime.Pinner memory stabilization
+//
+// Any string created here will be written to QuasarDB tables and MUST remain pinnable.
 func makeStringConcatStep(target string, fields []interface{}) TransformationStep {
 	return func(state *ParseState) error {
-		var result strings.Builder
+		var result string  // Direct concatenation - QuasarDB memory-safe
 
 		for _, field := range fields {
 			switch f := field.(type) {
@@ -1086,20 +1177,20 @@ func makeStringConcatStep(target string, fields []interface{}) TransformationSte
 				// Check if it's a literal string (contains no field references)
 				if strings.HasPrefix(f, "\"") && strings.HasSuffix(f, "\"") {
 					// Literal string - strip quotes for direct value
-					result.WriteString(f[1 : len(f)-1])
+					result += f[1:len(f)-1]
 				} else if value, exists := state.Fields[f]; exists {
 					// Field reference - lookup and format value
-					result.WriteString(fmt.Sprintf("%v", value))
+					result += fmt.Sprintf("%v", value)
 				} else {
 					// Missing field - use literal as fallback per ADR-005
-					result.WriteString(f)
+					result += f
 				}
 			default:
-				result.WriteString(fmt.Sprintf("%v", field))
+				result += fmt.Sprintf("%v", field)
 			}
 		}
 
-		state.Fields[target] = result.String()
+		state.Fields[target] = result
 
 		return nil
 	}
@@ -1168,6 +1259,7 @@ func convertFieldValue(value interface{}, targetType string) (interface{}, error
 
 	switch targetType {
 	case "string":
+		// SAFE: fmt.Sprintf creates contiguous memory strings compatible with runtime.Pinner
 		return fmt.Sprintf("%v", value), nil
 	case "int64":
 		switch v := value.(type) {

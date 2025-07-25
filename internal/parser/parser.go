@@ -19,7 +19,26 @@ type ParserOptions struct {
 // Parser: transforms NATS messages into QuasarDB timeseries tables. Needed for pluggable data transformations.
 // Who: connector uses, NoopParser/YAMLParser implement.
 // Parse: converts single message to tables
+//
+// CRITICAL MEMORY PINNING CONTRACT:
+// =================================
+// ALL Parser implementations MUST ensure that strings in WriterTable are compatible
+// with Go's runtime.Pinner. This is a HARD REQUIREMENT due to QuasarDB's zero-copy
+// architecture using unsafe.StringData() and direct memory access from C++.
+//
+// IMPLEMENTATION RULES FOR PARSER AUTHORS:
+// 1. NEVER use strings.Builder for any string that will be written to QuasarDB
+// 2. ALWAYS use direct concatenation (+) or fmt.Sprintf() for string construction
+// 3. String literals and simple conversions are safe
+// 4. Strings from buffers or pools may NOT be contiguous - verify before use
+//
+// TESTING YOUR PARSER:
+// - Run with large batches to trigger memory pressure
+// - Look for segfaults in qdb_batch_push_columns
+// - Use race detector to find memory access issues
+// - Test with concurrent writes to expose pinning problems
 type Parser interface {
 	// Parse transforms single NATS message to QuasarDB tables
+	// Returns: WriterTable slice where ALL strings MUST be pinnable by runtime.Pinner
 	Parse(msg *nats.Msg) ([]qdb.WriterTable, error)
 }

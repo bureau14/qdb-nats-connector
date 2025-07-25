@@ -192,7 +192,22 @@ func (s *Sink) pushTables(tables []qdb.WriterTable) error {
 	for i, table := range tables {
 		slog.Debug("Adding table to writer", "table_index", i, "table_name", table.TableName)
 
-		// IMPORTANT: All data in `table` will be pinned using `runtime.Pinner` inside the QuasarDB Go API
+		// CRITICAL MEMORY PINNING CHECKPOINT:
+		// ===================================
+		// At this point, ALL string data in `table` MUST be pinnable by runtime.Pinner.
+		// QuasarDB's writer.SetTable() and subsequent batch.Push() operations will:
+		// 1. Call PinToC() on each string value
+		// 2. Use unsafe.StringData() to get raw memory pointers
+		// 3. Pin memory using runtime.Pinner to prevent GC movement
+		// 4. Pass pointers directly to C++ code for zero-copy operations
+		//
+		// COMMON FAILURE POINTS:
+		// - strings.Builder generated strings → SEGFAULT
+		// - Strings from certain buffer pools → SEGFAULT
+		// - Any non-contiguous string memory → SEGFAULT
+		//
+		// If you see crashes in qdb_batch_push_columns, check ALL string
+		// creation methods in the parser pipeline. Use + operator for safety.
 		err := writer.SetTable(table)
 		if err != nil {
 			slog.Error("Failed to set table in writer", "table_name", table.TableName, "error", err)

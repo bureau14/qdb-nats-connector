@@ -16,10 +16,30 @@ transformations:
   - step: "parse_json"
     config: {}
 
-  # Static table name for industrial sensors
+  # Extract building and floor information first (needed for table routing)
+  - step: "extract_field"
+    config:
+      source: "building"
+      target: "building"
+      type: "string"
+
+  - step: "extract_field"
+    config:
+      source: "floor"
+      target: "floor"
+      type: "string"
+
+  # Dynamic table routing based on building and floor
+  - step: "compute_field"
+    config:
+      operation: "concat"
+      target: "$table"
+      fields: ["industrial.", "building", ".", "floor"]
+  
+  # Extract table name (required by YAML parser)
   - step: "extract_table"
     config:
-      value: "industrial_sensors"
+      source: "$table"
 
   # Extract and convert timestamp field (custom format)
   - step: "extract_index"
@@ -32,19 +52,6 @@ transformations:
     config:
       source: "sensor.id"
       target: "sensor_id"
-      type: "string"
-
-  # Extract building and floor information
-  - step: "extract_field"
-    config:
-      source: "building"
-      target: "building"
-      type: "string"
-
-  - step: "extract_field"
-    config:
-      source: "floor"
-      target: "floor"
       type: "string"
 
   # Extract temperature measurement with error handling

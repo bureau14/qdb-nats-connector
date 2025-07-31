@@ -45,14 +45,15 @@
 //
 // EXAMPLE FIX:
 // WRONG:
-//   var sb strings.Builder
-//   sb.WriteString(prefix)
-//   sb.WriteString(suffix)
-//   result := sb.String()  // MAY SEGFAULT
+//
+//	var sb strings.Builder
+//	sb.WriteString(prefix)
+//	sb.WriteString(suffix)
+//	result := sb.String()  // MAY SEGFAULT
 //
 // CORRECT:
-//   result := prefix + suffix  // SAFE
 //
+//	result := prefix + suffix  // SAFE
 package parser
 
 import (
@@ -309,7 +310,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 	// CRITICAL MEMORY PINNING REQUIREMENTS:
 	// =====================================
 	// ALL data written to qdb.WriterTable MUST be compatible with Go's runtime.Pinner.
-	// 
+	//
 	// TECHNICAL EXPLANATION:
 	// QuasarDB's vendored API uses zero-copy operations to avoid memory allocation overhead.
 	// This is achieved through:
@@ -363,11 +364,12 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 			fmt.Errorf("table name must be a string, got %T", tableNameField))
 	}
 
-	if tableName == "" {
+	if tableName == "" || tableName == "\x00" {
 		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 			fmt.Errorf("table name cannot be empty"))
 	}
 
+	// Table name already has null terminator from extract_table step
 	// Create table with pre-defined schema - columns were validated at startup
 	table, err := qdb.NewWriterTable(tableName, p.columns)
 	if err != nil {
@@ -378,7 +380,13 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 
 	// Map fields to columns using pre-allocated buffers - thread-safe and efficient
 	for i, col := range p.columns {
-		value, exists := state.Fields[col.ColumnName]
+		// Column names have null terminators, but field names don't
+		// Strip the null terminator for field lookup
+		fieldName := col.ColumnName
+		if len(fieldName) > 0 && fieldName[len(fieldName)-1] == 0 {
+			fieldName = fieldName[:len(fieldName)-1]
+		}
+		value, exists := state.Fields[fieldName]
 		if !exists {
 			continue
 		}
@@ -391,7 +399,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 					slog.Error("Buffer overflow detected in double column!",
 						"column_index", i,
 						"buffer_len", len(state.doubleVals),
-						"column_name", col.ColumnName)
+						"column_name", fieldName)
 
 					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.doubleVals)))
@@ -411,7 +419,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 					slog.Error("Buffer overflow detected in blob column!",
 						"column_index", i,
 						"buffer_len", len(state.blobVals),
-						"column_name", col.ColumnName)
+						"column_name", fieldName)
 
 					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.blobVals)))
@@ -431,7 +439,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 					slog.Error("Buffer overflow detected in int64 column!",
 						"column_index", i,
 						"buffer_len", len(state.int64Vals),
-						"column_name", col.ColumnName)
+						"column_name", fieldName)
 
 					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.int64Vals)))
@@ -454,13 +462,17 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 					slog.Error("Buffer overflow detected in string column!",
 						"column_index", i,
 						"buffer_len", len(state.stringVals),
-						"column_name", col.ColumnName)
+						"column_name", fieldName)
 
 					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.stringVals)))
 				}
-				// Use direct value storage for performance
-				state.stringVals[i] = v
+				// CRITICAL: Create a fresh string allocation to prevent segfaults
+				// The string value 'v' may come from shared memory (e.g., from YAML config
+				// or from compute_field operations). We must create a fresh string that
+				// will remain valid when pinned by QuasarDB.
+				// Using fmt.Sprintf forces a new string allocation on the heap.
+				state.stringVals[i] = fmt.Sprintf("%s", v)
 				data := qdb.NewColumnDataString([]string{state.stringVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
@@ -474,7 +486,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 					slog.Error("Buffer overflow detected in timestamp column!",
 						"column_index", i,
 						"buffer_len", len(state.timestampVals),
-						"column_name", col.ColumnName)
+						"column_name", fieldName)
 
 					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
 						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.timestampVals)))
@@ -687,8 +699,11 @@ func createColumnMapping(columns []ColumnSchema) ([]qdb.WriterColumn, []qdb.TsCo
 	columnTypes := make([]qdb.TsColumnType, len(columns))
 
 	for i, col := range columns {
+		// CRITICAL: Pre-append null terminator to column names to prevent pinStringBytes
+		// from modifying them later. This prevents memory corruption when the same
+		// column definitions are reused across multiple batches.
 		writerColumns[i] = qdb.WriterColumn{
-			ColumnName: col.Name,
+			ColumnName: col.Name + "\x00",
 			ColumnType: stringToColumnType(col.Type),
 		}
 		columnTypes[i] = stringToColumnType(col.Type)
@@ -728,8 +743,9 @@ func validateColumnSynchronization(configColumns []ColumnSchema, writerColumns [
 
 	// Validate column names and types consistency - ensures proper indexing
 	for i, configCol := range configColumns {
-		// Check column name consistency
-		if configCol.Name != writerColumns[i].ColumnName {
+		// Check column name consistency (accounting for null terminator)
+		expectedName := configCol.Name + "\x00"
+		if expectedName != writerColumns[i].ColumnName {
 			return connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("column name mismatch at index %d: config has '%s' but internal mapping has '%s'",
 					i, configCol.Name, writerColumns[i].ColumnName))
@@ -962,7 +978,16 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 		var tableName string
 
 		if hasValue {
-			tableName = value
+			// CRITICAL: Create defensive copy with null terminator to prevent segfault.
+			// QuasarDB's pinStringBytes expects null-terminated strings for table names.
+			// We MUST create a new string for each message to prevent memory corruption
+			// when the same table name is used across multiple batches.
+			// 
+			// Using fmt.Sprintf with explicit null terminator ensures:
+			// 1. A fresh string allocation for each message
+			// 2. The string already has the null terminator QuasarDB expects
+			// 3. pinStringBytes won't modify the string (it checks for existing \0)
+			tableName = fmt.Sprintf("%s\x00", value)
 		} else {
 			field, exists := state.Fields[source]
 			if !exists {
@@ -971,7 +996,9 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 			}
 			// Security fix: only allow string fields to prevent injection
 			if fieldStr, ok := field.(string); ok {
-				tableName = fieldStr
+				// CRITICAL: Create defensive copy with null terminator.
+				// Same reasoning as above for dynamic routing.
+				tableName = fmt.Sprintf("%s\x00", fieldStr)
 			} else {
 				return connectorErrors.NewParsingFailedError("yaml_parser",
 					fmt.Errorf("table name field '%s' must be a string, got %T", source, field))
@@ -979,9 +1006,17 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 		}
 
 		// Security validation: prevent injection attacks
-		err := validateTableName(tableName)
-		if err != nil {
-			return err
+		// Note: We validate before the null terminator is added conceptually,
+		// but since we add it inline above, we need to exclude it from validation
+		if len(tableName) > 0 && tableName[len(tableName)-1] == 0 {
+			err := validateTableName(tableName[:len(tableName)-1])
+			if err != nil {
+				return err
+			}
+		} else {
+			// This shouldn't happen with our code above, but be defensive
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("internal error: table name missing null terminator"))
 		}
 
 		// Store in special field that createWriterTable will read
@@ -1156,7 +1191,7 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 // MEMORY PINNING WARNING:
 // ======================
 // This function uses direct string concatenation (+= operator) which is SAFE for QuasarDB.
-// 
+//
 // DO NOT REFACTOR TO USE strings.Builder!
 // strings.Builder may use internal optimizations that create non-contiguous memory regions,
 // which will cause SEGMENTATION FAULTS when QuasarDB tries to pin the memory for C++ access.
@@ -1169,7 +1204,7 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 // Any string created here will be written to QuasarDB tables and MUST remain pinnable.
 func makeStringConcatStep(target string, fields []interface{}) TransformationStep {
 	return func(state *ParseState) error {
-		var result string  // Direct concatenation - QuasarDB memory-safe
+		var result string // Direct concatenation - QuasarDB memory-safe
 
 		for _, field := range fields {
 			switch f := field.(type) {
@@ -1177,7 +1212,7 @@ func makeStringConcatStep(target string, fields []interface{}) TransformationSte
 				// Check if it's a literal string (contains no field references)
 				if strings.HasPrefix(f, "\"") && strings.HasSuffix(f, "\"") {
 					// Literal string - strip quotes for direct value
-					result += f[1:len(f)-1]
+					result += f[1 : len(f)-1]
 				} else if value, exists := state.Fields[f]; exists {
 					// Field reference - lookup and format value
 					result += fmt.Sprintf("%v", value)

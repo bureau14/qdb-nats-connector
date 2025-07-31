@@ -22,6 +22,14 @@ import (
 	"pgregory.net/rapid"
 )
 
+// stripNullTerminator removes trailing null byte from string if present
+func stripNullTerminator(s string) string {
+	if len(s) > 0 && s[len(s)-1] == 0 {
+		return s[:len(s)-1]
+	}
+	return s
+}
+
 // TestYAMLParserConfigurationErrors validates config error handling
 func TestYAMLParserConfigurationErrors(t *testing.T) {
 	t.Run("missing config file", func(t *testing.T) {
@@ -340,7 +348,7 @@ func TestYAMLParserValidParsing(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "sensors", table.GetName())
+		assert.Equal(t, "sensors", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 
@@ -362,7 +370,7 @@ func TestYAMLParserValidParsing(t *testing.T) {
 			require.Len(t, tables, 1)
 
 			table := tables[0]
-			assert.Equal(t, "sensors", table.GetName())
+			assert.Equal(t, "sensors", stripNullTerminator(table.GetName()))
 			assert.Equal(t, 1, table.RowCount())
 		})
 	})
@@ -410,7 +418,7 @@ func TestYAMLParserTimestamp(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "events", table.GetName())
+		assert.Equal(t, "events", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 
@@ -435,7 +443,7 @@ func TestYAMLParserTimestamp(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "events", table.GetName())
+		assert.Equal(t, "events", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 }
@@ -451,6 +459,9 @@ func TestYAMLParserComputeField(t *testing.T) {
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"value": "computed",
+			}},
 			{Step: "compute_field", Config: map[string]interface{}{
 				"operation": "concat",
 				"target":    "tag_id",
@@ -482,7 +493,7 @@ func TestYAMLParserComputeField(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "computed", table.GetName())
+		assert.Equal(t, "computed", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 }
@@ -498,6 +509,9 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"value": "numbers",
+			}},
 			{Step: "extract_field", Config: map[string]interface{}{
 				"source": "raw",
 				"target": "original",
@@ -529,7 +543,7 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "numbers", table.GetName())
+		assert.Equal(t, "numbers", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 
@@ -545,7 +559,7 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "numbers", table.GetName())
+		assert.Equal(t, "numbers", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 }
@@ -558,6 +572,9 @@ func TestYAMLParserErrorHandling(t *testing.T) {
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"value": "test",
+			}},
 			{Step: "extract_field", Config: map[string]interface{}{
 				"source": "nonexistent",
 				"target": "value",
@@ -586,7 +603,7 @@ func TestYAMLParserErrorHandling(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "test", table.GetName())
+		assert.Equal(t, "test", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 
@@ -625,7 +642,7 @@ func TestYAMLParserInterfaceCompliance(t *testing.T) {
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
 			{Step: "extract_table", Config: map[string]interface{}{
-				"value": "sensors",
+				"value": "test",
 			}},
 			{Step: "extract_field", Config: map[string]interface{}{
 				"source": "val",
@@ -656,7 +673,7 @@ func TestYAMLParserInterfaceCompliance(t *testing.T) {
 	require.Len(t, tables, 1)
 
 	table := tables[0]
-	assert.Equal(t, "test", table.GetName())
+	assert.Equal(t, "test", stripNullTerminator(table.GetName()))
 	assert.Equal(t, 1, table.RowCount())
 }
 
@@ -673,6 +690,9 @@ func TestYAMLParserTransformationSteps(t *testing.T) {
 					"algorithm": "gzip",
 				}},
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "test",
+				}},
 				{Step: "extract_field", Config: map[string]interface{}{
 					"source": "msg",
 					"target": "value",
@@ -701,7 +721,7 @@ func TestYAMLParserTransformationSteps(t *testing.T) {
 		require.Len(t, tables, 1)
 
 		table := tables[0]
-		assert.Equal(t, "test", table.GetName())
+		assert.Equal(t, "test", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
 }
@@ -748,9 +768,9 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		// Verify internal state matches configuration
 		assert.Equal(t, 3, len(parser.columns))
 		assert.Equal(t, 3, len(parser.columnTypes))
-		assert.Equal(t, "temp", parser.columns[0].ColumnName)
-		assert.Equal(t, "humidity", parser.columns[1].ColumnName)
-		assert.Equal(t, "location", parser.columns[2].ColumnName)
+		assert.Equal(t, "temp\x00", parser.columns[0].ColumnName)
+		assert.Equal(t, "humidity\x00", parser.columns[1].ColumnName)
+		assert.Equal(t, "location\x00", parser.columns[2].ColumnName)
 
 		msg := &nats.Msg{
 			Subject: util.RandomTopicName(),
@@ -760,7 +780,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		tables, err := parser.Parse(msg)
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
-		assert.Equal(t, "sensors", tables[0].GetName())
+		assert.Equal(t, "sensors", stripNullTerminator(tables[0].GetName()))
 	})
 
 	t.Run("buffer bounds validation - all column types", func(t *testing.T) {
@@ -777,6 +797,9 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "all_types",
+				}},
 				{Step: "extract_index", Config: map[string]interface{}{
 					"source": "ts",
 					"format": "unix",
@@ -824,6 +847,9 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "consistency_test",
+				}},
 			},
 		}
 
@@ -831,10 +857,10 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		parser, err := NewYAMLParserFromConfig(config, opts)
 		require.NoError(t, err)
 
-		// Verify that internal column mapping preserves exact names from config
+		// Verify that internal column mapping preserves exact names from config (with null terminator)
 		require.Equal(t, 3, len(parser.columns))
 		for i, expectedCol := range config.Output.Columns {
-			assert.Equal(t, expectedCol.Name, parser.columns[i].ColumnName)
+			assert.Equal(t, expectedCol.Name+"\x00", parser.columns[i].ColumnName)
 		}
 
 		// Test parsing with matching field names
@@ -884,6 +910,9 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "bounds_test",
+				}},
 			},
 		}
 
@@ -900,7 +929,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		tables, err := parser.Parse(msg)
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
-		assert.Equal(t, "bounds_test", tables[0].GetName())
+		assert.Equal(t, "bounds_test", stripNullTerminator(tables[0].GetName()))
 
 		// Test internal buffer sizes match column count by creating a new state
 		state := parser.newParseState()
@@ -925,6 +954,9 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "type_test",
+				}},
 			},
 		}
 
@@ -959,6 +991,9 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 			Transformations: []TransformSpec{
 				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "memory_test",
+				}},
 			},
 		}
 
@@ -1012,7 +1047,7 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		assert.Equal(t, len(config.Output.Columns), len(parser.columnTypes))
 
 		for i, configCol := range config.Output.Columns {
-			assert.Equal(t, configCol.Name, parser.columns[i].ColumnName)
+			assert.Equal(t, configCol.Name+"\x00", parser.columns[i].ColumnName)
 			assert.Equal(t, stringToColumnType(configCol.Type), parser.columnTypes[i])
 			assert.Equal(t, stringToColumnType(configCol.Type), parser.columns[i].ColumnType)
 		}
@@ -1026,8 +1061,8 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		}
 
 		writerColumns := []qdb.WriterColumn{
-			{ColumnName: "temp", ColumnType: qdb.TsColumnDouble},
-			{ColumnName: "humid", ColumnType: qdb.TsColumnInt64},
+			{ColumnName: "temp\x00", ColumnType: qdb.TsColumnDouble},
+			{ColumnName: "humid\x00", ColumnType: qdb.TsColumnInt64},
 		}
 
 		columnTypes := []qdb.TsColumnType{
@@ -1048,8 +1083,8 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		}
 
 		writerColumns := []qdb.WriterColumn{
-			{ColumnName: "temp", ColumnType: qdb.TsColumnDouble},
-			{ColumnName: "humid", ColumnType: qdb.TsColumnInt64},
+			{ColumnName: "temp\x00", ColumnType: qdb.TsColumnDouble},
+			{ColumnName: "humid\x00", ColumnType: qdb.TsColumnInt64},
 		}
 
 		columnTypes := []qdb.TsColumnType{
@@ -1074,8 +1109,8 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		}
 
 		writerColumns := []qdb.WriterColumn{
-			{ColumnName: "temp", ColumnType: qdb.TsColumnDouble}, // Different name
-			{ColumnName: "humidity", ColumnType: qdb.TsColumnInt64},
+			{ColumnName: "temp\x00", ColumnType: qdb.TsColumnDouble}, // Different name (missing null terminator test)
+			{ColumnName: "humidity\x00", ColumnType: qdb.TsColumnInt64},
 		}
 
 		columnTypes := []qdb.TsColumnType{
@@ -1090,7 +1125,7 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		require.True(t, errors.As(err, &connErr))
 		assert.Equal(t, "yaml_parser", connErr.Component)
 		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
-		assert.Contains(t, err.Error(), "column name mismatch at index 0: config has 'temperature' but internal mapping has 'temp'")
+		assert.Contains(t, err.Error(), "column name mismatch at index 0: config has 'temperature' but internal mapping has 'temp\x00'")
 	})
 
 	t.Run("column type mismatch detected", func(t *testing.T) {
@@ -1100,8 +1135,8 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		}
 
 		writerColumns := []qdb.WriterColumn{
-			{ColumnName: "temp", ColumnType: qdb.TsColumnDouble},
-			{ColumnName: "humid", ColumnType: qdb.TsColumnInt64}, // Different type
+			{ColumnName: "temp\x00", ColumnType: qdb.TsColumnDouble},
+			{ColumnName: "humid\x00", ColumnType: qdb.TsColumnInt64}, // Different type
 		}
 
 		columnTypes := []qdb.TsColumnType{
@@ -1126,7 +1161,7 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 		}
 
 		writerColumns := []qdb.WriterColumn{
-			{ColumnName: "temp", ColumnType: qdb.TsColumnDouble},
+			{ColumnName: "temp\x00", ColumnType: qdb.TsColumnDouble},
 		} // Missing second column
 
 		columnTypes := []qdb.TsColumnType{
@@ -1182,7 +1217,7 @@ func TestYAMLParser_ExtractTableStatic(t *testing.T) {
 	require.Len(t, tables, 1)
 
 	// Verify table name
-	assert.Equal(t, "static_table_name", tables[0].TableName)
+	assert.Equal(t, "static_table_name", stripNullTerminator(tables[0].TableName))
 }
 
 // TestYAMLParser_ExtractTableDynamic tests dynamic table from field
@@ -1225,7 +1260,7 @@ func TestYAMLParser_ExtractTableDynamic(t *testing.T) {
 	require.Len(t, tables, 1)
 
 	// Verify dynamic table name
-	assert.Equal(t, "dynamic_sensors", tables[0].TableName)
+	assert.Equal(t, "dynamic_sensors", stripNullTerminator(tables[0].TableName))
 }
 
 // TestYAMLParser_ExtractTableFromComputedField tests complex dynamic routing
@@ -1280,7 +1315,7 @@ func TestYAMLParser_ExtractTableFromComputedField(t *testing.T) {
 	require.Len(t, tables, 1)
 
 	// Verify computed table name
-	assert.Equal(t, "finance.NASDAQ.AAPL", tables[0].TableName)
+	assert.Equal(t, "finance.NASDAQ.AAPL", stripNullTerminator(tables[0].TableName))
 }
 
 // TestYAMLParser_MissingExtractTableStep tests error case for missing extract_table step
@@ -1335,7 +1370,7 @@ func TestYAMLParser_EmptyTableName(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "drop"}
+	opts := ParserOptions{ErrorAction: "fail"}
 	parser, err := NewYAMLParserFromConfig(config, opts)
 	require.NoError(t, err)
 
@@ -1378,7 +1413,7 @@ func TestYAMLParser_MissingSourceField(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "drop"}
+	opts := ParserOptions{ErrorAction: "fail"}
 	parser, err := NewYAMLParserFromConfig(config, opts)
 	require.NoError(t, err)
 
@@ -1494,7 +1529,7 @@ func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
 				// Should succeed with valid table name
 				require.NoError(t, err, "Valid table name should not fail: %s", tc.tableName)
 				require.Len(t, tables, 1)
-				assert.Equal(t, tc.tableName, tables[0].TableName)
+				assert.Equal(t, tc.tableName, stripNullTerminator(tables[0].TableName))
 			}
 		})
 	}

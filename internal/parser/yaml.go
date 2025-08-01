@@ -472,7 +472,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 				// or from compute_field operations). We must create a fresh string that
 				// will remain valid when pinned by QuasarDB.
 				// Using fmt.Sprintf forces a new string allocation on the heap.
-				state.stringVals[i] = fmt.Sprintf("%s", v)
+				state.stringVals[i] = v
 				data := qdb.NewColumnDataString([]string{state.stringVals[i]})
 				err := table.SetData(i, &data)
 				if err != nil {
@@ -982,7 +982,7 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 			// QuasarDB's pinStringBytes expects null-terminated strings for table names.
 			// We MUST create a new string for each message to prevent memory corruption
 			// when the same table name is used across multiple batches.
-			// 
+			//
 			// Using fmt.Sprintf with explicit null terminator ensures:
 			// 1. A fresh string allocation for each message
 			// 2. The string already has the null terminator QuasarDB expects

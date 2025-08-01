@@ -19,7 +19,7 @@ SUBJECT="industrial.temperature"
 NUM_MESSAGES="${NUM_MESSAGES:-1000}"
 PID_FILE="$SCRIPT_DIR/industrial-sensor-connector.pid"
 LOG_FILE="$SCRIPT_DIR/industrial-sensor-connector.log"
-CONNECTOR_BINARY="$SCRIPT_DIR/../qdb-nats-connector"
+CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
 EXPORT_DIR="$SCRIPT_DIR/exports"
 TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
 

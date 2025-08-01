@@ -158,7 +158,7 @@ define run_test_workflow
 
 	# Step 1: Create infrastructure
 	@$(call LOG_INFO,Step 1/8: Creating infrastructure for $(1))
-	@./$(1).sh create || { $(call LOG_ERROR,Failed to create infrastructure for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
+	@./$(1).sh create 2>&1 || { $(call LOG_ERROR,Failed to create infrastructure for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
 
 	# Step 2: Generate test data (skip if using extracted data)
 	@$(call LOG_INFO,Step 2/8: Preparing test data for $(1))
@@ -167,28 +167,28 @@ define run_test_workflow
 		export TESTDATA_DIR="$(TESTDATA_DIR)/$(1)-$(2)"; \
 	else \
 		$(call LOG_INFO,Generating fresh test data for $(1)); \
-		NUM_MESSAGES=$(3) ./$(1).sh generate || { $(call LOG_ERROR,Failed to generate data for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }; \
+		NUM_MESSAGES=$(3) ./$(1).sh generate 2>&1 || { $(call LOG_ERROR,Failed to generate data for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }; \
 	fi
 
 	# Step 3: Load data into NATS
 	@$(call LOG_INFO,Step 3/8: Loading data for $(1))
-	@NUM_MESSAGES=$(3) ./$(1).sh load || { $(call LOG_ERROR,Failed to load data for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
+	@NUM_MESSAGES=$(3) ./$(1).sh load 2>&1 || { $(call LOG_ERROR,Failed to load data for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
 
 	# Step 4: Start connector
 	@$(call LOG_INFO,Step 4/8: Starting connector for $(1))
-	@NUM_MESSAGES=$(3) ./$(1).sh run || { $(call LOG_ERROR,Failed to start connector for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
+	@NUM_MESSAGES=$(3) ./$(1).sh run 2>&1 || { $(call LOG_ERROR,Failed to start connector for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
 
 	# Step 5: Wait for processing completion
 	@$(call LOG_INFO,Step 5/8: Waiting for processing completion for $(1))
-	@NUM_MESSAGES=$(3) ./$(1).sh wait || { $(call LOG_ERROR,Processing failed for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
+	@NUM_MESSAGES=$(3) ./$(1).sh wait 2>&1 || { $(call LOG_ERROR,Processing failed for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
 
 	# Step 6: Export results
 	@$(call LOG_INFO,Step 6/8: Exporting results for $(1))
-	@./$(1).sh export || { $(call LOG_ERROR,Failed to export results for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
+	@./$(1).sh export 2>&1 || { $(call LOG_ERROR,Failed to export results for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
 
 	# Step 7: Stop connector
 	@$(call LOG_INFO,Step 7/8: Stopping connector for $(1))
-	@./$(1).sh stop || $(call LOG_WARNING,Failed to stop connector gracefully for $(1))
+	@./$(1).sh stop 2>&1 || $(call LOG_WARNING,Failed to stop connector gracefully for $(1))
 
 	# Step 8: Validate results (if golden data exists)
 	@$(call LOG_INFO,Step 8/8: Validating results for $(1))
@@ -272,27 +272,27 @@ test-quick-parallel: ## Run all quick tests in parallel
 .PHONY: generate-golden-finance-ohlc-10k
 generate-golden-finance-ohlc-10k: ## Generate golden data for finance-ohlc (10k records)
 	@$(call LOG_INFO,Generating golden data: finance-ohlc 10k records)
-	@NUM_MESSAGES=10000 ./finance-ohlc.sh create
-	@NUM_MESSAGES=10000 ./finance-ohlc.sh generate
-	@NUM_MESSAGES=10000 ./finance-ohlc.sh load
-	@NUM_MESSAGES=10000 ./finance-ohlc.sh run
-	@NUM_MESSAGES=10000 ./finance-ohlc.sh wait
-	@./finance-ohlc.sh export
-	@./finance-ohlc.sh stop
-	@./finance-ohlc.sh prepare-golden
+	@NUM_MESSAGES=10000 ./finance-ohlc.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
+	@NUM_MESSAGES=10000 ./finance-ohlc.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
+	@NUM_MESSAGES=10000 ./finance-ohlc.sh load || { $(call LOG_ERROR,Failed at load step); exit 1; }
+	@NUM_MESSAGES=10000 ./finance-ohlc.sh run || { $(call LOG_ERROR,Failed at run step); exit 1; }
+	@NUM_MESSAGES=10000 ./finance-ohlc.sh wait || { $(call LOG_ERROR,Failed at wait step); exit 1; }
+	@./finance-ohlc.sh export || { $(call LOG_ERROR,Failed at export step); exit 1; }
+	@./finance-ohlc.sh stop || { $(call LOG_ERROR,Failed at stop step); exit 1; }
+	@./finance-ohlc.sh prepare-golden || { $(call LOG_ERROR,Failed at prepare-golden step); exit 1; }
 	@$(call LOG_SUCCESS,Golden data generated: finance-ohlc 10k records)
 
 .PHONY: generate-golden-finance-ohlc-1m
 generate-golden-finance-ohlc-1m: ## Generate golden data for finance-ohlc (1M records)
 	@$(call LOG_INFO,Generating golden data: finance-ohlc 1M records)
-	@NUM_MESSAGES=1000000 ./finance-ohlc.sh create
-	@NUM_MESSAGES=1000000 ./finance-ohlc.sh generate
-	@NUM_MESSAGES=1000000 ./finance-ohlc.sh load
-	@NUM_MESSAGES=1000000 ./finance-ohlc.sh run
-	@NUM_MESSAGES=1000000 ./finance-ohlc.sh wait
-	@./finance-ohlc.sh export
-	@./finance-ohlc.sh stop
-	@./finance-ohlc.sh prepare-golden
+	@NUM_MESSAGES=1000000 ./finance-ohlc.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
+	@NUM_MESSAGES=1000000 ./finance-ohlc.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
+	@NUM_MESSAGES=1000000 ./finance-ohlc.sh load || { $(call LOG_ERROR,Failed at load step); exit 1; }
+	@NUM_MESSAGES=1000000 ./finance-ohlc.sh run || { $(call LOG_ERROR,Failed at run step); exit 1; }
+	@NUM_MESSAGES=1000000 ./finance-ohlc.sh wait || { $(call LOG_ERROR,Failed at wait step); exit 1; }
+	@./finance-ohlc.sh export || { $(call LOG_ERROR,Failed at export step); exit 1; }
+	@./finance-ohlc.sh stop || { $(call LOG_ERROR,Failed at stop step); exit 1; }
+	@./finance-ohlc.sh prepare-golden || { $(call LOG_ERROR,Failed at prepare-golden step); exit 1; }
 	@$(call LOG_SUCCESS,Golden data generated: finance-ohlc 1M records)
 
 # Package golden data for distribution
@@ -312,27 +312,27 @@ package-golden-finance-ohlc-1m: generate-golden-finance-ohlc-1m ## Package golde
 .PHONY: generate-golden-industrial-sensor-10k
 generate-golden-industrial-sensor-10k: ## Generate golden data for industrial-sensor (10k records)
 	@$(call LOG_INFO,Generating golden data: industrial-sensor 10k records)
-	@NUM_MESSAGES=10000 ./industrial-sensor.sh create
-	@NUM_MESSAGES=10000 ./industrial-sensor.sh generate
-	@NUM_MESSAGES=10000 ./industrial-sensor.sh load
-	@NUM_MESSAGES=10000 ./industrial-sensor.sh run
-	@NUM_MESSAGES=10000 ./industrial-sensor.sh wait
-	@./industrial-sensor.sh export
-	@./industrial-sensor.sh stop
-	@./industrial-sensor.sh prepare-golden
+	@NUM_MESSAGES=10000 ./industrial-sensor.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
+	@NUM_MESSAGES=10000 ./industrial-sensor.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
+	@NUM_MESSAGES=10000 ./industrial-sensor.sh load || { $(call LOG_ERROR,Failed at load step); exit 1; }
+	@NUM_MESSAGES=10000 ./industrial-sensor.sh run || { $(call LOG_ERROR,Failed at run step); exit 1; }
+	@NUM_MESSAGES=10000 ./industrial-sensor.sh wait || { $(call LOG_ERROR,Failed at wait step); exit 1; }
+	@./industrial-sensor.sh export || { $(call LOG_ERROR,Failed at export step); exit 1; }
+	@./industrial-sensor.sh stop || { $(call LOG_ERROR,Failed at stop step); exit 1; }
+	@./industrial-sensor.sh prepare-golden || { $(call LOG_ERROR,Failed at prepare-golden step); exit 1; }
 	@$(call LOG_SUCCESS,Golden data generated: industrial-sensor 10k records)
 
 .PHONY: generate-golden-industrial-sensor-1m
 generate-golden-industrial-sensor-1m: ## Generate golden data for industrial-sensor (1M records)
 	@$(call LOG_INFO,Generating golden data: industrial-sensor 1M records)
-	@NUM_MESSAGES=1000000 ./industrial-sensor.sh create
-	@NUM_MESSAGES=1000000 ./industrial-sensor.sh generate
-	@NUM_MESSAGES=1000000 ./industrial-sensor.sh load
-	@NUM_MESSAGES=1000000 ./industrial-sensor.sh run
-	@NUM_MESSAGES=1000000 ./industrial-sensor.sh wait
-	@./industrial-sensor.sh export
-	@./industrial-sensor.sh stop
-	@./industrial-sensor.sh prepare-golden
+	@NUM_MESSAGES=1000000 ./industrial-sensor.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
+	@NUM_MESSAGES=1000000 ./industrial-sensor.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
+	@NUM_MESSAGES=1000000 ./industrial-sensor.sh load || { $(call LOG_ERROR,Failed at load step); exit 1; }
+	@NUM_MESSAGES=1000000 ./industrial-sensor.sh run || { $(call LOG_ERROR,Failed at run step); exit 1; }
+	@NUM_MESSAGES=1000000 ./industrial-sensor.sh wait || { $(call LOG_ERROR,Failed at wait step); exit 1; }
+	@./industrial-sensor.sh export || { $(call LOG_ERROR,Failed at export step); exit 1; }
+	@./industrial-sensor.sh stop || { $(call LOG_ERROR,Failed at stop step); exit 1; }
+	@./industrial-sensor.sh prepare-golden || { $(call LOG_ERROR,Failed at prepare-golden step); exit 1; }
 	@$(call LOG_SUCCESS,Golden data generated: industrial-sensor 1M records)
 
 # Package golden data for distribution
@@ -352,27 +352,27 @@ package-golden-industrial-sensor-1m: generate-golden-industrial-sensor-1m ## Pac
 .PHONY: generate-golden-network-metrics-10k
 generate-golden-network-metrics-10k: ## Generate golden data for network-metrics (10k records)
 	@$(call LOG_INFO,Generating golden data: network-metrics 10k records)
-	@NUM_MESSAGES=10000 ./network-metrics.sh create
-	@NUM_MESSAGES=10000 ./network-metrics.sh generate
-	@NUM_MESSAGES=10000 ./network-metrics.sh load
-	@NUM_MESSAGES=10000 ./network-metrics.sh run
-	@NUM_MESSAGES=10000 ./network-metrics.sh wait
-	@./network-metrics.sh export
-	@./network-metrics.sh stop
-	@./network-metrics.sh prepare-golden
+	@NUM_MESSAGES=10000 ./network-metrics.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
+	@NUM_MESSAGES=10000 ./network-metrics.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
+	@NUM_MESSAGES=10000 ./network-metrics.sh load || { $(call LOG_ERROR,Failed at load step); exit 1; }
+	@NUM_MESSAGES=10000 ./network-metrics.sh run || { $(call LOG_ERROR,Failed at run step); exit 1; }
+	@NUM_MESSAGES=10000 ./network-metrics.sh wait || { $(call LOG_ERROR,Failed at wait step); exit 1; }
+	@./network-metrics.sh export || { $(call LOG_ERROR,Failed at export step); exit 1; }
+	@./network-metrics.sh stop || { $(call LOG_ERROR,Failed at stop step); exit 1; }
+	@./network-metrics.sh prepare-golden || { $(call LOG_ERROR,Failed at prepare-golden step); exit 1; }
 	@$(call LOG_SUCCESS,Golden data generated: network-metrics 10k records)
 
 .PHONY: generate-golden-network-metrics-1m
 generate-golden-network-metrics-1m: ## Generate golden data for network-metrics (1M records)
 	@$(call LOG_INFO,Generating golden data: network-metrics 1M records)
-	@NUM_MESSAGES=1000000 ./network-metrics.sh create
-	@NUM_MESSAGES=1000000 ./network-metrics.sh generate
-	@NUM_MESSAGES=1000000 ./network-metrics.sh load
-	@NUM_MESSAGES=1000000 ./network-metrics.sh run
-	@NUM_MESSAGES=1000000 ./network-metrics.sh wait
-	@./network-metrics.sh export
-	@./network-metrics.sh stop
-	@./network-metrics.sh prepare-golden
+	@NUM_MESSAGES=1000000 ./network-metrics.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
+	@NUM_MESSAGES=1000000 ./network-metrics.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
+	@NUM_MESSAGES=1000000 ./network-metrics.sh load || { $(call LOG_ERROR,Failed at load step); exit 1; }
+	@NUM_MESSAGES=1000000 ./network-metrics.sh run || { $(call LOG_ERROR,Failed at run step); exit 1; }
+	@NUM_MESSAGES=1000000 ./network-metrics.sh wait || { $(call LOG_ERROR,Failed at wait step); exit 1; }
+	@./network-metrics.sh export || { $(call LOG_ERROR,Failed at export step); exit 1; }
+	@./network-metrics.sh stop || { $(call LOG_ERROR,Failed at stop step); exit 1; }
+	@./network-metrics.sh prepare-golden || { $(call LOG_ERROR,Failed at prepare-golden step); exit 1; }
 	@$(call LOG_SUCCESS,Golden data generated: network-metrics 1M records)
 
 # Package golden data for distribution

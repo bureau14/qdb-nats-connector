@@ -38,7 +38,7 @@ SUBJECT="network.metrics"
 NUM_MESSAGES="${NUM_MESSAGES:-1000}"
 PID_FILE="$SCRIPT_DIR/network-metrics-connector.pid"
 LOG_FILE="$SCRIPT_DIR/network-metrics-connector.log"
-CONNECTOR_BINARY="$SCRIPT_DIR/../qdb-nats-connector"
+CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
 EXPORT_DIR="$SCRIPT_DIR/exports"
 TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
 
@@ -281,14 +281,15 @@ Visit: https://docs.nats.io/using-nats/nats-tools/nats_cli"
     fi
 
     # Create QuasarDB table with better error handling
-    log_info "Creating QuasarDB table: $TABLE_NAME"
-
+    log_info "Creating QuasarDB table for network metrics..."
+    
     # Silent cleanup: Drop existing table if it exists
     log_debug "Cleaning up existing QuasarDB table if present..."
     drop_table_if_exists "$TABLE_NAME"
 
     local table_schema="(device_id STRING, bytes_in INT64, bytes_out INT64, packets_dropped INT64, latency_ms DOUBLE, device_path STRING)"
 
+    # Create the network_metrics table
     log_debug "Creating table with schema: $TABLE_NAME $table_schema"
     if ! qdbsh -c "CREATE TABLE \"$TABLE_NAME\"$table_schema"; then
         die "Failed to create QuasarDB table '$TABLE_NAME'. Check:
@@ -296,7 +297,6 @@ Visit: https://docs.nats.io/using-nats/nats-tools/nats_cli"
   - You have permission to create tables
   - The table schema is valid: $table_schema"
     fi
-
     log_info "QuasarDB table '$TABLE_NAME' created successfully"
     log_info "Setup completed - NATS stream and QuasarDB table are ready"
 }
@@ -304,6 +304,9 @@ Visit: https://docs.nats.io/using-nats/nats-tools/nats_cli"
 # Load generated data into NATS JetStream
 action_load() {
     log_info "Loading data into NATS JetStream..."
+    
+    # Start timing
+    local start_time=$(date +%s.%N)
 
     # Validate environment first
     validate_environment
@@ -324,6 +327,9 @@ action_load() {
     local lines_count
     lines_count=$(wc -l < "$DATA_FILE")
     log_info "Publishing $lines_count network metrics messages to $SUBJECT using parallel processing..."
+    
+    # Log start of publishing
+    local publish_start_time=$(date +%s.%N)
 
     # Create a temporary file to track publishing results
     local temp_results
@@ -334,6 +340,12 @@ action_load() {
     export SUBJECT
     export NATS_URL
 
+    # Log parallel settings
+    log_info "Parallel processing configuration:"
+    log_info "  - CPU cores available: $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 'unknown')"
+    log_info "  - Batch size: 100 messages per job"
+    log_info "  - Total batches: $((lines_count / 100 + (lines_count % 100 > 0 ? 1 : 0)))"
+    
     # Use parallel to process messages in batches
     # -j+0: use all available CPU cores
     # --pipe: read from stdin
@@ -343,6 +355,7 @@ action_load() {
         batch_num=\$((PARALLEL_SEQ))
         published_in_batch=0
         failed_in_batch=0
+        batch_start=\$(date +%s.%N)
 
         while IFS= read -r line; do
             if [[ -n \"\$line\" ]]; then
@@ -355,8 +368,11 @@ action_load() {
             fi
         done
 
-        # Report batch results
-        echo \"Batch \$batch_num: published \$published_in_batch, failed \$failed_in_batch\"
+        batch_end=\$(date +%s.%N)
+        batch_duration=\$(echo \"\$batch_end - \$batch_start\" | bc)
+        
+        # Report batch results with timing
+        echo \"Batch \$batch_num: published \$published_in_batch, failed \$failed_in_batch, duration: \${batch_duration}s\"
 
         # Exit with error if any failures in this batch
         if [[ \$failed_in_batch -gt 0 ]]; then
@@ -398,6 +414,19 @@ action_load() {
     fi
 
     log_info "Data loaded successfully ($total_published messages published)"
+    
+    # Calculate and log elapsed time
+    local publish_end_time=$(date +%s.%N)
+    local end_time=$(date +%s.%N)
+    local publish_duration=$(echo "$publish_end_time - $publish_start_time" | bc)
+    local total_duration=$(echo "$end_time - $start_time" | bc)
+    local messages_per_second=$(echo "scale=2; $total_published / $publish_duration" | bc)
+    
+    log_info "Performance metrics:"
+    log_info "  - Publishing duration: ${publish_duration}s"
+    log_info "  - Total duration: ${total_duration}s"
+    log_info "  - Messages per second: ${messages_per_second}"
+    log_info "  - Average latency per message: $(echo "scale=3; $publish_duration * 1000 / $total_published" | bc)ms"
 
     # Clean up temporary file
     rm -f "$temp_results"
@@ -533,10 +562,11 @@ Please make it executable with: chmod +x $CONNECTOR_BINARY"
     else
         log_debug "Log file confirmed: $(wc -l < "$LOG_FILE") lines written"
         
-        # Check for immediate error messages in the log
-        if grep -q -i "error\|fatal\|panic" "$LOG_FILE" 2>/dev/null; then
+        # Check for immediate error messages in the log (excluding direnv loading messages)
+        # Filter out false positives like "direnv: loading" which contains "error" in the path
+        if grep -v "^.*direnv: loading" "$LOG_FILE" 2>/dev/null | grep -q -i "error\|fatal\|panic"; then
             log_error "Errors detected in startup logs:"
-            grep -i "error\|fatal\|panic" "$LOG_FILE" | head -5 >&2
+            grep -v "^.*direnv: loading" "$LOG_FILE" | grep -i "error\|fatal\|panic" | head -5 >&2
             log_error "Full log available at: $LOG_FILE"
             # Don't kill the process - let the user decide based on the error
         fi

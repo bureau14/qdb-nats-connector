@@ -1,6 +1,5 @@
-# Network device metrics YAML parser configuration
-# Parses JSON messages with deep nested device hierarchy and network performance metrics
-# Demonstrates complex nested structure navigation and error handling for missing optional fields
+# Network device metrics YAML parser configuration with static table routing
+# Uses single table: network_metrics
 
 output:
   columns:
@@ -22,7 +21,7 @@ transformations:
   - step: "parse_json"
     config: {}
 
-  # Static table name for network metrics
+  # Static table routing to network_metrics table
   - step: "extract_table"
     config:
       value: "network_metrics"
@@ -60,19 +59,6 @@ transformations:
       type: "int64"
       on_error: "skip"
 
-  # Extract datacenter and rack information
-  - step: "extract_field"
-    config:
-      source: "datacenter"
-      target: "datacenter"
-      type: "string"
-
-  - step: "extract_field"
-    config:
-      source: "rack"
-      target: "rack"
-      type: "string"
-
   # Extract latency metric from deep nested structure
   - step: "extract_field"
     config:
@@ -80,9 +66,24 @@ transformations:
       target: "latency_ms"
       type: "float64"
 
-  # Create composite device path field
+  # Extract datacenter field for device_path computation
+  - step: "extract_field"
+    config:
+      source: "datacenter"
+      target: "datacenter"
+      type: "string"
+
+  # Extract rack field for device_path computation
+  - step: "extract_field"
+    config:
+      source: "rack" 
+      target: "rack"
+      type: "string"
+
+  # Create device_path from datacenter/rack/device_id
   - step: "compute_field"
     config:
-      operation: "concat"
       target: "device_path"
+      operation: "concat"
       fields: ["datacenter", "/", "rack", "/", "device_id"]
+

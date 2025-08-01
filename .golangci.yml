@@ -80,9 +80,6 @@ issues:
   # List of regexps of issue texts to exclude.
   exclude-rules:
     # Exclude nestif complexity issues for specific functions
-    - path: internal/parser/json.go
-      linters:
-        - nestif
     - path: internal/source/source_test.go
       linters:
         - nestif

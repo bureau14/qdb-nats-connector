@@ -1,0 +1,87 @@
+# Random Metrics Template
+# Generates diverse performance metrics with various random value types
+# Ideal for system monitoring, application metrics, or load testing data
+
+name: "system_performance_metrics"
+table: "performance_metrics"
+pattern: "metrics-{host_id}"
+
+fields:
+  # Timestamp with 30-second intervals for metric collection
+  timestamp:
+    type: "timestamp"
+    config:
+      format: "2006-01-02T15:04:05Z"
+      interval: "30s"
+
+  # Host identifier cycling through available hosts
+  host_id:
+    type: "sequence"
+    config:
+      start: 1
+      end: 20
+      step: 1
+      repeat: true
+
+  # CPU usage percentage (0-100%)
+  cpu_usage:
+    type: "random_float"
+    config:
+      min: 0.0
+      max: 100.0
+
+  # Memory usage in MB
+  memory_usage_mb:
+    type: "random_int"
+    config:
+      min: 512
+      max: 16384
+
+  # Disk I/O operations per second
+  disk_iops:
+    type: "random_int"
+    config:
+      min: 0
+      max: 5000
+
+  # Network throughput in Mbps
+  network_throughput:
+    type: "random_float"
+    config:
+      min: 0.1
+      max: 1000.0
+
+  # Response time in milliseconds
+  response_time_ms:
+    type: "random_float"
+    config:
+      min: 1.0
+      max: 2000.0
+
+  # Active connections count
+  active_connections:
+    type: "random_int"
+    config:
+      min: 0
+      max: 1000
+
+  # Error rate as percentage
+  error_rate:
+    type: "random_float"
+    config:
+      min: 0.0
+      max: 5.0
+
+  # Service name identifier
+  service_name:
+    type: "random_string"
+    config:
+      length: 12
+      charset: "abcdefghijklmnopqrstuvwxyz-"
+
+  # Status code simulation
+  status_code:
+    type: "random_int"
+    config:
+      min: 200
+      max: 599

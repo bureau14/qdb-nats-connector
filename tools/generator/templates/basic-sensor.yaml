@@ -1,0 +1,45 @@
+# Basic Sensor Data Template
+# Generates realistic IoT sensor data with sequential sensor IDs and temperature readings
+# Suitable for industrial monitoring, environmental sensors, or equipment telemetry
+
+name: "basic_sensor_data"
+table: "sensor_readings"
+pattern: "sensor-data-{sensor_id}"
+
+fields:
+  # Timestamp field with 5-second intervals for regular sensor readings
+  timestamp:
+    type: "timestamp"
+    config:
+      format: "2006-01-02T15:04:05Z"
+      interval: "5s"
+
+  # Sequential sensor ID starting from 1001
+  sensor_id:
+    type: "sequence"
+    config:
+      start: 1001
+      end: 1100
+      step: 1
+      repeat: true
+
+  # Random temperature readings between -20°C and 50°C
+  temperature:
+    type: "random_float"
+    config:
+      min: -20.0
+      max: 50.0
+
+  # Optional sensor location identifier
+  location:
+    type: "random_string"
+    config:
+      length: 8
+      charset: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+  # Battery level as percentage
+  battery_level:
+    type: "random_int"
+    config:
+      min: 15
+      max: 100

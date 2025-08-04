@@ -6,6 +6,7 @@ toolchain go1.24.4
 
 require (
 	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20250801100305-62143860ca25
+	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.41.0
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.20.1

@@ -12,6 +12,9 @@ github.com/fsnotify/fsnotify/internal
 ## explicit; go 1.18
 github.com/go-viper/mapstructure/v2
 github.com/go-viper/mapstructure/v2/internal/errors
+# github.com/google/uuid v1.6.0
+## explicit
+github.com/google/uuid
 # github.com/klauspost/compress v1.18.0
 ## explicit; go 1.22
 github.com/klauspost/compress/flate

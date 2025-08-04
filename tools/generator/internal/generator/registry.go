@@ -14,6 +14,15 @@ import (
 	"github.com/bureau14/qdb-nats-connector/tools/generator/internal"
 )
 
+// init sets up the default type validator for the template parser
+func init() {
+	internal.SetDefaultTypeValidator(func(generatorType string) bool {
+		_, exists := GetGenerator(generatorType)
+
+		return exists
+	})
+}
+
 // GeneratorFactory creates a FieldGenerator instance from configuration.
 // Factories are responsible for validating configuration parameters and
 // initializing generators with the provided settings.

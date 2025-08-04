@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/bureau14/qdb-nats-connector/tools/generator/internal"
 )
@@ -21,7 +22,7 @@ type Engine struct {
 }
 
 // NewEngine creates a new generation engine from a template file.
-// It parses the template, validates field definitions, and creates generator instances
+// It parses the template, validates field definitions using the registry, and creates generator instances
 // for each field. Returns an error if template parsing fails or generators cannot be created.
 func NewEngine(templatePath string) (*Engine, error) {
 	template, err := internal.ParseTemplate(templatePath)
@@ -44,12 +45,12 @@ func NewEngine(templatePath string) (*Engine, error) {
 func createGenerators(template *internal.Template) (map[string]*GeneratorInstance, error) {
 	generators := make(map[string]*GeneratorInstance)
 
-	for fieldName, fieldDef := range template.Fields {
+	for _, fieldDef := range template.Fields {
 		generator, err := CreateGenerator(context.Background(), fieldDef.Type, fieldDef.Config)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create generator for field %s: %w", fieldName, err)
+			return nil, fmt.Errorf("failed to create generator for field %s: %w", fieldDef.Name, err)
 		}
-		generators[fieldName] = generator
+		generators[fieldDef.Name] = generator
 	}
 
 	return generators, nil
@@ -94,17 +95,69 @@ func (e *Engine) GetGenerators() map[string]*GeneratorInstance {
 func (e *Engine) generateSingleRecord(ctx context.Context) (map[string]interface{}, error) {
 	record := make(map[string]interface{})
 
-	for fieldName, generator := range e.generators {
-		value, err := generator.Generate(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate field %s: %w", fieldName, err)
+	// Process fields in order to respect dependencies
+	for _, fieldDef := range e.template.Fields {
+		generator := e.generators[fieldDef.Name]
+
+		var value interface{}
+		var err error
+
+		// Check if generator supports context-aware generation
+		if genWithCtx, ok := generator.GetGenerator().(internal.FieldGeneratorWithContext); ok {
+			value, err = genWithCtx.GenerateWithContext(ctx, record)
+		} else {
+			value, err = generator.Generate(ctx)
 		}
-		record[fieldName] = value
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate field %s: %w", fieldDef.Name, err)
+		}
+
+		// Skip internal fields in final output
+		if !fieldDef.Internal {
+			// Handle nested paths (e.g., "device.info.id")
+			if strings.Contains(fieldDef.Name, ".") {
+				setNestedValue(record, fieldDef.Name, value)
+			} else {
+				// Existing flat fields work exactly as before
+				record[fieldDef.Name] = value
+			}
+		} else {
+			// Store internal fields in record for dependencies but don't output them
+			record[fieldDef.Name] = value
+		}
 	}
 
 	if e.template.Table != "" {
 		record["$table"] = e.template.Table
 	}
 
+	// Remove internal fields before returning
+	for _, fieldDef := range e.template.Fields {
+		if fieldDef.Internal {
+			delete(record, fieldDef.Name)
+		}
+	}
+
 	return record, nil
+}
+
+// setNestedValue sets a value at a nested path within a map structure.
+// It creates intermediate maps as needed to build the nested structure.
+// For example, path "device.info.id" with value "123" creates:
+// {"device": {"info": {"id": "123"}}}
+func setNestedValue(record map[string]interface{}, path string, value interface{}) {
+	parts := strings.Split(path, ".")
+	current := record
+
+	// Navigate/create nested structure for all parts except the last
+	for _, part := range parts[:len(parts)-1] {
+		if _, exists := current[part]; !exists {
+			current[part] = make(map[string]interface{})
+		}
+		current = current[part].(map[string]interface{})
+	}
+
+	// Set the value at the final key
+	current[parts[len(parts)-1]] = value
 }

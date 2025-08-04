@@ -42,23 +42,26 @@ type randomStringGenerator struct {
 //   - min: int minimum value (required)
 //   - max: int maximum value (required)
 func NewRandomIntGenerator(config map[string]interface{}) (*randomIntGenerator, error) {
-	minVal, hasMin := config["min"].(int)
+	minVal, hasMin := getFloat64(config, "min")
 	if !hasMin {
 		return nil, fmt.Errorf("min value is required")
 	}
 
-	maxVal, hasMax := config["max"].(int)
+	maxVal, hasMax := getFloat64(config, "max")
 	if !hasMax {
 		return nil, fmt.Errorf("max value is required")
 	}
 
-	if minVal >= maxVal {
+	minInt := int64(minVal)
+	maxInt := int64(maxVal)
+
+	if minInt >= maxInt {
 		return nil, fmt.Errorf("min value must be less than max value")
 	}
 
 	return &randomIntGenerator{
-		min: int64(minVal),
-		max: int64(maxVal),
+		min: minInt,
+		max: maxInt,
 		rng: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // Non-crypto usage for data generation
 	}, nil
 }
@@ -73,12 +76,12 @@ func (g *randomIntGenerator) Generate(ctx context.Context) (interface{}, error) 
 //   - min: float minimum value (required)
 //   - max: float maximum value (required)
 func NewRandomFloatGenerator(config map[string]interface{}) (*randomFloatGenerator, error) {
-	minVal, hasMin := config["min"].(float64)
+	minVal, hasMin := getFloat64(config, "min")
 	if !hasMin {
 		return nil, fmt.Errorf("min value is required")
 	}
 
-	maxVal, hasMax := config["max"].(float64)
+	maxVal, hasMax := getFloat64(config, "max")
 	if !hasMax {
 		return nil, fmt.Errorf("max value is required")
 	}

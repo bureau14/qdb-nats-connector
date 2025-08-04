@@ -25,6 +25,10 @@ LOGS_DIR_VAR := logs
 MAKEFLAGS += --no-builtin-rules
 .SUFFIXES:
 
+# Tool binaries
+GENERATOR := bin/qdb-data-gen
+LOADER := bin/qdb-data-loader
+
 # Default target
 .DEFAULT_GOAL := help
 
@@ -83,6 +87,18 @@ help: ## Show this help message
 	@echo "  make generate-golden-finance-ohlc-10k  # Generate golden data"
 	@echo ""
 	@echo "$(COLOR_BOLD)Available Examples:$(COLOR_RESET) $(EXAMPLES)"
+
+# =============================================================================
+# Build Tools
+# =============================================================================
+
+# Build required Go tools
+.PHONY: build-tools
+build-tools: ## Build required Go tools (qdb-data-gen and qdb-data-loader)
+	@$(call LOG_INFO,Building qdb-data-gen and qdb-data-loader)
+	@cd .. && direnv exec . go build -o examples/bin/qdb-data-gen ./tools/generator
+	@cd .. && direnv exec . go build -o examples/bin/qdb-data-loader ./tools/loader
+	@$(call LOG_SUCCESS,Tools built successfully)
 
 # =============================================================================
 # Directory Creation
@@ -211,28 +227,28 @@ endef
 
 # Quick test targets (10k records)
 .PHONY: test-quick-finance-ohlc
-test-quick-finance-ohlc: $(TESTDATA_DIR)/finance-ohlc-$(QUICK_SIZE)/.extracted ## Run finance-ohlc quick test (10k records)
+test-quick-finance-ohlc: build-tools $(TESTDATA_DIR)/finance-ohlc-$(QUICK_SIZE)/.extracted ## Run finance-ohlc quick test (10k records)
 	$(call run_test_workflow,finance-ohlc,$(QUICK_SIZE),10000)
 
 .PHONY: test-quick-industrial-sensor
-test-quick-industrial-sensor: $(TESTDATA_DIR)/industrial-sensor-$(QUICK_SIZE)/.extracted ## Run industrial-sensor quick test (10k records)
+test-quick-industrial-sensor: build-tools $(TESTDATA_DIR)/industrial-sensor-$(QUICK_SIZE)/.extracted ## Run industrial-sensor quick test (10k records)
 	$(call run_test_workflow,industrial-sensor,$(QUICK_SIZE),10000)
 
 .PHONY: test-quick-network-metrics
-test-quick-network-metrics: $(TESTDATA_DIR)/network-metrics-$(QUICK_SIZE)/.extracted ## Run network-metrics quick test (10k records)
+test-quick-network-metrics: build-tools $(TESTDATA_DIR)/network-metrics-$(QUICK_SIZE)/.extracted ## Run network-metrics quick test (10k records)
 	$(call run_test_workflow,network-metrics,$(QUICK_SIZE),10000)
 
 # Full test targets (1M records)
 .PHONY: test-full-finance-ohlc
-test-full-finance-ohlc: $(TESTDATA_DIR)/finance-ohlc-$(FULL_SIZE)/.extracted ## Run finance-ohlc full test (1M records)
+test-full-finance-ohlc: build-tools $(TESTDATA_DIR)/finance-ohlc-$(FULL_SIZE)/.extracted ## Run finance-ohlc full test (1M records)
 	$(call run_test_workflow,finance-ohlc,$(FULL_SIZE),1000000)
 
 .PHONY: test-full-industrial-sensor
-test-full-industrial-sensor: $(TESTDATA_DIR)/industrial-sensor-$(FULL_SIZE)/.extracted ## Run industrial-sensor full test (1M records)
+test-full-industrial-sensor: build-tools $(TESTDATA_DIR)/industrial-sensor-$(FULL_SIZE)/.extracted ## Run industrial-sensor full test (1M records)
 	$(call run_test_workflow,industrial-sensor,$(FULL_SIZE),1000000)
 
 .PHONY: test-full-network-metrics
-test-full-network-metrics: $(TESTDATA_DIR)/network-metrics-$(FULL_SIZE)/.extracted ## Run network-metrics full test (1M records)
+test-full-network-metrics: build-tools $(TESTDATA_DIR)/network-metrics-$(FULL_SIZE)/.extracted ## Run network-metrics full test (1M records)
 	$(call run_test_workflow,network-metrics,$(FULL_SIZE),1000000)
 
 # =============================================================================
@@ -270,7 +286,7 @@ test-quick-parallel: ## Run all quick tests in parallel
 
 # Generate golden data for finance-ohlc with different sizes
 .PHONY: generate-golden-finance-ohlc-10k
-generate-golden-finance-ohlc-10k: ## Generate golden data for finance-ohlc (10k records)
+generate-golden-finance-ohlc-10k: build-tools ## Generate golden data for finance-ohlc (10k records)
 	@$(call LOG_INFO,Generating golden data: finance-ohlc 10k records)
 	@NUM_MESSAGES=10000 ./finance-ohlc.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
 	@NUM_MESSAGES=10000 ./finance-ohlc.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
@@ -283,7 +299,7 @@ generate-golden-finance-ohlc-10k: ## Generate golden data for finance-ohlc (10k 
 	@$(call LOG_SUCCESS,Golden data generated: finance-ohlc 10k records)
 
 .PHONY: generate-golden-finance-ohlc-1m
-generate-golden-finance-ohlc-1m: ## Generate golden data for finance-ohlc (1M records)
+generate-golden-finance-ohlc-1m: build-tools ## Generate golden data for finance-ohlc (1M records)
 	@$(call LOG_INFO,Generating golden data: finance-ohlc 1M records)
 	@NUM_MESSAGES=1000000 ./finance-ohlc.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
 	@NUM_MESSAGES=1000000 ./finance-ohlc.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
@@ -310,7 +326,7 @@ package-golden-finance-ohlc-1m: generate-golden-finance-ohlc-1m ## Package golde
 
 # Generate golden data for industrial-sensor with different sizes
 .PHONY: generate-golden-industrial-sensor-10k
-generate-golden-industrial-sensor-10k: ## Generate golden data for industrial-sensor (10k records)
+generate-golden-industrial-sensor-10k: build-tools ## Generate golden data for industrial-sensor (10k records)
 	@$(call LOG_INFO,Generating golden data: industrial-sensor 10k records)
 	@NUM_MESSAGES=10000 ./industrial-sensor.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
 	@NUM_MESSAGES=10000 ./industrial-sensor.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
@@ -323,7 +339,7 @@ generate-golden-industrial-sensor-10k: ## Generate golden data for industrial-se
 	@$(call LOG_SUCCESS,Golden data generated: industrial-sensor 10k records)
 
 .PHONY: generate-golden-industrial-sensor-1m
-generate-golden-industrial-sensor-1m: ## Generate golden data for industrial-sensor (1M records)
+generate-golden-industrial-sensor-1m: build-tools ## Generate golden data for industrial-sensor (1M records)
 	@$(call LOG_INFO,Generating golden data: industrial-sensor 1M records)
 	@NUM_MESSAGES=1000000 ./industrial-sensor.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
 	@NUM_MESSAGES=1000000 ./industrial-sensor.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
@@ -350,7 +366,7 @@ package-golden-industrial-sensor-1m: generate-golden-industrial-sensor-1m ## Pac
 
 # Generate golden data for network-metrics with different sizes
 .PHONY: generate-golden-network-metrics-10k
-generate-golden-network-metrics-10k: ## Generate golden data for network-metrics (10k records)
+generate-golden-network-metrics-10k: build-tools ## Generate golden data for network-metrics (10k records)
 	@$(call LOG_INFO,Generating golden data: network-metrics 10k records)
 	@NUM_MESSAGES=10000 ./network-metrics.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
 	@NUM_MESSAGES=10000 ./network-metrics.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }
@@ -363,7 +379,7 @@ generate-golden-network-metrics-10k: ## Generate golden data for network-metrics
 	@$(call LOG_SUCCESS,Golden data generated: network-metrics 10k records)
 
 .PHONY: generate-golden-network-metrics-1m
-generate-golden-network-metrics-1m: ## Generate golden data for network-metrics (1M records)
+generate-golden-network-metrics-1m: build-tools ## Generate golden data for network-metrics (1M records)
 	@$(call LOG_INFO,Generating golden data: network-metrics 1M records)
 	@NUM_MESSAGES=1000000 ./network-metrics.sh create || { $(call LOG_ERROR,Failed at create step); exit 1; }
 	@NUM_MESSAGES=1000000 ./network-metrics.sh generate || { $(call LOG_ERROR,Failed at generate step); exit 1; }

@@ -69,72 +69,31 @@ usage() {
 action_generate() {
     log_info "Generating $NUM_MESSAGES industrial sensor messages..."
 
-    # Require GNU parallel for optimization
-    require_command parallel
-
-    local start_timestamp=1737018000  # 2025-01-16T09:00:00Z
-
-    # Clear the data file
-    cat > "$DATA_FILE" << 'EOF'
-EOF
-
-    # Generate all messages with a single gawk script (GNU awk required for strftime)
-    TZ=UTC gawk -v num_messages="$NUM_MESSAGES" \
-        -v start_timestamp="$start_timestamp" \
-        -v sensors="sensor-01:Floor1:B1:1,sensor-02:Floor2:B1:2,sensor-03:Floor3:B1:3,sensor-04:Basement:B2:B,sensor-05:Rooftop:B2:R" \
-        'BEGIN {
-            # Initialize random seed
-            srand()
-
-            # Parse sensor configurations
-            split(sensors, sensor_array, ",")
-
-            # Error values for 10% error rate
-            error_values[0] = "ERROR"
-            error_values[1] = "N/A"
-            error_values[2] = "SENSOR_FAULT"
-
-            # Generate all messages
-            for (i = 0; i < num_messages; i++) {
-                # Calculate timestamp for this message
-                timestamp_epoch = start_timestamp + i * 10
-
-                # Format timestamp properly using strftime (GNU awk)
-                # This handles all date/month/year transitions automatically
-                formatted_timestamp = strftime("%Y-%m-%d %H:%M:%S", timestamp_epoch)
-
-                # Sensor rotation (i % 5) + 1 for 1-based indexing
-                sensor_idx = (i % 5) + 1
-                sensor_info = sensor_array[sensor_idx]
-
-                # Parse sensor configuration: sensor_id:location:building:floor
-                split(sensor_info, sensor_parts, ":")
-                sensor_id = sensor_parts[1]
-                location = sensor_parts[2]
-                building = sensor_parts[3]
-                floor_val = sensor_parts[4]
-
-                # Generate temperature readings with 10% error rate
-                error_chance = int(rand() * 100)
-                if (error_chance < 10) {
-                    # Generate error values (rotate through the 3 error types)
-                    temp_val = error_values[error_chance % 3]
-                } else {
-                    # Generate temperature in 15-35°C range
-                    temp_val = sprintf("%.1f", 15 + rand() * 20)
-                }
-
-                # Format JSON message (maintaining exact same structure)
-                printf "{\"sensor\": {\"id\": \"%s\", \"location\": \"%s\"}, \"building\": \"%s\", \"floor\": \"%s\", \"timestamp\": \"%s\", \"temp\": \"%s\"}\n",
-                       sensor_id, location, building, floor_val, formatted_timestamp, temp_val
-            }
-        }' >> "$DATA_FILE"
-
-    # Check if awk processing succeeded
-    if [[ $? -ne 0 ]]; then
-        die "Failed to generate sensor messages"
+    # Verify NUM_MESSAGES is a valid number
+    if ! [[ "$NUM_MESSAGES" =~ ^[0-9]+$ ]] || [[ "$NUM_MESSAGES" -eq 0 ]]; then
+        die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
+    # Generate flat structure and transform to nested JSON with error values
+    log_info "Generating $NUM_MESSAGES industrial sensor messages..."
+    bin/qdb-data-gen industrial-sensor-generator.yaml --count "$NUM_MESSAGES" | \
+    jq -c '{
+      sensor: {
+        id: (["sensor-01", "sensor-02", "sensor-03", "sensor-04", "sensor-05"][(.sensor_id | tonumber) - 1] // .sensor_id),
+        location: (["Floor1", "Floor2", "Floor3", "Basement", "Rooftop"][(.sensor_location | tonumber) - 1] // .sensor_location)
+      },
+      building: (["B1", "B1", "B1", "B2", "B2"][(.building | tonumber) - 1] // .building),
+      floor: (["1", "2", "3", "B", "R"][(.floor | tonumber) - 1] // .floor),
+      timestamp: .timestamp,
+      temp: (
+        if .temp_error_flag <= 10 then "ERROR"
+        elif .temp_error_flag <= 13 then "N/A"  
+        elif .temp_error_flag <= 15 then "SENSOR_FAULT"
+        else (.temp_value | tostring)
+        end
+      )
+    } | del(.sensor_id, .sensor_location, .temp_value, .temp_error_flag, .pressure, .humidity, .vibration, .status, ."$table")' > "$DATA_FILE"
+    
     log_info "Generated $NUM_MESSAGES industrial sensor messages in $DATA_FILE"
 }
 
@@ -194,7 +153,6 @@ action_load() {
     # Validate environment first
     validate_environment
     require_command nats
-    require_command parallel
 
     # Generate data if not exists
     if [[ ! -f "$DATA_FILE" ]]; then
@@ -207,87 +165,11 @@ action_load() {
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
 
-    local lines_count
-    lines_count=$(wc -l < "$DATA_FILE")
-    log_info "Publishing $lines_count industrial sensor messages to $SUBJECT using parallel processing..."
-
-    # Create a temporary file to track publishing results
-    local temp_results
-    temp_results=$(mktemp)
-
-    # Parallel publishing function to be executed by GNU parallel
-    export -f log_debug
-    export SUBJECT
-    export NATS_URL
-
-    # Use parallel to process messages in batches
-    # -j+0: use all available CPU cores
-    # --pipe: read from stdin
-    # -N100: process 100 lines per job
-    # --halt now,fail=1: stop on first failure
-    cat "$DATA_FILE" | parallel -j+0 --pipe -N100 --halt now,fail=1 "
-        batch_num=\$((PARALLEL_SEQ))
-        published_in_batch=0
-        failed_in_batch=0
-
-        while IFS= read -r line; do
-            if [[ -n \"\$line\" ]]; then
-                # Publish JSON message directly (no base64 decoding needed)
-                if echo \"\$line\" | nats pub \"$SUBJECT\" --force-stdin -q 2>/dev/null; then
-                    published_in_batch=\$((published_in_batch + 1))
-                else
-                    failed_in_batch=\$((failed_in_batch + 1))
-                fi
-            fi
-        done
-
-        # Report batch results
-        echo \"Batch \$batch_num: published \$published_in_batch, failed \$failed_in_batch\"
-
-        # Exit with error if any failures in this batch
-        if [[ \$failed_in_batch -gt 0 ]]; then
-            exit 1
-        fi
-    " > "$temp_results"
-
-    # Check if parallel processing succeeded
-    local parallel_exit_code=$?
-    if [[ $parallel_exit_code -ne 0 ]]; then
-        log_error "Parallel publishing failed. Batch results:"
-        cat "$temp_results" >&2
-        die "Failed to publish messages in parallel"
-    fi
-
-    # Count total published messages from batch results
-    local total_published
-    total_published=$(awk '/^Batch [0-9]+:/ { sum += $4 } END { print sum+0 }' "$temp_results")
-
-    # Validate we actually published messages
-    if [[ $total_published -eq 0 ]]; then
-        log_error "CRITICAL: No messages were published!"
-        log_error "Parallel output:"
-        cat "$temp_results" >&2
-        die "Failed to publish any messages"
-    fi
-
-    # Also validate against expected count
-    if [[ $total_published -ne $lines_count ]]; then
-        log_error "WARNING: Published count mismatch - expected $lines_count, got $total_published"
-        log_error "Some messages may have failed to publish"
-    fi
-
-    log_info "Parallel publishing completed successfully"
-    log_debug "Batch processing results:"
-    cat "$temp_results" | head -10  # Show first 10 batch results
-    if [[ $(wc -l < "$temp_results") -gt 10 ]]; then
-        log_debug "... and $(($(wc -l < "$temp_results") - 10)) more batches"
-    fi
-
-    log_info "Data loaded successfully ($total_published messages published)"
-
-    # Clean up temporary file
-    rm -f "$temp_results"
-
+    log_info "Loading data into NATS JetStream..."
+    bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+                        --nats-url "$NATS_URL" --batch-size 100
+    log_info "Data loaded successfully"
+    
     nats stream info "$STREAM_NAME"
 }
 

@@ -89,7 +89,8 @@ usage() {
     echo "  DEBUG          - Enable debug logging (1 = enabled)"
     echo
     echo "Requirements:"
-    echo "  GNU parallel   - Required for optimized data generation and loading"
+    echo "  qdb-data-gen   - Required for data generation"
+    echo "  qdb-data-loader - Required for loading data into NATS"
     exit 1
 }
 
@@ -102,18 +103,6 @@ action_generate() {
         die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
-    # Require GNU parallel for optimization
-    if ! require_command parallel; then
-        die "GNU parallel is required but not found. Please install it with your package manager."
-    fi
-
-    # Verify gawk is available (GNU awk required for strftime)
-    if ! command -v gawk >/dev/null 2>&1; then
-        die "GNU awk (gawk) is required but not found. Please install it with your package manager."
-    fi
-
-    local start_timestamp=1737021600  # 2025-01-16T10:00:00Z
-
     # Verify we can write to the data file directory
     local data_dir
     data_dir=$(dirname "$DATA_FILE")
@@ -121,114 +110,40 @@ action_generate() {
         die "Cannot write to data directory: $data_dir. Please check permissions."
     fi
 
-    # Clear the data file
-    if ! > "$DATA_FILE"; then
-        die "Failed to initialize data file: $DATA_FILE. Check disk space and permissions."
-    fi
-
-    log_debug "Starting data generation with gawk..."
-
-    # Generate all messages with a single gawk script (GNU awk required for strftime)
-    if ! TZ=UTC gawk -v num_messages="$NUM_MESSAGES" \
-        -v start_timestamp="$start_timestamp" \
-        -v devices="router-01,router-02,switch-01,switch-02,firewall-01" \
-        'BEGIN {
-            # Initialize random seed
-            srand()
-
-            # Parse device configurations
-            split(devices, device_array, ",")
-
-            # Device type parameters: bytes_base drop_max lat_base bytes_range lat_range
-            device_params["router"] = "1000000 20 0.5 50000000 5.0"
-            device_params["switch"] = "500000 10 0.2 25000000 2.0"
-            device_params["firewall"] = "2000000 100 1.0 30000000 10.0"
-
-            # Generate all messages
-            for (i = 0; i < num_messages; i++) {
-                # Calculate timestamp for this message (30-second intervals)
-                timestamp_epoch = start_timestamp + i * 30
-
-                # Generate nanoseconds for high precision
-                nanos = sprintf("%09d", int(rand() * 1000000000))
-
-                # Format timestamp with nanoseconds using strftime
-                # strftime gives us the date/time, then append nanoseconds
-                base_timestamp = strftime("%Y-%m-%dT%H:%M:%S", timestamp_epoch)
-                nano_timestamp = sprintf("%s.%sZ", base_timestamp, nanos)
-
-                # Device rotation (i % 5) + 1 for 1-based indexing
-                device_idx = (i % 5) + 1
-                device_id = device_array[device_idx]
-
-                # Determine device type from device_id
-                if (match(device_id, /^router/)) {
-                    device_type = "router"
-                } else if (match(device_id, /^switch/)) {
-                    device_type = "switch"
-                } else {
-                    device_type = "firewall"
-                }
-
-                # Get device parameters inline
-                split(device_params[device_type], params, " ")
-                bytes_base = params[1]
-                drop_max = params[2]
-                lat_base = params[3]
-                bytes_range = params[4]
-                lat_range = params[5]
-
-                # Generate metrics with device-specific ranges
-                bytes_in = int(bytes_base + rand() * bytes_range)
-                bytes_out = int(bytes_base * 0.8 + rand() * bytes_range * 0.8)
-                packets_dropped = int(rand() * drop_max)
-                latency_ms = sprintf("%.1f", lat_base + rand() * lat_range)
-
-                # Map devices to datacenter and rack
-                if (device_id == "router-01" || device_id == "switch-01") {
-                    datacenter = "DC1"
-                    rack = "R42"
-                } else if (device_id == "router-02" || device_id == "switch-02") {
-                    datacenter = "DC1"
-                    rack = "R43"
-                } else if (device_id == "firewall-01") {
-                    datacenter = "DC2"
-                    rack = "R01"
-                } else {
-                    datacenter = "DC1"
-                    rack = "R44"
-                }
-
-                # Randomly omit errors section 20% of the time
-                missing_field_chance = int(rand() * 100)
-
-                # Generate complex nested JSON structure
-                if (missing_field_chance < 20) {
-                    # Omit errors section entirely
-                    printf "{\"device\": {\"info\": {\"id\": \"%s\"}}, \"datacenter\": \"%s\", \"rack\": \"%s\", \"timestamp\": \"%s\", \"metrics\": {\"network\": {\"inbound\": {\"bytes\": %d}, \"outbound\": {\"bytes\": %d}}, \"performance\": {\"latency_percentiles\": {\"p99\": %s}}}}\n",
-                           device_id, datacenter, rack, nano_timestamp, bytes_in, bytes_out, latency_ms
-                } else {
-                    # Include errors section with deeply nested structure
-                    printf "{\"device\": {\"info\": {\"id\": \"%s\"}}, \"datacenter\": \"%s\", \"rack\": \"%s\", \"timestamp\": \"%s\", \"metrics\": {\"network\": {\"inbound\": {\"bytes\": %d}, \"outbound\": {\"bytes\": %d}}, \"performance\": {\"latency_percentiles\": {\"p99\": %s}}}, \"errors\": {\"packets\": {\"dropped\": %d}}}\n",
-                           device_id, datacenter, rack, nano_timestamp, bytes_in, bytes_out, latency_ms, packets_dropped
-                }
-            }
-        }' >> "$DATA_FILE"; then
-        die "Failed to generate network metrics messages with gawk. Check that GNU awk is properly installed and functioning."
-    fi
-
-    # Verify data was actually generated
-    if [[ ! -s "$DATA_FILE" ]]; then
-        die "Data generation completed but output file is empty: $DATA_FILE"
-    fi
-
-    local actual_lines
-    actual_lines=$(wc -l < "$DATA_FILE")
-    if [[ "$actual_lines" -ne "$NUM_MESSAGES" ]]; then
-        die "Data generation incomplete: expected $NUM_MESSAGES lines, got $actual_lines lines in $DATA_FILE"
-    fi
-
-    log_info "Successfully generated $NUM_MESSAGES network metrics messages in $DATA_FILE"
+    log_info "Generating $NUM_MESSAGES network metrics messages..."
+    # Generate flat structure first
+    bin/qdb-data-gen network-metrics-generator.yaml --count "$NUM_MESSAGES" | \
+    jq -c '{
+      device: {
+        info: {
+          id: (["router-01", "router-02", "switch-01", "switch-02", "firewall-01"][.device_info_id - 1])
+        }
+      },
+      datacenter: (["DC1", "DC1", "DC1", "DC1", "DC2"][.device_info_id - 1]),
+      rack: (["R42", "R43", "R42", "R43", "R01"][.device_info_id - 1]),
+      timestamp: .timestamp,
+      metrics: {
+        network: {
+          inbound: {
+            bytes: .metrics_network_inbound_bytes
+          },
+          outbound: {
+            bytes: .metrics_network_outbound_bytes
+          }
+        },
+        performance: {
+          latency_percentiles: {
+            p99: .metrics_performance_latency_percentiles_p99
+          }
+        }
+      },
+      errors: (if .errors_packets_dropped > 20 then null else {
+        packets: {
+          dropped: .errors_packets_dropped
+        }
+      } end)
+    } | del(.device_info_id, .metrics_network_inbound_bytes, .metrics_network_outbound_bytes, .metrics_performance_latency_percentiles_p99, .errors_packets_dropped, ."$table")' > "$DATA_FILE"
+    log_info "Generated $NUM_MESSAGES network metrics messages in $DATA_FILE"
 }
 
 # Create NATS JetStream stream and QuasarDB table
@@ -304,14 +219,9 @@ Visit: https://docs.nats.io/using-nats/nats-tools/nats_cli"
 # Load generated data into NATS JetStream
 action_load() {
     log_info "Loading data into NATS JetStream..."
-    
-    # Start timing
-    local start_time=$(date +%s.%N)
 
     # Validate environment first
     validate_environment
-    require_command nats
-    require_command parallel
 
     # Generate data if not exists
     if [[ ! -f "$DATA_FILE" ]]; then
@@ -324,112 +234,10 @@ action_load() {
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
 
-    local lines_count
-    lines_count=$(wc -l < "$DATA_FILE")
-    log_info "Publishing $lines_count network metrics messages to $SUBJECT using parallel processing..."
-    
-    # Log start of publishing
-    local publish_start_time=$(date +%s.%N)
-
-    # Create a temporary file to track publishing results
-    local temp_results
-    temp_results=$(mktemp)
-
-    # Parallel publishing function to be executed by GNU parallel
-    export -f log_debug
-    export SUBJECT
-    export NATS_URL
-
-    # Log parallel settings
-    log_info "Parallel processing configuration:"
-    log_info "  - CPU cores available: $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 'unknown')"
-    log_info "  - Batch size: 100 messages per job"
-    log_info "  - Total batches: $((lines_count / 100 + (lines_count % 100 > 0 ? 1 : 0)))"
-    
-    # Use parallel to process messages in batches
-    # -j+0: use all available CPU cores
-    # --pipe: read from stdin
-    # -N100: process 100 lines per job
-    # --halt now,fail=1: stop on first failure
-    cat "$DATA_FILE" | parallel -j+0 --pipe -N100 --halt now,fail=1 "
-        batch_num=\$((PARALLEL_SEQ))
-        published_in_batch=0
-        failed_in_batch=0
-        batch_start=\$(date +%s.%N)
-
-        while IFS= read -r line; do
-            if [[ -n \"\$line\" ]]; then
-                # Publish JSON message directly (no base64 decoding needed)
-                if echo \"\$line\" | nats pub \"$SUBJECT\" --force-stdin -q 2>/dev/null; then
-                    published_in_batch=\$((published_in_batch + 1))
-                else
-                    failed_in_batch=\$((failed_in_batch + 1))
-                fi
-            fi
-        done
-
-        batch_end=\$(date +%s.%N)
-        batch_duration=\$(echo \"\$batch_end - \$batch_start\" | bc)
-        
-        # Report batch results with timing
-        echo \"Batch \$batch_num: published \$published_in_batch, failed \$failed_in_batch, duration: \${batch_duration}s\"
-
-        # Exit with error if any failures in this batch
-        if [[ \$failed_in_batch -gt 0 ]]; then
-            exit 1
-        fi
-    " > "$temp_results"
-
-    # Check if parallel processing succeeded
-    local parallel_exit_code=$?
-    if [[ $parallel_exit_code -ne 0 ]]; then
-        log_error "Parallel publishing failed. Batch results:"
-        cat "$temp_results" >&2
-        die "Failed to publish messages in parallel"
-    fi
-
-    # Count total published messages from batch results
-    local total_published
-    total_published=$(awk '/^Batch [0-9]+:/ { sum += $4 } END { print sum+0 }' "$temp_results")
-
-    # Validate we actually published messages
-    if [[ $total_published -eq 0 ]]; then
-        log_error "CRITICAL: No messages were published!"
-        log_error "Parallel output:"
-        cat "$temp_results" >&2
-        die "Failed to publish any messages"
-    fi
-
-    # Also validate against expected count
-    if [[ $total_published -ne $lines_count ]]; then
-        log_error "WARNING: Published count mismatch - expected $lines_count, got $total_published"
-        log_error "Some messages may have failed to publish"
-    fi
-
-    log_info "Parallel publishing completed successfully"
-    log_debug "Batch processing results:"
-    cat "$temp_results" | head -10  # Show first 10 batch results
-    if [[ $(wc -l < "$temp_results") -gt 10 ]]; then
-        log_debug "... and $(($(wc -l < "$temp_results") - 10)) more batches"
-    fi
-
-    log_info "Data loaded successfully ($total_published messages published)"
-    
-    # Calculate and log elapsed time
-    local publish_end_time=$(date +%s.%N)
-    local end_time=$(date +%s.%N)
-    local publish_duration=$(echo "$publish_end_time - $publish_start_time" | bc)
-    local total_duration=$(echo "$end_time - $start_time" | bc)
-    local messages_per_second=$(echo "scale=2; $total_published / $publish_duration" | bc)
-    
-    log_info "Performance metrics:"
-    log_info "  - Publishing duration: ${publish_duration}s"
-    log_info "  - Total duration: ${total_duration}s"
-    log_info "  - Messages per second: ${messages_per_second}"
-    log_info "  - Average latency per message: $(echo "scale=3; $publish_duration * 1000 / $total_published" | bc)ms"
-
-    # Clean up temporary file
-    rm -f "$temp_results"
+    log_info "Loading data into NATS JetStream..."
+    bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+                          --nats-url "$NATS_URL" --batch-size 100
+    log_info "Data loaded successfully"
 
     nats stream info "$STREAM_NAME"
 }

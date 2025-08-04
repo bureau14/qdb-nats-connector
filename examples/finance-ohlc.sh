@@ -58,90 +58,44 @@ usage() {
     exit 1
 }
 
-# Function to compress individual messages using gzip and encode as base64
-compress_message() {
-    echo -n "$1" | gzip -c | base64 -w 0
-}
-
-# Generate test dataset
 action_generate() {
     log_info "Generating $NUM_MESSAGES OHLC market messages..."
 
-    # Require GNU parallel for optimization
-    require_command parallel
-
-    local start_timestamp=1736948200  # 2025-01-16T14:30:00Z
-
-    # Create temporary file for atomic operation
-    local temp_file
-    temp_file=$(mktemp "${DATA_FILE}.tmp.XXXXXX")
-
-    # Set up cleanup trap for temporary file
-    trap 'rm -f "${temp_file:-}"' EXIT INT TERM
-
-    # Generate all messages with a single awk script, then parallelize compression
-    # Use > instead of >> to fix race condition - parallel outputs complete stream
-    awk -v num_messages="$NUM_MESSAGES" \
-        -v start_timestamp="$start_timestamp" \
-        -v stocks="AAPL,GOOGL,MSFT,AMZN,TSLA" \
-        -v base_prices="185.50,175.25,425.75,195.80,245.30" \
-        'BEGIN {
-            # Initialize random seed
-            srand()
-
-            # Parse stocks and prices arrays
-            split(stocks, stock_array, ",")
-            split(base_prices, price_array, ",")
-
-            # Generate all messages
-            for (i = 0; i < num_messages; i++) {
-                timestamp = start_timestamp + i * 60
-                stock_idx = (i % 5) + 1  # awk arrays are 1-indexed
-                stock_id = stock_array[stock_idx]
-                base_price = price_array[stock_idx]
-
-                # Generate OHLC with constraints: high >= max(open,close), low <= min(open,close)
-                open_price = base_price + (rand() - 0.5) * base_price * 0.1
-                movement = open_price * 0.04
-                high_price = open_price + rand() * movement
-                low_price = open_price - rand() * movement
-                close_price = low_price + rand() * (high_price - low_price)
-                volume = int(10000 + rand() * 4990000)
-
-                # Map stocks to exchanges for realistic data
-                exchange = "NASDAQ"  # All these stocks are NASDAQ
-
-                # Format JSON message (maintaining exact same structure)
-                printf "{\"market\": {\"exchange\": \"%s\", \"symbol\": \"%s\"}, \"timestamp\": %d, \"o\": %.2f, \"h\": %.2f, \"l\": %.2f, \"c\": %.2f, \"v\": %d}\n",
-                       exchange, stock_id, timestamp, open_price, high_price, low_price, close_price, volume
-            }
-        }' | parallel -j+0 --pipe -N1 'gzip -c | base64 -w 0' > "$temp_file"
-
-    # Check if parallel processing succeeded
-    if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
-        rm -f "$temp_file"  # Clean up temporary file
-        die "Failed to generate and compress messages"
+    # Verify NUM_MESSAGES is a valid number
+    if ! [[ "$NUM_MESSAGES" =~ ^[0-9]+$ ]] || [[ "$NUM_MESSAGES" -eq 0 ]]; then
+        die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
-    # Validate generated data before moving
-    local generated_lines
-    generated_lines=$(wc -l < "$temp_file" 2>/dev/null || echo 0)
-    if [[ $generated_lines -eq 0 ]]; then
-        rm -f "$temp_file"  # Clean up temporary file
-        die "Generated data file is empty"
-    fi
-
-    if [[ $generated_lines -ne $NUM_MESSAGES ]]; then
-        rm -f "$temp_file"  # Clean up temporary file
-        die "Generated $generated_lines lines, expected $NUM_MESSAGES"
-    fi
-
-    # Atomically move temporary file to final location
-    if ! mv "$temp_file" "$DATA_FILE"; then
-        rm -f "$temp_file"  # Clean up temporary file
-        die "Failed to move generated data file"
-    fi
-
+    log_info "Generating $NUM_MESSAGES OHLC market messages with compression..."
+    
+    # Generate data, decompress to fix fields, then recompress
+    bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" | while IFS= read -r line; do
+        # Extract and decode the message field
+        message=$(echo "$line" | jq -r '.message' | base64 -d | gunzip)
+        
+        # Transform the message content
+        transformed=$(echo "$message" | jq -c '
+          .symbol as $sym_num |
+          .o as $open |
+          .c as $close |
+          {
+            exchange: "NASDAQ",
+            symbol: (["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA"][(($sym_num - 1) % 5)]),
+            timestamp: .timestamp,
+            o: $open,
+            h: (([$open, $close] | max) * 1.02),
+            l: (([$open, $close] | min) * 0.98),
+            c: $close,
+            v: .v
+          }')
+        
+        # Re-compress and encode
+        encoded=$(echo "$transformed" | gzip | base64 -w0)
+        
+        # Output the complete message
+        echo "{\"message\":\"$encoded\"}"
+    done > "$DATA_FILE"
+    
     log_info "Generated $NUM_MESSAGES OHLC messages in $DATA_FILE"
 }
 
@@ -194,14 +148,12 @@ action_create() {
     log_info "QuasarDB dynamic table creation completed"
 }
 
-# Load generated data into NATS JetStream
 action_load() {
     log_info "Loading data into NATS JetStream..."
 
     # Validate environment first
     validate_environment
     require_command nats
-    require_command parallel
 
     # Generate data if not exists
     if [[ ! -f "$DATA_FILE" ]]; then
@@ -209,109 +161,16 @@ action_load() {
         action_generate
     fi
 
-    # Validate data file for streaming
-    if [[ ! -r "$DATA_FILE" ]]; then
-        die "Data file $DATA_FILE is not readable"
-    fi
-
-    # Check file size for memory-efficient processing
-    local file_size_bytes
-    file_size_bytes=$(wc -c < "$DATA_FILE" 2>/dev/null || echo 0)
-    if [[ $file_size_bytes -gt $((100 * 1024 * 1024)) ]]; then  # 100MB threshold
-        log_info "Large data file detected (${file_size_bytes} bytes) - using streaming mode"
-    fi
-
     # Check if stream exists
     if ! nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
 
-    local lines_count
-    lines_count=$(wc -l < "$DATA_FILE")
-    log_info "Publishing $lines_count compressed OHLC messages to $SUBJECT using streaming parallel processing..."
-
-    # Create a temporary file to track publishing results
-    local temp_results
-    temp_results=$(mktemp)
-
-    # Set up cleanup trap for temporary file
-    trap 'rm -f "${temp_results:-}"' EXIT INT TERM
-
-    # Parallel publishing function to be executed by GNU parallel
-    export -f log_debug
-    export SUBJECT
-    export NATS_URL
-
-    # Use parallel to process messages in batches with streaming
-    # -j+0: use all available CPU cores
-    # --pipe: read from stdin in streaming mode
-    # -N100: process 100 lines per job for optimal batching
-    # --halt now,fail=1: stop on first failure
-    # Use < instead of cat for more efficient streaming
-    parallel -j+0 --pipe -N100 --halt now,fail=1 < "$DATA_FILE" "
-        batch_num=\$((PARALLEL_SEQ))
-        batch_start=\$(((batch_num - 1) * 100 + 1))
-        published_in_batch=0
-        failed_in_batch=0
-
-        while IFS= read -r line; do
-            if [[ -n \"\$line\" ]]; then
-                # Decode base64 and publish raw gzipped bytes
-                if echo \"\$line\" | base64 -d | nats pub \"$SUBJECT\" --force-stdin -q 2>/dev/null; then
-                    published_in_batch=\$((published_in_batch + 1))
-                else
-                    failed_in_batch=\$((failed_in_batch + 1))
-                fi
-            fi
-        done
-
-        # Report batch results
-        echo \"Batch \$batch_num: published \$published_in_batch, failed \$failed_in_batch\"
-
-        # Exit with error if any failures in this batch
-        if [[ \$failed_in_batch -gt 0 ]]; then
-            exit 1
-        fi
-    " > "$temp_results"
-
-    # Check if parallel processing succeeded
-    local parallel_exit_code=$?
-    if [[ $parallel_exit_code -ne 0 ]]; then
-        log_error "Parallel publishing failed. Batch results:"
-        cat "$temp_results" >&2
-        die "Failed to publish messages in parallel"
-    fi
-
-    # Count total published messages from batch results
-    local total_published
-    total_published=$(awk '/^Batch [0-9]+:/ { sum += $4 } END { print sum+0 }' "$temp_results")
-
-    # Validate we actually published messages
-    if [[ $total_published -eq 0 ]]; then
-        log_error "CRITICAL: No messages were published!"
-        log_error "Parallel output:"
-        cat "$temp_results" >&2
-        die "Failed to publish any messages"
-    fi
-
-    # Also validate against expected count
-    if [[ $total_published -ne $lines_count ]]; then
-        log_error "WARNING: Published count mismatch - expected $lines_count, got $total_published"
-        log_error "Some messages may have failed to publish"
-    fi
-
-    log_info "Parallel publishing completed successfully"
-    log_debug "Batch processing results:"
-    cat "$temp_results" | head -10  # Show first 10 batch results
-    if [[ $(wc -l < "$temp_results") -gt 10 ]]; then
-        log_debug "... and $(($(wc -l < "$temp_results") - 10)) more batches"
-    fi
-
-    log_info "Data loaded successfully ($total_published messages published)"
-
-    # Clean up temporary file
-    rm -f "$temp_results"
-
+    log_info "Loading data into NATS JetStream..."
+    bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+                        --nats-url "$NATS_URL" --batch-size 100
+    log_info "Data loaded successfully"
+    
     nats stream info "$STREAM_NAME"
 }
 

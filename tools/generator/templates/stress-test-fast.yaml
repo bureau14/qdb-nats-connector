@@ -1,0 +1,34 @@
+name: "Fast Stress Test Pattern"
+table: "stress_test_fast"
+pattern: "stress-{id}"
+
+fields:
+  id:
+    type: "sequence"
+    config:
+      start: 1
+      step: 1
+  
+  sine_burst:
+    type: "stress_pattern"
+    config:
+      pattern: "sine_burst"
+      period: "10s"  # Fast pattern for testing
+      burst_factor: 5
+      baseline_rate: 100
+  
+  square_wave:
+    type: "stress_pattern"
+    config:
+      pattern: "square_wave"
+      period: "8s"
+      burst_factor: 3
+      baseline_rate: 50
+  
+  sawtooth:
+    type: "stress_pattern"
+    config:
+      pattern: "sawtooth"
+      period: "6s"
+      burst_factor: 4
+      baseline_rate: 25

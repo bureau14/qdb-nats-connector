@@ -10,9 +10,20 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 
 	"github.com/bureau14/qdb-nats-connector/connector"
 	"github.com/bureau14/qdb-nats-connector/internal/logging"
+)
+
+// Version information - populated by ldflags at build time
+var (
+	version       = "3.15.0.dev0"
+	commit        = "unknown"
+	buildTime     = "unknown"
+	buildMode     = "unknown"
+	goamd64       = "v3"
+	kernelVersion = "unknown"
 )
 
 // usageStr: CLI help text with all connector options
@@ -46,6 +57,7 @@ Performance Options:
 
 General Options:
     -P, --pid <file>                 File to store PID
+    -v, --version                    Show version information
     -h, --help                       Show this message
 
 Environment Variables:
@@ -58,6 +70,27 @@ Environment Variables:
 // Ex: usage() → help text printed
 func usage() {
 	fmt.Println(usageStr)
+	os.Exit(0)
+}
+
+// showVersion prints version information & exits
+// Out: exit(0)
+// Ex: showVersion() → version info printed
+func showVersion() {
+	fmt.Printf("quasardb nats connector version: %s\n", version)
+	fmt.Printf("build: %s\n", commit)
+	fmt.Printf("date: %s\n\n", buildTime)
+
+	fmt.Printf("target: %s-%s-%s\n", runtime.GOARCH, runtime.GOOS, kernelVersion)
+	fmt.Printf("compiler: %s\n", runtime.Version())
+
+	// Only show arch level for amd64
+	if runtime.GOARCH == "amd64" && goamd64 != "" {
+		fmt.Printf("arch level: %s\n", goamd64)
+	}
+
+	fmt.Printf("\nbuild type: %s\n\n", buildMode)
+	fmt.Println("Copyright (c) 2009-2025, quasardb SAS. All rights reserved.")
 	os.Exit(0)
 }
 
@@ -81,6 +114,13 @@ func runMain() int {
 
 	// Setup structured logging
 	logging.SetupDefault("exe", exe)
+
+	// Check for --version flag early
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-v" {
+			showVersion()
+		}
+	}
 
 	// 1. Load configuration: CLI overrides env vars
 	opts, err := connector.LoadConfig(os.Args[1:], usage)

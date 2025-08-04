@@ -1,0 +1,58 @@
+# Gzipped JSON Data Template  
+# Generates compressed JSON data for binary-safe transport
+# Suitable for large sensor payloads, financial market data, or nested telemetry
+
+name: "gzipped_sensor_data"
+table: "compressed_readings"
+pattern: "compressed-{device_id}"
+
+fields:
+  # Standard timestamp field
+  timestamp:
+    type: "timestamp"
+    config:
+      format: "2006-01-02T15:04:05Z"
+      interval: "10s"
+
+  # Device identifier
+  device_id:
+    type: "sequence"
+    config:
+      start: 1
+      end: 100
+      step: 1
+      repeat: true
+
+  # Compressed JSON payload containing sensor data
+  compressed_payload:
+    type: "gzipped_json"
+    config:
+      compression_level: 6
+      content:
+        sensor_data:
+          type: "random_float"
+          config:
+            min: 18.5
+            max: 25.5
+        pressure:
+          type: "random_int"
+          config:
+            min: 980
+            max: 1020
+        humidity:
+          type: "random_float"
+          config:
+            min: 30.0
+            max: 70.0
+        location:
+          type: "random_string"
+          config:
+            length: 6
+            charset: "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        metadata:
+          type: "sequence"
+          config:
+            start: 1000
+            end: 9999
+            step: 1
+            repeat: true

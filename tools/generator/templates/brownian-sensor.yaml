@@ -1,0 +1,19 @@
+name: "brownian_sensor_test"
+table: "sensor_data"
+fields:
+  timestamp:
+    type: "timestamp"
+    config:
+      mode: "now"
+  temperature:
+    type: "brownian_motion"
+    config:
+      base: 22.5
+      volatility: 0.5
+      bounds: [20.0, 25.0]
+      drift: 0.001
+  sensor_id:
+    type: "sequence"
+    config:
+      start: 1000
+      end: 9999

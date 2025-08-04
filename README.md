@@ -59,7 +59,7 @@ The connector uses a three-phase processing pipeline:
 ### Installation
 
 ```bash
-go build -o qdb-nats-connector
+make build
 ```
 
 ## Configuration
@@ -323,14 +323,26 @@ docs/
 ### Building
 
 ```bash
-# Development build
-direnv exec . go build
+# Build all binaries (release mode with debug symbols)
+direnv exec . make build
+
+# Debug build (for debugging with gdb/dlv)
+direnv exec . BUILD_MODE=debug make build
+
+# Minimal release build (stripped binaries)
+direnv exec . BUILD_MODE=release-min make build
+
+# Build individual binary
+direnv exec . BIN=connector make build-single
 
 # Run tests
-direnv exec . go test ./...
+direnv exec . make test
 
-# Vendor dependencies
-direnv exec . go mod vendor
+# Run linter
+direnv exec . make lint
+
+# Clean build artifacts
+direnv exec . make clean
 ```
 
 ## License

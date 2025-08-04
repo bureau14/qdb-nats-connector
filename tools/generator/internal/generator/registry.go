@@ -19,8 +19,14 @@ import (
 // initializing generators with the provided settings.
 type GeneratorFactory func(config map[string]interface{}) (internal.FieldGenerator, error)
 
-// generators holds the registry of available generator factories indexed by type name.
-var generators = map[string]GeneratorFactory{}
+// GeneratorRegistration holds factory and metadata for a generator
+type GeneratorRegistration struct {
+	Factory  GeneratorFactory
+	Metadata GeneratorMetadata
+}
+
+// generators holds the registry of available generators with metadata
+var generators = map[string]GeneratorRegistration{}
 
 // RegisterGenerator adds a new generator factory to the registry.
 // The generatorType parameter specifies the unique identifier used in field definitions.
@@ -31,8 +37,27 @@ var generators = map[string]GeneratorFactory{}
 //	RegisterGenerator("timestamp", func(config map[string]interface{}) (internal.FieldGenerator, error) {
 //	    return &TimestampGenerator{format: config["format"].(string)}, nil
 //	})
+//
+// RegisterGeneratorWithMetadata adds generator with metadata to registry
+// In: generator type, factory, metadata
+// Out: none
+// Ex: RegisterGeneratorWithMetadata("brownian", factory, metadata)
+func RegisterGeneratorWithMetadata(generatorType string, factory GeneratorFactory, metadata GeneratorMetadata) {
+	generators[generatorType] = GeneratorRegistration{
+		Factory:  factory,
+		Metadata: metadata,
+	}
+}
+
 func RegisterGenerator(generatorType string, factory GeneratorFactory) {
-	generators[generatorType] = factory
+	// Use default metadata for backward compatibility
+	metadata := GeneratorMetadata{
+		Name:         generatorType,
+		Description:  fmt.Sprintf("%s generator", generatorType),
+		Version:      "1.0.0",
+		Capabilities: GeneratorCapabilities{},
+	}
+	RegisterGeneratorWithMetadata(generatorType, factory, metadata)
 }
 
 // GetGenerator retrieves a generator factory by type name.
@@ -46,9 +71,12 @@ func RegisterGenerator(generatorType string, factory GeneratorFactory) {
 //	}
 //	generator, err := factory(config)
 func GetGenerator(generatorType string) (GeneratorFactory, bool) {
-	factory, exists := generators[generatorType]
+	registration, exists := generators[generatorType]
+	if !exists {
+		return nil, false
+	}
 
-	return factory, exists
+	return registration.Factory, true
 }
 
 // CreateGenerator is a convenience function that retrieves a factory and creates a generator.
@@ -57,12 +85,12 @@ func GetGenerator(generatorType string) (GeneratorFactory, bool) {
 // Returns a configured FieldGenerator instance or an error if the type is unknown
 // or configuration is invalid.
 func CreateGenerator(ctx context.Context, generatorType string, config map[string]interface{}) (*GeneratorInstance, error) {
-	factory, exists := GetGenerator(generatorType)
+	registration, exists := generators[generatorType]
 	if !exists {
 		return nil, fmt.Errorf("unknown generator type: %s", generatorType)
 	}
 
-	generator, err := factory(config)
+	generator, err := registration.Factory(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create generator %s: %w", generatorType, err)
 	}
@@ -78,6 +106,66 @@ type GeneratorInstance struct {
 // Generate implements the FieldGenerator interface by delegating to the wrapped generator.
 func (g *GeneratorInstance) Generate(ctx context.Context) (interface{}, error) {
 	return g.generator.Generate(ctx)
+}
+
+// GetGenerator returns the underlying FieldGenerator
+// Out: wrapped generator instance
+// Ex: gen := instance.GetGenerator()
+//
+//nolint:ireturn // Need to expose underlying interface for state management
+func (g *GeneratorInstance) GetGenerator() internal.FieldGenerator {
+	return g.generator
+}
+
+// GetGeneratorMetadata retrieves metadata for a generator type
+// In: generator type name
+// Out: metadata if found, nil otherwise
+// Ex: meta := GetGeneratorMetadata("brownian")
+func GetGeneratorMetadata(generatorType string) *GeneratorMetadata {
+	registration, exists := generators[generatorType]
+	if !exists {
+		return nil
+	}
+
+	return &registration.Metadata
+}
+
+// ListGeneratorsWithMetadata returns all generators with metadata
+// Out: map of type to metadata
+// Ex: all := ListGeneratorsWithMetadata()
+func ListGeneratorsWithMetadata() map[string]GeneratorMetadata {
+	result := make(map[string]GeneratorMetadata)
+	for genType, registration := range generators {
+		result[genType] = registration.Metadata
+	}
+
+	return result
+}
+
+// ListGeneratorsByCapability returns generators with specific capability
+// In: capability name (e.g., "IsStateful", "IsBinary")
+// Out: list of generator types with that capability
+// Ex: stateful := ListGeneratorsByCapability("IsStateful")
+func ListGeneratorsByCapability(capability string) []string {
+	var result []string
+	for genType, registration := range generators {
+		switch capability {
+		case "IsStateful":
+			if registration.Metadata.Capabilities.IsStateful {
+				result = append(result, genType)
+			}
+		case "IsBinary":
+			if registration.Metadata.Capabilities.IsBinary {
+				result = append(result, genType)
+			}
+		case "IsContinuous":
+			if registration.Metadata.Capabilities.IsContinuous {
+				result = append(result, genType)
+			}
+		}
+	}
+
+	return result
 }
 
 // ListGenerators returns a slice of all registered generator type names.

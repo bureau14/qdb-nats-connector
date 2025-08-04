@@ -12,13 +12,20 @@ import (
 
 // recognizedFieldTypes contains the set of valid field generator types
 var recognizedFieldTypes = map[string]bool{
-	"timestamp":     true,
-	"random_int":    true,
-	"random_float":  true,
-	"sequence":      true,
-	"constant":      true,
-	"uuid":          true,
-	"random_string": true,
+	"timestamp":         true,
+	"random_int":        true,
+	"random_float":      true,
+	"sequence":          true,
+	"constant":          true,
+	"uuid":              true,
+	"random_string":     true,
+	"brownian_motion":   true,
+	"network_burst":     true,
+	"pattern_composite": true,
+	"signal_synthesis":  true,
+	"gzipped_json":      true,
+	"stress_pattern":    true,
+	"chaos":             true,
 }
 
 // ParseTemplate reads and parses a YAML template file into a Template struct.

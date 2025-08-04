@@ -99,10 +99,11 @@ fields:
 **Generator Utility (`qdb-data-gen`):**
 - **Purpose**: Create diverse, realistic test datasets using YAML templates
 - **Output**: Stdout-only design using Unix I/O redirection (no --output flag)
-- **Formats**: Multiple formats (JSON Lines, Parquet, compressed data) with base64 encoding for binary content
+- **Formats**: Extensible format architecture (JSON Lines initially, designed for future formats like Parquet)
 - **Modes**: Batch generation and continuous streaming for stress testing
 - **Focus**: Data variety, complex patterns, extensibility, Unix philosophy
 - **Performance**: Cloud parallelization compensates for moderate single-instance speed
+- **Architecture Note**: Format interface designed to support Parquet, Avro, and other columnar formats when needed
 
 **Loader Utility (`qdb-data-load`):**
 - **Purpose**: Publish data to NATS with batching and streaming support
@@ -111,14 +112,16 @@ fields:
 - **Focus**: Format flexibility, reliable delivery, intelligent buffering
 - **Scalability**: Horizontal scaling across cloud instances
 - **Streaming**: Smart batching for 100k+ messages/second through stdin
+- **Performance Note**: Memory management uses standard Go patterns; pooling deferred until profiling proves necessity
 
 **Architecture Benefits:**
 1. **Unix Philosophy**: Stdout-only design enables flexible composition with shell redirection
-2. **Format Extensibility**: Support JSON, Parquet, compressed formats with binary message encoding
+2. **Format Extensibility**: Clean interfaces enable future format support (Parquet, Avro) without architectural changes
 3. **Pattern Flexibility**: Advanced generators (Brownian motion, network bursts, signal synthesis)
 4. **Cloud Scaling**: Multiple instances handle performance requirements
 5. **Template Reusability**: Individual YAML templates shared across projects and teams
 6. **Binary Safety**: Base64 encoding preserves newline-delimited format for binary payloads
+7. **Performance Philosophy**: Start simple, profile first, optimize based on data
 
 ### YAML Template Processing Architecture
 
@@ -324,11 +327,12 @@ qdb-data-gen --mode continuous template.yaml | tee monitoring.log | qdb-data-loa
 
 This approach embraces the Unix philosophy of "do one thing and do it well" while enabling powerful composition through standard shell mechanisms.
 
-**Complex Data Format Support:**
-- **Parquet**: Efficient columnar storage for analytical workloads
-- **Gzipped JSON**: Compressed structured data with base64 encoding for safe newline-delimited transport
-- **Binary formats**: Extensible for custom data representations with automatic base64 encoding
-- **Mixed formats**: Each template generates multiple output formats via stdout
+**Data Format Architecture:**
+- **Current Support**: JSON Lines as primary format, gzipped JSON with base64 encoding
+- **Future-Ready Design**: Extensible format interfaces prepared for Parquet, Avro when customer needs arise
+- **Binary Handling**: Automatic base64 encoding for safe newline-delimited transport
+- **Format Detection**: Content-based detection framework ready for multi-format support
+- **Architecture Decision**: Parquet implementation deferred until actual customer requirements emerge
 - **Newline Safety**: Binary data automatically base64-encoded to preserve line-based format integrity
 
 **Cloud Scaling Strategy:**
@@ -372,14 +376,16 @@ Flexibility = Different instance types for different data complexity
 8. Add stress_pattern and chaos generators for load testing
 9. Add pluggable generator registry for extensibility
 
-**Milestone 3: Multi-Format Support & Streaming Optimization**
-1. Add Parquet output support for analytical workloads (stdout-only with Unix redirection)
+**Milestone 3: Extensible Format Architecture & Streaming Optimization**
+1. Create extensible format interface architecture for future format support
 2. Implement gzip compression with base64 encoding for bandwidth optimization
-3. Create format detection and base64 decoding in loader utility
-4. Support mixed-format output from individual templates via stdout
+3. Create format detection framework and base64 decoding in loader utility
+4. Design parser registry pattern for pluggable format support
 5. Implement Unix-standard stdin support (`--file -`) in qdb-data-load with base64 detection
 6. Add intelligent buffering with `--batch-size` and `--batch-timeout`
-7. Optimize for 100k+ messages/second through smart batching
+7. Optimize for 100k+ messages/second through profile-driven improvements
+8. Note: Parquet support architecture ready but implementation deferred until customer need
+9. Note: Memory pooling deferred until profiling shows >15% GC overhead
 
 **Milestone 4: Cloud Integration & Parallel Generation**
 1. Optimize for horizontal scaling across instances with stdout redirection patterns
@@ -404,10 +410,11 @@ Flexibility = Different instance types for different data complexity
 - **Maintainability**: Go code easier to test and debug than shell scripts
 - **Scalability**: Cloud parallelization overcomes single-instance performance limits
 - **Reusability**: Individual templates shareable across projects and teams
-- **Format Support**: Native handling of Parquet, compression, and binary formats with encoding
+- **Format Ready**: Architecture supports future formats (Parquet, Avro) without redesign
 - **Stress Testing**: Continuous mode enables long-term reliability testing
 - **Unix Compliance**: Standard stdin/stdout patterns for seamless toolchain integration
 - **High-Throughput Streaming**: Smart batching achieves 100k+ messages/second
+- **Performance Strategy**: Profile-driven optimization avoids premature complexity
 
 ### Tradeoffs
 - **Single-Instance Performance**: Moderate speed compensated by horizontal scaling
@@ -437,16 +444,17 @@ Flexibility = Different instance types for different data complexity
 - Stdout-only output design (no --output flag) with Unix I/O redirection
 - Pluggable field generator architecture (timestamp, sequence, brownian, network, signal, gzipped_json, pattern_composite, stress_pattern, chaos)
 - Pattern-based generation for high-cardinality industrial sensor IDs with weighted templates and iterator-based memory efficiency
-- Multi-format output (JSON Lines, Parquet, gzipped formats) with base64 encoding for binary content
+- Extensible format interface (JSON Lines initially, architecture ready for Parquet/Avro when needed)
 - Streaming output to stdout to handle large datasets efficiently
 - Continuous mode with `--mode continuous` flag and rate limiting (`--rate` parameter)
 - Relative timestamp support (now/sliding_window/relative modes) for streaming
 - Template validation with clear error reporting
 - Dynamic value anchoring for evolving data patterns in long-running tests
 - Base64 encoding for binary field types to maintain newline-delimited format integrity
+- Standard Go memory management (pooling only if profiling shows necessity)
 
 **qdb-data-load Requirements:**
-- Multi-format input detection and parsing (JSON Lines, Parquet, compressed)
+- Extensible format detection framework (JSON Lines initially, ready for future formats)
 - Automatic base64 detection and decoding for binary message content
 - Unix-standard stdin support with `--file -` parameter
 - Streaming input processing for large files with intelligent buffering
@@ -454,8 +462,9 @@ Flexibility = Different instance types for different data complexity
 - Batched NATS publishing with adaptive batch sizes
 - Format-aware topic routing and message transformation
 - Compatible with existing NATS JetStream configuration
-- Memory-efficient streaming processing (not row-by-row)
+- Memory-efficient streaming using standard Go patterns (profile before pooling)
 - Transparent handling of base64-encoded binary payloads from qdb-data-gen
+- Parser registry pattern for clean format extensibility
 
 **Shared Requirements:**
 - Error handling using `internal/errors` constructors

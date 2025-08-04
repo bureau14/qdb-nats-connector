@@ -184,7 +184,6 @@ func (s *Sink) pushTables(tables []qdb.WriterTable) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-
 	// Create writer options with push mode and deduplication mode
 	writerOpts := qdb.NewWriterOptions().WithPushMode(s.Options.PushMode).WithDeduplicationMode(s.Options.DeduplicationMode)
 	writer := qdb.NewWriter(writerOpts)

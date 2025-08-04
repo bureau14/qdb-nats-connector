@@ -61,7 +61,7 @@ func createGenerators(template *internal.Template) (map[string]*GeneratorInstanc
 func (e *Engine) GenerateRecords(ctx context.Context, count int, writer io.Writer) error {
 	encoder := json.NewEncoder(writer)
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		record, err := e.generateSingleRecord(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to generate record %d: %w", i+1, err)
@@ -74,6 +74,20 @@ func (e *Engine) GenerateRecords(ctx context.Context, count int, writer io.Write
 	}
 
 	return nil
+}
+
+// GetTemplate returns the engine's template
+// Out: template used for generation
+// Ex: tmpl := engine.GetTemplate()
+func (e *Engine) GetTemplate() *internal.Template {
+	return e.template
+}
+
+// GetGenerators returns the engine's field generators
+// Out: map of field generators
+// Ex: gens := engine.GetGenerators()
+func (e *Engine) GetGenerators() map[string]*GeneratorInstance {
+	return e.generators
 }
 
 // generateSingleRecord creates a single record by calling all field generators

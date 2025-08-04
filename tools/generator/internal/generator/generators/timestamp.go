@@ -18,6 +18,8 @@ type timestampGenerator struct {
 	currentTime time.Time
 	interval    time.Duration
 	format      string
+	mode        string        // "fixed" (default), "now", "relative", "sliding_window"
+	windowSize  time.Duration // for sliding_window mode
 }
 
 // NewTimestampGenerator creates a timestamp generator from configuration options.
@@ -25,6 +27,9 @@ type timestampGenerator struct {
 //   - start: string timestamp for initial value (defaults to current time)
 //   - interval: string duration between timestamps (defaults to "1s")
 //   - format: string time format (defaults to RFC3339)
+//   - mode: string generation mode ("fixed", "now", "relative", "sliding_window")
+//   - offset: string duration offset from now for "relative" mode
+//   - window: string duration for "sliding_window" mode (defaults to "5m")
 func NewTimestampGenerator(config map[string]interface{}) (*timestampGenerator, error) {
 	gen := &timestampGenerator{
 		currentTime: time.Now(),
@@ -52,16 +57,78 @@ func NewTimestampGenerator(config map[string]interface{}) (*timestampGenerator, 
 		gen.format = format
 	}
 
+	// Default mode is "fixed" for backward compatibility
+	gen.mode = "fixed"
+
+	if modeStr, ok := config["mode"].(string); ok {
+		switch modeStr {
+		case "fixed", "now", "relative", "sliding_window":
+			gen.mode = modeStr
+		default:
+			return nil, fmt.Errorf("invalid timestamp mode: %s", modeStr)
+		}
+	}
+
+	// Handle relative mode offset
+	if gen.mode == "relative" {
+		if offsetStr, ok := config["offset"].(string); ok {
+			offset, err := time.ParseDuration(offsetStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid offset format: %w", err)
+			}
+			gen.currentTime = time.Now().Add(offset)
+		}
+	}
+
+	// Handle sliding window size
+	if gen.mode == "sliding_window" {
+		if windowStr, ok := config["window"].(string); ok {
+			window, err := time.ParseDuration(windowStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid window format: %w", err)
+			}
+			gen.windowSize = window
+		} else {
+			gen.windowSize = 5 * time.Minute // default 5 minute window
+		}
+	}
+
 	return gen, nil
 }
 
-// Generate returns a formatted timestamp and advances the internal time.
-// Each call increments the current time by the configured interval.
+// Generate returns a formatted timestamp based on the configured mode.
+// Behavior varies by mode:
+//   - "fixed": Sequential from start time (original behavior)
+//   - "now": Always current wall clock time
+//   - "relative": Sequential from offset time
+//   - "sliding_window": Random within time window
 func (g *timestampGenerator) Generate(ctx context.Context) (interface{}, error) {
-	timestamp := g.currentTime.Format(g.format)
-	g.currentTime = g.currentTime.Add(g.interval)
+	var timestamp time.Time
 
-	return timestamp, nil
+	switch g.mode {
+	case "now":
+		// Always use current wall clock time
+		timestamp = time.Now()
+
+	case "relative":
+		// Use sequential time starting from offset
+		timestamp = g.currentTime
+		g.currentTime = g.currentTime.Add(g.interval)
+
+	case "sliding_window":
+		// Generate timestamp within the sliding window
+		now := time.Now()
+		windowStart := now.Add(-g.windowSize)
+		// Random position within window for realistic distribution
+		timestamp = windowStart.Add(time.Duration(float64(g.windowSize) * 0.5))
+
+	default: // "fixed"
+		// Original behavior: sequential from start time
+		timestamp = g.currentTime
+		g.currentTime = g.currentTime.Add(g.interval)
+	}
+
+	return timestamp.Format(g.format), nil
 }
 
 // init registers the timestamp generator with the global registry.

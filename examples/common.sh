@@ -284,10 +284,19 @@ wait_for_row_count() {
             local current_count
             current_count=$(parse_processed_rows "$log_file")
             
+            # DEBUG: Log every check iteration
+            log_debug "[DEBUG] Elapsed: ${elapsed}s, Current count: $current_count, Expected: $expected_rows"
+            
             # Report progress if count changed
             if [[ $current_count -ne $last_reported_count ]]; then
                 log_info "Progress: $current_count / $expected_rows rows processed"
                 last_reported_count=$current_count
+                
+                # DEBUG: Show recent log entries when progress is made
+                log_debug "[DEBUG] Recent log entries showing progress:"
+                tail -3 "$log_file" | while IFS= read -r line; do
+                    log_debug "[DEBUG] Log: $line"
+                done
             fi
             
             # Check if we've reached the expected count
@@ -295,6 +304,8 @@ wait_for_row_count() {
                 log_info "Successfully processed $current_count rows (expected: $expected_rows)"
                 return 0
             fi
+        else
+            log_debug "[DEBUG] Log file $log_file does not exist yet"
         fi
         
         # Check if process is still running (if PID file provided)
@@ -305,10 +316,11 @@ wait_for_row_count() {
                 log_error "Connector process (PID: $pid) has exited unexpectedly"
                 if [[ -f "$log_file" ]]; then
                     log_error "Last log entries:"
-                    tail -5 "$log_file"
+                    tail -10 "$log_file"
                 fi
                 return 1
             fi
+            log_debug "[DEBUG] Connector process $pid is still running"
         fi
         
         sleep "$check_interval"

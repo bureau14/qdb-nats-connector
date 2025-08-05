@@ -20,6 +20,9 @@ type Template struct {
 
 	// Fields is an ordered list of field definitions (changed from map)
 	Fields []FieldDefinition `yaml:"fields"`
+
+	// PostTransformations defines optional transformations to apply to the entire record
+	PostTransformations []TransformationDefinition `yaml:"post_transformations,omitempty"`
 }
 
 // UnmarshalYAML implements custom YAML unmarshaling to support both old and new formats.
@@ -28,10 +31,11 @@ type Template struct {
 func (t *Template) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	// Try new format first (fields as slice)
 	var newFormat struct {
-		Name    string            `yaml:"name"`
-		Table   string            `yaml:"table"`
-		Pattern string            `yaml:"pattern"`
-		Fields  []FieldDefinition `yaml:"fields"`
+		Name                string                     `yaml:"name"`
+		Table               string                     `yaml:"table"`
+		Pattern             string                     `yaml:"pattern"`
+		Fields              []FieldDefinition          `yaml:"fields"`
+		PostTransformations []TransformationDefinition `yaml:"post_transformations,omitempty"`
 	}
 
 	err := unmarshal(&newFormat)
@@ -44,10 +48,11 @@ func (t *Template) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	// Fall back to old format (fields as map)
 	var oldFormat struct {
-		Name    string                            `yaml:"name"`
-		Table   string                            `yaml:"table"`
-		Pattern string                            `yaml:"pattern"`
-		Fields  map[string]map[string]interface{} `yaml:"fields"`
+		Name                string                            `yaml:"name"`
+		Table               string                            `yaml:"table"`
+		Pattern             string                            `yaml:"pattern"`
+		Fields              map[string]map[string]interface{} `yaml:"fields"`
+		PostTransformations []TransformationDefinition        `yaml:"post_transformations,omitempty"`
 	}
 
 	err = unmarshal(&oldFormat)
@@ -59,6 +64,7 @@ func (t *Template) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	t.Name = oldFormat.Name
 	t.Table = oldFormat.Table
 	t.Pattern = oldFormat.Pattern
+	t.PostTransformations = oldFormat.PostTransformations
 	t.Fields = make([]FieldDefinition, 0, len(oldFormat.Fields))
 
 	// Convert map to slice, preserving field names
@@ -109,6 +115,12 @@ type FieldDefinition struct {
 	// Internal marks fields that should not appear in the final output
 	// Used for intermediate calculations
 	Internal bool `yaml:"internal,omitempty"`
+}
+
+// TransformationDefinition specifies a transformation to apply to generated data
+type TransformationDefinition struct {
+	Type   string                 `yaml:"type"`
+	Config map[string]interface{} `yaml:"config,omitempty"`
 }
 
 // FieldGenerator defines the interface for generating field values.

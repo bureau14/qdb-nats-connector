@@ -29,11 +29,21 @@ func (w *Worker) Run(ctx context.Context, batches <-chan batch.Batch, topic stri
 		select {
 		case <-ctx.Done():
 			slog.Info("Worker received cancellation signal", "worker_id", w.id)
+			w.publisher.OnWorkerCompleted()
 
 			return
 		case batchData, ok := <-batches:
 			if !ok {
 				slog.Debug("Batch channel closed", "worker_id", w.id)
+				w.publisher.OnWorkerCompleted()
+
+				return
+			}
+
+			// Check if this is a tombstone batch
+			if batchData.IsTombstone {
+				slog.Debug("Worker received tombstone", "worker_id", w.id)
+				w.publisher.OnWorkerCompleted()
 
 				return
 			}

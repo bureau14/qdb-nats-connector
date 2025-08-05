@@ -5,12 +5,14 @@ import (
 	"time"
 
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/tools/loader/internal"
 )
 
 // Batch represents a collection of messages ready for publishing
 type Batch struct {
-	Messages [][]byte
-	Size     int
+	Messages    [][]byte
+	Size        int
+	IsTombstone bool // true if this is a tombstone batch
 }
 
 // Batcher collects messages into batches based on size and timeout
@@ -20,13 +22,13 @@ type Batcher struct {
 	messages [][]byte
 	timer    *time.Timer
 	output   chan<- Batch
-	input    <-chan []byte
+	input    <-chan internal.Message
 	metrics  *MetricsCollector
 }
 
 // NewBatcher creates a new batcher with the specified size and timeout
 // Returns the batcher instance and a channel to receive batches
-func NewBatcher(size int, timeout time.Duration, input <-chan []byte) (batcher *Batcher, output <-chan Batch) {
+func NewBatcher(size int, timeout time.Duration, input <-chan internal.Message) (batcher *Batcher, output <-chan Batch) {
 	if size <= 0 {
 		size = 100 // Default batch size
 	}
@@ -68,6 +70,8 @@ func (b *Batcher) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				// Context cancelled, send remaining messages as final batch
 				b.sendFinalBatch()
+				// Send tombstone to signal downstream workers
+				b.sendTombstoneBatch()
 
 				return
 
@@ -79,11 +83,24 @@ func (b *Batcher) Start(ctx context.Context) error {
 					return
 				}
 
+				// Check if this is a tombstone message
+				if message.Type == internal.MessageTypeTombstone {
+					// Send any pending messages first
+					if len(b.messages) > 0 {
+						b.sendBatch()
+					}
+
+					// Send tombstone batch
+					b.sendTombstoneBatch()
+
+					return
+				}
+
 				// Track message
 				b.metrics.IncrementMessages()
 
-				// Add message to current batch
-				b.messages = append(b.messages, message)
+				// Add message data to current batch
+				b.messages = append(b.messages, message.Data)
 
 				// If this is the first message, start the timer
 				if len(b.messages) == 1 {
@@ -117,20 +134,23 @@ func (b *Batcher) sendBatch() {
 	b.metrics.IncrementBatches()
 
 	batch := Batch{
-		Messages: make([][]byte, len(b.messages)),
-		Size:     len(b.messages),
+		Messages:    make([][]byte, len(b.messages)),
+		Size:        len(b.messages),
+		IsTombstone: false,
 	}
 
 	// Copy messages to avoid sharing slices
 	copy(batch.Messages, b.messages)
 
-	// Send batch to output channel
+	// Send batch to output channel - block until space available
+	// No default case to prevent silent data loss
 	select {
 	case b.output <- batch:
 		// Batch sent successfully
-	default:
-		// Output channel full, this shouldn't happen with proper buffering
-		// but we'll handle it gracefully by continuing
+	case <-time.After(5 * time.Second):
+		// Log error if blocked too long, but continue trying
+		// This indicates backpressure issues that need investigation
+		panic("batch channel blocked for 5+ seconds - indicates severe backpressure")
 	}
 
 	// Reset the message buffer
@@ -144,6 +164,25 @@ func (b *Batcher) sendBatch() {
 func (b *Batcher) sendFinalBatch() {
 	if len(b.messages) > 0 {
 		b.sendBatch()
+	}
+}
+
+// sendTombstoneBatch sends a tombstone batch to signal end of data
+func (b *Batcher) sendTombstoneBatch() {
+	batch := Batch{
+		Messages:    nil,
+		Size:        -1,
+		IsTombstone: true,
+	}
+
+	// Send tombstone batch to output channel - must succeed
+	// Block until space available since tombstone is critical for clean shutdown
+	select {
+	case b.output <- batch:
+		// Tombstone sent successfully
+	case <-time.After(5 * time.Second):
+		// Log error if blocked too long, but continue trying
+		panic("tombstone send blocked for 5+ seconds - critical shutdown failure")
 	}
 }
 
@@ -182,7 +221,9 @@ func (b *Batcher) GetMetrics() Metrics {
 }
 
 // cleanup closes the output channel and stops the timer
+// This signals all downstream workers that no more batches are coming
 func (b *Batcher) cleanup() {
 	b.stopTimer()
+	// Close channel after tombstone to signal all workers
 	close(b.output)
 }

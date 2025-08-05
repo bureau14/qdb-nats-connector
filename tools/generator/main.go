@@ -20,6 +20,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/tools/generator/internal/generator"
 	"github.com/bureau14/qdb-nats-connector/tools/generator/internal/generator/continuous"
 	_ "github.com/bureau14/qdb-nats-connector/tools/generator/internal/generator/generators"
+	_ "github.com/bureau14/qdb-nats-connector/tools/generator/internal/transformer/transformers"
 	"github.com/spf13/pflag"
 )
 

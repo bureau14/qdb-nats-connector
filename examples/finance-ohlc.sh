@@ -52,51 +52,18 @@ usage() {
     echo "  NUM_MESSAGES   - Number of messages to generate (default: 1000)"
     echo "  TESTDATA_DIR   - Directory for test data (default: ./testdata)"
     echo "  DEBUG          - Enable debug logging (1 = enabled)"
-    echo
-    echo "Requirements:"
-    echo "  GNU parallel   - Required for optimized data generation and loading"
     exit 1
 }
 
 action_generate() {
-    log_info "Generating $NUM_MESSAGES OHLC market messages..."
-
     # Verify NUM_MESSAGES is a valid number
     if ! [[ "$NUM_MESSAGES" =~ ^[0-9]+$ ]] || [[ "$NUM_MESSAGES" -eq 0 ]]; then
         die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
-    log_info "Generating $NUM_MESSAGES OHLC market messages with compression..."
-    
-    # Generate data, decompress to fix fields, then recompress
-    bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" | while IFS= read -r line; do
-        # Extract and decode the message field
-        message=$(echo "$line" | jq -r '.message' | base64 -d | gunzip)
-        
-        # Transform the message content
-        transformed=$(echo "$message" | jq -c '
-          .symbol as $sym_num |
-          .o as $open |
-          .c as $close |
-          {
-            exchange: "NASDAQ",
-            symbol: (["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA"][(($sym_num - 1) % 5)]),
-            timestamp: .timestamp,
-            o: $open,
-            h: (([$open, $close] | max) * 1.02),
-            l: (([$open, $close] | min) * 0.98),
-            c: $close,
-            v: .v
-          }')
-        
-        # Re-compress and encode
-        encoded=$(echo "$transformed" | gzip | base64 -w0)
-        
-        # Output the complete message
-        echo "{\"message\":\"$encoded\"}"
-    done > "$DATA_FILE"
-    
-    log_info "Generated $NUM_MESSAGES OHLC messages in $DATA_FILE"
+    log_info "Generating $NUM_MESSAGES OHLC messages..."
+    ../bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" > "$DATA_FILE"
+    log_info "Generated $NUM_MESSAGES messages in $DATA_FILE"
 }
 
 # Create NATS JetStream stream and QuasarDB tables
@@ -167,7 +134,7 @@ action_load() {
     fi
 
     log_info "Loading data into NATS JetStream..."
-    bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    ../bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
                         --nats-url "$NATS_URL" --batch-size 100
     log_info "Data loaded successfully"
     

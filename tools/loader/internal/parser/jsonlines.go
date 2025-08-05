@@ -53,7 +53,15 @@ func (p *JSONLinesParser) Parse(reader io.Reader) (messages <-chan internal.Mess
 			messageChan <- internal.Message{
 				Data:   data,
 				Format: internal.FormatJSONLines,
+				Type:   internal.MessageTypeData,
 			}
+		}
+
+		// Send tombstone message to signal end of data
+		messageChan <- internal.Message{
+			Data:   nil,
+			Format: internal.FormatJSONLines,
+			Type:   internal.MessageTypeTombstone,
 		}
 
 		err := scanner.Err()

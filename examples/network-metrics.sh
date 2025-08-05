@@ -112,7 +112,7 @@ action_generate() {
 
     log_info "Generating $NUM_MESSAGES network metrics messages..."
     # Generate flat structure first
-    bin/qdb-data-gen network-metrics-generator.yaml --count "$NUM_MESSAGES" | \
+    ../bin/qdb-data-gen network-metrics-generator.yaml --count "$NUM_MESSAGES" | \
     jq -c '{
       device: {
         info: {
@@ -235,7 +235,7 @@ action_load() {
     fi
 
     log_info "Loading data into NATS JetStream..."
-    bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    ../bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
                           --nats-url "$NATS_URL" --batch-size 100
     log_info "Data loaded successfully"
 

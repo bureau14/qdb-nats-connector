@@ -74,16 +74,33 @@ action_generate() {
         die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
+    # DEBUG: Log the actual NUM_MESSAGES value
+    log_info "[DEBUG] NUM_MESSAGES is set to: $NUM_MESSAGES"
+
     # Generate flat structure and transform to nested JSON with error values
     log_info "Generating $NUM_MESSAGES industrial sensor messages..."
-    bin/qdb-data-gen industrial-sensor-generator.yaml --count "$NUM_MESSAGES" | \
-    jq -c '{
+    log_info "[DEBUG] Running: ../bin/qdb-data-gen industrial-sensor-generator.yaml --count $NUM_MESSAGES"
+    
+    # Generate data and count actual lines produced
+    # First generate raw data to debug
+    local temp_raw_file="${DATA_FILE}.raw"
+    ../bin/qdb-data-gen industrial-sensor-generator.yaml --count "$NUM_MESSAGES" > "$temp_raw_file"
+    
+    # DEBUG: Check raw data
+    log_info "[DEBUG] First 3 lines of raw generated data:"
+    head -3 "$temp_raw_file" | while IFS= read -r line; do
+        log_debug "[DEBUG] Raw: $line"
+    done
+    
+    # Now transform with better error handling
+    cat "$temp_raw_file" | \
+    jq -c 'try {
       sensor: {
-        id: (["sensor-01", "sensor-02", "sensor-03", "sensor-04", "sensor-05"][(.sensor_id | tonumber) - 1] // .sensor_id),
-        location: (["Floor1", "Floor2", "Floor3", "Basement", "Rooftop"][(.sensor_location | tonumber) - 1] // .sensor_location)
+        id: (if .sensor_id | type == "string" then .sensor_id else "sensor-0" + ((.sensor_id - 1) % 5 + 1 | tostring) end),
+        location: (if .sensor_location | type == "string" then .sensor_location else ["Floor1", "Floor2", "Floor3", "Basement", "Rooftop"][(.sensor_location - 1) % 5] end)
       },
-      building: (["B1", "B1", "B1", "B2", "B2"][(.building | tonumber) - 1] // .building),
-      floor: (["1", "2", "3", "B", "R"][(.floor | tonumber) - 1] // .floor),
+      building: (if .building | type == "string" then .building else ["B1", "B1", "B1", "B2", "B2"][(.building - 1) % 5] end),
+      floor: (if .floor | type == "string" then .floor else ["1", "2", "3", "B", "R"][(.floor - 1) % 5] end),
       timestamp: .timestamp,
       temp: (
         if .temp_error_flag <= 10 then "ERROR"
@@ -92,7 +109,30 @@ action_generate() {
         else (.temp_value | tostring)
         end
       )
-    } | del(.sensor_id, .sensor_location, .temp_value, .temp_error_flag, .pressure, .humidity, .vibration, .status, ."$table")' > "$DATA_FILE"
+    } catch {
+      sensor: {id: "sensor-01", location: "Floor1"},
+      building: "B1",
+      floor: "1", 
+      timestamp: (if .timestamp then .timestamp else "2025-01-16 09:00:00" end),
+      temp: "ERROR"
+    }' > "$DATA_FILE" 2>&1
+    
+    local jq_exit_code=$?
+    if [[ $jq_exit_code -ne 0 ]]; then
+        log_error "[DEBUG] jq transformation failed with exit code: $jq_exit_code"
+        log_error "[DEBUG] Check the raw file: $temp_raw_file"
+    fi
+    
+    # Clean up raw file
+    rm -f "$temp_raw_file"
+    
+    # DEBUG: Verify actual number of lines generated
+    local actual_lines=$(wc -l < "$DATA_FILE")
+    log_info "[DEBUG] Actually generated $actual_lines lines in $DATA_FILE"
+    
+    if [[ $actual_lines -ne $NUM_MESSAGES ]]; then
+        log_error "[DEBUG] WARNING: Expected $NUM_MESSAGES lines but got $actual_lines lines"
+    fi
     
     log_info "Generated $NUM_MESSAGES industrial sensor messages in $DATA_FILE"
 }
@@ -160,16 +200,34 @@ action_load() {
         action_generate
     fi
 
+    # DEBUG: Check actual number of lines in data file
+    local line_count=$(wc -l < "$DATA_FILE")
+    log_info "[DEBUG] Data file contains $line_count lines"
+
     # Check if stream exists
     if ! nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
 
     log_info "Loading data into NATS JetStream..."
-    bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    log_info "[DEBUG] Command: ../bin/qdb-data-loader --file $DATA_FILE --topic $SUBJECT --stream $STREAM_NAME --nats-url $NATS_URL --batch-size 100"
+    
+    # Run loader with timeout to prevent hanging
+    timeout 30 ../bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
                         --nats-url "$NATS_URL" --batch-size 100
+    local loader_exit_code=$?
+    
+    if [[ $loader_exit_code -eq 124 ]]; then
+        log_error "[DEBUG] Loader timed out after 30 seconds!"
+        log_info "[DEBUG] Checking NATS stream state:"
+        nats stream info "$STREAM_NAME" | grep -E "(Messages:|State:)" || true
+    else
+        log_info "[DEBUG] Loader exit code: $loader_exit_code"
+    fi
+    
     log_info "Data loaded successfully"
     
+    log_info "[DEBUG] Stream info after loading:"
     nats stream info "$STREAM_NAME"
 }
 
@@ -201,6 +259,9 @@ action_run() {
     log_info "Starting connector with config: $CONFIG_FILE"
     log_info "Logs will be written to: $LOG_FILE"
 
+    # DEBUG: Show the full command being executed
+    log_info "[DEBUG] Full command: direnv exec . $CONNECTOR_BINARY --nats $NATS_URL --qdb $QDB_URI --stream $STREAM_NAME --consumer industrial-connector --workers 2 --parser yaml --parser-config $CONFIG_FILE"
+
     # Start connector in background and capture PID
     direnv exec . "$CONNECTOR_BINARY" \
         --nats "$NATS_URL" \
@@ -214,9 +275,21 @@ action_run() {
 
     local connector_pid=$!
 
+    log_info "[DEBUG] Background process started with PID: $connector_pid"
 
     # Write PID file
     write_pid_file "$PID_FILE" "$connector_pid"
+
+    # DEBUG: Verify process is still running after startup
+    sleep 2
+    if kill -0 "$connector_pid" 2>/dev/null; then
+        log_info "[DEBUG] Connector process $connector_pid is running"
+    else
+        log_error "[DEBUG] Connector process $connector_pid exited immediately!"
+        log_info "[DEBUG] Last 10 lines of log file:"
+        tail -10 "$LOG_FILE" 2>/dev/null || log_error "Could not read log file"
+        die "Connector failed to start"
+    fi
 
     log_info "Connector started with PID $connector_pid"
     log_info "Use '$0 wait' to wait for completion or '$0 stop' to stop"

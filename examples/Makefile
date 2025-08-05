@@ -26,8 +26,8 @@ MAKEFLAGS += --no-builtin-rules
 .SUFFIXES:
 
 # Tool binaries
-GENERATOR := bin/qdb-data-gen
-LOADER := bin/qdb-data-loader
+GENERATOR := ../bin/qdb-data-gen
+LOADER := ../bin/qdb-data-loader
 
 # Default target
 .DEFAULT_GOAL := help
@@ -96,8 +96,8 @@ help: ## Show this help message
 .PHONY: build-tools
 build-tools: ## Build required Go tools (qdb-data-gen and qdb-data-loader)
 	@$(call LOG_INFO,Building qdb-data-gen and qdb-data-loader)
-	@cd .. && direnv exec . go build -o examples/bin/qdb-data-gen ./tools/generator
-	@cd .. && direnv exec . go build -o examples/bin/qdb-data-loader ./tools/loader
+	@cd .. && direnv exec . go build -o bin/qdb-data-gen ./tools/generator
+	@cd .. && direnv exec . go build -o bin/qdb-data-loader ./tools/loader
 	@$(call LOG_SUCCESS,Tools built successfully)
 
 # =============================================================================

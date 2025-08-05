@@ -25,6 +25,9 @@ type Publisher struct {
 	messagesPublished int64
 	batchesProcessed  int64
 	publishErrors     int64
+	// Completion tracking
+	workersCompleted int64
+	completionChan   chan struct{}
 }
 
 // NewPublisher creates a new publisher with the specified number of workers
@@ -34,11 +37,12 @@ func NewPublisher(conn *internal.Connection, workers int, input <-chan batch.Bat
 	}
 
 	return &Publisher{
-		connection: conn,
-		workers:    workers,
-		input:      input,
-		topic:      topic,
-		semaphore:  make(chan struct{}, workers), // Limit concurrent publishing
+		connection:     conn,
+		workers:        workers,
+		input:          input,
+		topic:          topic,
+		semaphore:      make(chan struct{}, workers), // Limit concurrent publishing
+		completionChan: make(chan struct{}),
 	}
 }
 
@@ -82,6 +86,7 @@ func (p *Publisher) Start(ctx context.Context) error {
 	go func() {
 		wg.Wait()
 		slog.Info("All publisher workers completed")
+		close(p.completionChan)
 	}()
 
 	return nil
@@ -153,4 +158,15 @@ func (p *Publisher) GetMetrics() (messagesPublished, batchesProcessed int64) {
 func (p *Publisher) GetBackpressureMetrics() (circuitTrips, backpressureEvents int64) {
 	// No backpressure in this tool - always return 0
 	return 0, 0
+}
+
+// GetCompletionChannel returns a channel that closes when all workers complete
+func (p *Publisher) GetCompletionChannel() <-chan struct{} {
+	return p.completionChan
+}
+
+// OnWorkerCompleted should be called when a worker completes after tombstone
+func (p *Publisher) OnWorkerCompleted() {
+	completed := atomic.AddInt64(&p.workersCompleted, 1)
+	slog.Debug("Worker completed", "completed_count", completed, "total_workers", p.workers)
 }

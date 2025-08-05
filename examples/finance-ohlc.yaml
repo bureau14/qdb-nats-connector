@@ -33,13 +33,13 @@ transformations:
   # Extract exchange and symbol for dynamic table routing (must happen first)
   - step: "extract_field"
     config:
-      source: "market.exchange"
+      source: "exchange"
       target: "exchange"
       type: "string"
 
   - step: "extract_field"
     config:
-      source: "market.symbol"
+      source: "symbol"
       target: "stock_id"
       type: "string"
 
@@ -55,11 +55,11 @@ transformations:
   - step: "extract_table"
     # Uses default source: "$table"
 
-  # Extract and convert timestamp field (Unix timestamp)
+  # Extract and convert timestamp field (ISO8601 format)
   - step: "extract_index"
     config:
       source: "timestamp"
-      format: "unix"
+      format: "2006-01-02T15:04:05Z"
 
   # Extract OHLC price data
   - step: "extract_field"

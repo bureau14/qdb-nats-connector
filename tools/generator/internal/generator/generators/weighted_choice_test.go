@@ -45,6 +45,7 @@ func TestNewWeightedChoiceGenerator_WeightValidation(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewWeightedChoiceGenerator() expected error but got none")
+
 					return
 				}
 				if tt.errContains != "" && !containsString(err.Error(), tt.errContains) {

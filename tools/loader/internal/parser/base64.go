@@ -53,7 +53,15 @@ func (p *Base64Parser) Parse(reader io.Reader) (messages <-chan internal.Message
 			messageChan <- internal.Message{
 				Data:   decoded,
 				Format: p.originalFormat,
+				Type:   internal.MessageTypeData,
 			}
+		}
+
+		// Send tombstone message to signal end of data
+		messageChan <- internal.Message{
+			Data:   nil,
+			Format: p.originalFormat,
+			Type:   internal.MessageTypeTombstone,
 		}
 
 		err := scanner.Err()

@@ -291,8 +291,8 @@ func runLoader(file, topic, stream string, batchSize int, batchTimeout time.Dura
 	var wg sync.WaitGroup
 	var pub *publisher.Publisher
 
-	// Create input channel for batcher
-	batchInput := make(chan []byte, 100)
+	// Create input channel for batcher (now handles Message types)
+	batchInput := make(chan internal.Message, 100)
 
 	// Create batcher (adaptive or regular based on flag)
 	var batcherInterface interface {
@@ -340,14 +340,15 @@ func runLoader(file, topic, stream string, batchSize int, batchTimeout time.Dura
 				break
 			}
 
-			// Send message data to batcher
+			// Send complete message to batcher (including tombstone)
 			select {
-			case batchInput <- message.Data:
+			case batchInput <- message:
 				// Message sent to batcher
 			case <-ctx.Done():
 				return
 			}
 		}
+		slog.Info("Parser completed, all messages sent to batcher")
 	}()
 
 	// Start publisher
@@ -356,7 +357,7 @@ func runLoader(file, topic, stream string, batchSize int, batchTimeout time.Dura
 		return connectorErrors.NewInvalidConfigError("loader", "failed to start publisher: "+err.Error())
 	}
 
-	// Start goroutine to track published messages and batch metrics
+	// Start goroutine for completion tracking and metrics
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -373,6 +374,12 @@ func runLoader(file, topic, stream string, batchSize int, batchTimeout time.Dura
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-pub.GetCompletionChannel():
+				// All workers have completed after processing tombstone
+				messages, batches := pub.GetMetrics()
+				slog.Info("All messages processed via tombstone signal", "total_messages", messages, "total_batches", batches)
+
 				return
 			case <-pubTicker.C:
 				if shutdownRequested {

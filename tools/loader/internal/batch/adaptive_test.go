@@ -3,10 +3,12 @@ package batch
 import (
 	"sync/atomic"
 	"testing"
+
+	"github.com/bureau14/qdb-nats-connector/tools/loader/internal"
 )
 
 func TestAdaptiveBatcher_MaxSizeLimit(t *testing.T) {
-	input := make(chan []byte, 10)
+	input := make(chan internal.Message, 10)
 	maxSize := 100
 	batcher, _ := NewAdaptiveBatcher(10, maxSize, 1000, 50, input)
 
@@ -18,7 +20,7 @@ func TestAdaptiveBatcher_MaxSizeLimit(t *testing.T) {
 }
 
 func TestAdaptiveBatcher_MinSizeLimit(t *testing.T) {
-	input := make(chan []byte, 10)
+	input := make(chan internal.Message, 10)
 	minSize := 10
 	batcher, _ := NewAdaptiveBatcher(minSize, 100, 1000, 50, input)
 

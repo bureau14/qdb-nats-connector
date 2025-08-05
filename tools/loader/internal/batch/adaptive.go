@@ -8,6 +8,7 @@ import (
 	"time"
 
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/tools/loader/internal"
 )
 
 // AdaptiveBatcher adjusts batch size based on throughput and latency
@@ -24,7 +25,7 @@ type AdaptiveBatcher struct {
 
 // NewAdaptiveBatcher creates a new adaptive batcher with the specified parameters
 // Returns the batcher instance and a channel to receive batches
-func NewAdaptiveBatcher(minSize, maxSize, targetRate int, timeout time.Duration, input <-chan []byte) (batcher *AdaptiveBatcher, output <-chan Batch) {
+func NewAdaptiveBatcher(minSize, maxSize, targetRate int, timeout time.Duration, input <-chan internal.Message) (batcher *AdaptiveBatcher, output <-chan Batch) {
 	if minSize <= 0 {
 		minSize = 10
 	}
@@ -89,6 +90,8 @@ func (ab *AdaptiveBatcher) runBatchingLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			ab.sendAdaptiveFinalBatch()
+			// Send tombstone to signal downstream workers
+			ab.sendAdaptiveTombstoneBatch()
 
 			return
 
@@ -99,11 +102,24 @@ func (ab *AdaptiveBatcher) runBatchingLoop(ctx context.Context) {
 				return
 			}
 
+			// Check if this is a tombstone message
+			if message.Type == internal.MessageTypeTombstone {
+				// Send any pending messages first
+				if len(ab.messages) > 0 {
+					ab.sendAdaptiveBatch()
+				}
+
+				// Send tombstone batch
+				ab.sendAdaptiveTombstoneBatch()
+
+				return
+			}
+
 			// Track message
 			ab.metrics.IncrementMessages()
 
-			// Add message to current batch
-			ab.messages = append(ab.messages, message)
+			// Add message data to current batch
+			ab.messages = append(ab.messages, message.Data)
 
 			// If this is the first message, start the timer
 			if len(ab.messages) == 1 {
@@ -153,20 +169,23 @@ func (ab *AdaptiveBatcher) sendAdaptiveBatch() {
 
 	// Create batch manually to avoid double-counting in parent metrics
 	batch := Batch{
-		Messages: make([][]byte, len(ab.messages)),
-		Size:     len(ab.messages),
+		Messages:    make([][]byte, len(ab.messages)),
+		Size:        len(ab.messages),
+		IsTombstone: false,
 	}
 
 	// Copy messages to avoid sharing slices
 	copy(batch.Messages, ab.messages)
 
-	// Send batch to output channel
+	// Send batch to output channel - block until space available
+	// No default case to prevent silent data loss
 	select {
 	case ab.output <- batch:
 		// Batch sent successfully
-	default:
-		// Output channel full, this shouldn't happen with proper buffering
-		// but we'll handle it gracefully by continuing
+	case <-time.After(5 * time.Second):
+		// Log error if blocked too long, but continue trying
+		// This indicates backpressure issues that need investigation
+		panic("adaptive batch channel blocked for 5+ seconds - indicates severe backpressure")
 	}
 
 	// Reset the message buffer
@@ -180,6 +199,25 @@ func (ab *AdaptiveBatcher) sendAdaptiveBatch() {
 func (ab *AdaptiveBatcher) sendAdaptiveFinalBatch() {
 	if len(ab.messages) > 0 {
 		ab.sendAdaptiveBatch()
+	}
+}
+
+// sendAdaptiveTombstoneBatch sends a tombstone batch to signal end of data
+func (ab *AdaptiveBatcher) sendAdaptiveTombstoneBatch() {
+	batch := Batch{
+		Messages:    nil,
+		Size:        -1,
+		IsTombstone: true,
+	}
+
+	// Send tombstone batch to output channel - must succeed
+	// Block until space available since tombstone is critical for clean shutdown
+	select {
+	case ab.output <- batch:
+		// Tombstone sent successfully
+	case <-time.After(5 * time.Second):
+		// Log error if blocked too long, but continue trying
+		panic("adaptive tombstone send blocked for 5+ seconds - critical shutdown failure")
 	}
 }
 
@@ -253,4 +291,12 @@ func (ab *AdaptiveBatcher) min(a, b int) int {
 
 func (ab *AdaptiveBatcher) max(a, b int) int {
 	return int(math.Max(float64(a), float64(b)))
+}
+
+// cleanup closes the output channel and stops the timer for adaptive batcher
+// This signals all downstream workers that no more batches are coming
+func (ab *AdaptiveBatcher) cleanup() {
+	ab.stopTimer()
+	// Close channel after tombstone to signal all workers
+	close(ab.output)
 }

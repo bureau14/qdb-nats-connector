@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bureau14/qdb-nats-connector/tools/generator/internal"
+	"github.com/bureau14/qdb-nats-connector/tools/generator/internal/transformer"
 )
 
 // Engine coordinates the data generation process by managing templates and generators.
@@ -92,7 +93,7 @@ func (e *Engine) GetGenerators() map[string]*GeneratorInstance {
 }
 
 // generateSingleRecord creates a single record by calling all field generators
-func (e *Engine) generateSingleRecord(ctx context.Context) (map[string]interface{}, error) {
+func (e *Engine) generateSingleRecord(ctx context.Context) (interface{}, error) {
 	record := make(map[string]interface{})
 
 	// Process fields in order to respect dependencies
@@ -139,6 +140,26 @@ func (e *Engine) generateSingleRecord(ctx context.Context) (map[string]interface
 		}
 	}
 
+	// Apply post-transformations if defined
+	if len(e.template.PostTransformations) > 0 {
+		result := interface{}(record)
+
+		for _, transformDef := range e.template.PostTransformations {
+			t, err := transformer.GetTransformer(transformDef.Type, transformDef.Config)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create transformer %s: %w", transformDef.Type, err)
+			}
+
+			result, err = t.Transform(ctx, result)
+			if err != nil {
+				return nil, fmt.Errorf("transformation %s failed: %w", transformDef.Type, err)
+			}
+		}
+
+		return result, nil
+	}
+
+	// No transformations, return record as before
 	return record, nil
 }
 

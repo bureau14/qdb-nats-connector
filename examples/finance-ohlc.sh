@@ -134,7 +134,7 @@ action_load() {
     fi
 
     log_info "Loading data into NATS JetStream..."
-    ../bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    ../bin/qdb-data-loader --file "$DATA_FILE" --base64 --topic "$SUBJECT" --stream "$STREAM_NAME" \
                         --nats-url "$NATS_URL" --batch-size 100
     log_info "Data loaded successfully"
     

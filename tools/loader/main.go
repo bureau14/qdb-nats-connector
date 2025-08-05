@@ -47,6 +47,7 @@ NOTICE: This is a stress testing tool with NO BACKPRESSURE.
 
 Options:
     --file <path>                    Input file or "-" for stdin
+    --base64                         Input is base64-encoded (skips format detection)
     --topic <topic>                  NATS topic (required)
     --stream <stream>                JetStream stream name (required)
     --batch-size <n>                 Messages per batch (default: 100)
@@ -65,6 +66,7 @@ Options:
 Examples:
     qdb-data-loader --file data.jsonl --topic sensor.data --stream DATA_STREAM
     qdb-data-loader --file metrics.parquet --topic metrics --stream METRICS --workers 8
+    qdb-data-loader --file data.b64 --base64 --topic events --stream EVENTS
     cat data.json | qdb-data-loader --file - --topic events --stream EVENTS --adaptive
 
 Note: Backpressure parameters (--max-queue-depth, --circuit-*) are deprecated and ignored.
@@ -153,6 +155,7 @@ func runMain() int {
 		minBatchSize        int
 		maxBatchSize        int
 		targetRate          int
+		base64              bool
 		maxQueueDepth       int
 		circuitMaxFailures  int
 		circuitResetTimeout time.Duration
@@ -179,6 +182,9 @@ func runMain() int {
 	fs.IntVar(&maxQueueDepth, "max-queue-depth", 100, "DEPRECATED - ignored")
 	fs.IntVar(&circuitMaxFailures, "circuit-max-failures", 5, "DEPRECATED - ignored")
 	fs.DurationVar(&circuitResetTimeout, "circuit-reset-timeout", 10*time.Second, "DEPRECATED - ignored")
+
+	// Format flags
+	fs.BoolVar(&base64, "base64", false, "Input is base64-encoded")
 
 	err := fs.Parse(os.Args[1:])
 	if err != nil {
@@ -215,7 +221,7 @@ func runMain() int {
 	}
 
 	// Execute the loading logic
-	err = runLoader(file, topic, stream, batchSize, batchTimeout, natsURL, workers,
+	err = runLoader(file, base64, topic, stream, batchSize, batchTimeout, natsURL, workers,
 		adaptive, minBatchSize, maxBatchSize, targetRate, maxQueueDepth,
 		circuitMaxFailures, circuitResetTimeout)
 	if err != nil {
@@ -228,7 +234,7 @@ func runMain() int {
 }
 
 // runLoader contains the main loading logic extracted from cobra command
-func runLoader(file, topic, stream string, batchSize int, batchTimeout time.Duration,
+func runLoader(file string, base64 bool, topic, stream string, batchSize int, batchTimeout time.Duration,
 	natsURL string, workers int, adaptive bool, minBatchSize, maxBatchSize, targetRate,
 	maxQueueDepth, circuitMaxFailures int, circuitResetTimeout time.Duration,
 ) error {
@@ -261,18 +267,26 @@ func runLoader(file, topic, stream string, batchSize int, batchTimeout time.Dura
 		}()
 	}
 
-	// Create buffered reader for format detection
+	// Create buffered reader for processing
 	reader := bufio.NewReader(input)
 
-	// Detect format
-	formatDetector := detector.NewDetector()
-	format, err := formatDetector.Detect(reader)
-	if err != nil {
-		return err
-	}
+	// Determine format - either from flag or auto-detection
+	var format int
+	if base64 {
+		format = internal.FormatBase64
+		slog.Info("Format specified by flag", "format", getFormatName(format))
+	} else {
+		// Detect format
+		formatDetector := detector.NewDetector()
+		var err error
+		format, err = formatDetector.Detect(reader)
+		if err != nil {
+			return err
+		}
 
-	// Log detected format
-	slog.Info("Format detected", "format", getFormatName(format))
+		// Log detected format
+		slog.Info("Format detected", "format", getFormatName(format))
+	}
 
 	// Get appropriate parser
 	dataParser, err := parser.GetParser(format)

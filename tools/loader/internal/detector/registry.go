@@ -87,15 +87,6 @@ func init() {
 
 		return 0, false
 	})
-
-	// Priority 30: Base64 detection - lowest priority
-	defaultDetectorRegistry.Register(30, func(header []byte) (int, bool) {
-		if isBase64Content(header) {
-			return internal.FormatBase64, true
-		}
-
-		return 0, false
-	})
 }
 
 // RegisterDetector registers a detector in the default registry

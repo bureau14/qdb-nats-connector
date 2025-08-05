@@ -57,9 +57,10 @@ func createGenerators(template *internal.Template) (map[string]*GeneratorInstanc
 	return generators, nil
 }
 
-// GenerateRecords generates the specified number of records and writes them as JSON to the writer.
+// GenerateRecords generates the specified number of records and writes them to the writer.
 // Each record is generated according to the template specification, with field values
-// produced by their respective generators. Adds a "$table" field if template.Table is set.
+// produced by their respective generators. String records (like base64) are written directly,
+// while structured records are JSON-encoded.
 func (e *Engine) GenerateRecords(ctx context.Context, count int, writer io.Writer) error {
 	encoder := json.NewEncoder(writer)
 
@@ -69,9 +70,20 @@ func (e *Engine) GenerateRecords(ctx context.Context, count int, writer io.Write
 			return fmt.Errorf("failed to generate record %d: %w", i+1, err)
 		}
 
-		err = encoder.Encode(record)
-		if err != nil {
-			return fmt.Errorf("failed to encode record %d: %w", i+1, err)
+		// Check if record is a string (e.g., from base64 transformation)
+		switch v := record.(type) {
+		case string:
+			// Write raw string directly (for base64 output)
+			_, err = fmt.Fprintln(writer, v)
+			if err != nil {
+				return fmt.Errorf("failed to write record %d: %w", i+1, err)
+			}
+		default:
+			// JSON encode structured data
+			err = encoder.Encode(record)
+			if err != nil {
+				return fmt.Errorf("failed to encode record %d: %w", i+1, err)
+			}
 		}
 	}
 

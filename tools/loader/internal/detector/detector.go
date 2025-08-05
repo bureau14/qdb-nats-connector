@@ -57,10 +57,5 @@ func (d *DefaultDetector) Detect(reader io.Reader) (int, error) {
 		return internal.FormatJSONLines, nil
 	}
 
-	// Check if content looks like base64
-	if isBase64Content(header) {
-		return internal.FormatBase64, nil
-	}
-
 	return 0, connectorErrors.NewParsingFailedError("detector", nil)
 }

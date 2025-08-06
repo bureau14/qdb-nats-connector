@@ -30,7 +30,7 @@ type Batcher struct {
 // Returns the batcher instance and a channel to receive batches
 func NewBatcher(size int, timeout time.Duration, input <-chan internal.Message) (batcher *Batcher, output <-chan Batch) {
 	if size <= 0 {
-		size = 100 // Default batch size
+		size = 500 // Default batch size
 	}
 	if timeout <= 0 {
 		timeout = 100 * time.Millisecond // Default timeout

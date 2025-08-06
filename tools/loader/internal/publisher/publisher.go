@@ -119,6 +119,14 @@ func (p *Publisher) publishBatch(ctx context.Context, batchData batch.Batch, top
 		atomic.AddInt64(&p.messagesPublished, 1)
 	}
 
+	// Flush once after entire batch
+	err := p.connection.Flush()
+	if err != nil {
+		atomic.AddInt64(&p.publishErrors, 1)
+
+		return connectorErrors.NewWriteFailedError("publisher-flush", err)
+	}
+
 	atomic.AddInt64(&p.batchesProcessed, 1)
 
 	return nil

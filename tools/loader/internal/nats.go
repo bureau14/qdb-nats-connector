@@ -109,3 +109,19 @@ func (c *Connection) Publish(topic string, data []byte) error {
 
 	return nil
 }
+
+// Flush flushes the NATS connection buffer
+func (c *Connection) Flush() error {
+	if c.nc == nil {
+		return connectorErrors.NewConnectionFailedError("nats", c.url, nil)
+	}
+
+	err := c.nc.Flush()
+	if err != nil {
+		slog.Error("Failed to flush NATS connection", "error", err)
+
+		return connectorErrors.NewWriteFailedError("nats-flush", err)
+	}
+
+	return nil
+}

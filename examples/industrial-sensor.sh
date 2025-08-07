@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source common infrastructure
 source "$SCRIPT_DIR/common.sh"
+source "$SCRIPT_DIR/utils.sh"
 
 # Setup standardized error trapping
 setup_error_trap
@@ -22,6 +23,19 @@ LOG_FILE="$SCRIPT_DIR/industrial-sensor-connector.log"
 CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
 EXPORT_DIR="$SCRIPT_DIR/exports"
 TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
+
+# Worker configuration
+WORKERS=${WORKERS:-$(get_default_workers)}
+CPU_COUNT=$(get_cpu_count)
+
+# Calculate timeout based on message volume
+# Base: 30s + (messages / 10000) * 3s
+calculate_timeout() {
+    local messages=$1
+    local base_timeout=30
+    local scaling_factor=$((messages / 10000 * 3))
+    echo $((base_timeout + scaling_factor))
+}
 
 # Sensor configuration for data generation - map to building/floor combinations
 declare -a SENSORS=(
@@ -57,6 +71,7 @@ usage() {
     echo
     echo "Environment variables:"
     echo "  NUM_MESSAGES   - Number of messages to generate (default: 1000)"
+    echo "  WORKERS        - Number of workers to use (default: auto-detected from CPU)"
     echo "  TESTDATA_DIR   - Directory for test data (default: ./testdata)"
     echo "  DEBUG          - Enable debug logging (1 = enabled)"
     echo
@@ -183,6 +198,10 @@ action_create() {
             die "Failed to create table $table_name"
     done
 
+    # Show worker configuration
+    log_info "CPU cores detected: $CPU_COUNT"
+    log_info "Workers configured: $WORKERS"
+
     log_info "QuasarDB dynamic table creation completed"
 }
 
@@ -209,16 +228,17 @@ action_load() {
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
 
-    log_info "Loading data into NATS JetStream..."
-    log_info "[DEBUG] Command: ../bin/qdb-data-loader --file $DATA_FILE --topic $SUBJECT --stream $STREAM_NAME --nats-url $NATS_URL --batch-size 100"
+    # Calculate appropriate timeout
+    local load_timeout=$(calculate_timeout "$NUM_MESSAGES")
+    log_info "Using timeout of ${load_timeout}s for loading $NUM_MESSAGES messages"
     
-    # Run loader with timeout to prevent hanging
-    timeout 30 ../bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
-                        --nats-url "$NATS_URL" --batch-size 100
+    # Run loader with calculated timeout
+    timeout "$load_timeout" ../bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+                        --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     local loader_exit_code=$?
     
     if [[ $loader_exit_code -eq 124 ]]; then
-        log_error "[DEBUG] Loader timed out after 30 seconds!"
+        log_error "[DEBUG] Loader timed out after ${load_timeout} seconds!"
         log_info "[DEBUG] Checking NATS stream state:"
         nats stream info "$STREAM_NAME" | grep -E "(Messages:|State:)" || true
     else
@@ -260,7 +280,7 @@ action_run() {
     log_info "Logs will be written to: $LOG_FILE"
 
     # DEBUG: Show the full command being executed
-    log_info "[DEBUG] Full command: direnv exec . $CONNECTOR_BINARY --nats $NATS_URL --qdb $QDB_URI --stream $STREAM_NAME --consumer industrial-connector --workers 2 --parser yaml --parser-config $CONFIG_FILE"
+    log_info "[DEBUG] Full command: direnv exec . $CONNECTOR_BINARY --nats $NATS_URL --qdb $QDB_URI --stream $STREAM_NAME --consumer industrial-connector --workers $WORKERS --parser yaml --parser-config $CONFIG_FILE"
 
     # Start connector in background and capture PID
     direnv exec . "$CONNECTOR_BINARY" \
@@ -268,7 +288,7 @@ action_run() {
         --qdb "$QDB_URI" \
         --stream "$STREAM_NAME" \
         --consumer industrial-connector \
-        --workers 2 \
+        --workers "$WORKERS" \
         --parser yaml \
         --parser-config "$CONFIG_FILE" \
         > "$LOG_FILE" 2>&1 &
@@ -301,8 +321,8 @@ action_wait() {
 
     [[ -f "$LOG_FILE" ]] || die "Log file $LOG_FILE not found. Did you run '$0 run' first?"
 
-    # Wait for expected row count with timeout
-    if wait_for_row_count "$LOG_FILE" "$NUM_MESSAGES" 300 5 "$PID_FILE"; then
+    local wait_timeout=$(calculate_timeout "$NUM_MESSAGES")
+    if wait_for_row_count "$LOG_FILE" "$NUM_MESSAGES" "$wait_timeout" 5 "$PID_FILE"; then
         log_info "Processing completed successfully!"
     else
         die "Processing did not complete within timeout"

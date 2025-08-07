@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source common infrastructure
 source "$SCRIPT_DIR/common.sh"
+source "$SCRIPT_DIR/utils.sh"
 
 # Setup standardized error trapping
 setup_error_trap
@@ -22,6 +23,10 @@ LOG_FILE="$SCRIPT_DIR/finance-ohlc-connector.log"
 CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
 EXPORT_DIR="$SCRIPT_DIR/exports"
 TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
+
+# Worker configuration
+WORKERS=${WORKERS:-$(get_default_workers)}
+CPU_COUNT=$(get_cpu_count)
 
 # Stock configuration for data generation
 declare -a STOCKS=("AAPL" "GOOGL" "MSFT" "AMZN" "TSLA")
@@ -51,6 +56,7 @@ usage() {
     echo "Environment variables:"
     echo "  NUM_MESSAGES   - Number of messages to generate (default: 1000)"
     echo "  TESTDATA_DIR   - Directory for test data (default: ./testdata)"
+    echo "  WORKERS        - Number of worker threads (default: CPU-based)"
     echo "  DEBUG          - Enable debug logging (1 = enabled)"
     exit 1
 }
@@ -113,6 +119,10 @@ action_create() {
     done
 
     log_info "QuasarDB dynamic table creation completed"
+    
+    # Show worker configuration
+    log_info "CPU cores detected: $CPU_COUNT"
+    log_info "Workers configured: $WORKERS"
 }
 
 action_load() {
@@ -135,7 +145,7 @@ action_load() {
 
     log_info "Loading data into NATS JetStream..."
     ../bin/qdb-data-loader --file "$DATA_FILE" --base64 --topic "$SUBJECT" --stream "$STREAM_NAME" \
-                        --nats-url "$NATS_URL" --batch-size 100
+                        --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     log_info "Data loaded successfully"
     
     nats stream info "$STREAM_NAME"
@@ -175,7 +185,7 @@ action_run() {
         --qdb "$QDB_URI" \
         --stream "$STREAM_NAME" \
         --consumer finance-connector \
-        --workers 2 \
+        --workers "$WORKERS" \
         --parser yaml \
         --parser-config "$CONFIG_FILE" \
         > "$LOG_FILE" 2>&1 &

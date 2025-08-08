@@ -37,6 +37,10 @@ secure/
 user_private.key
 users.cfg
 
+# Examples specific
+examples/*.log
+examples/*.pid
+
 # Datatbase log file
 *.out.txt
 *.err.txt

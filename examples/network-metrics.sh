@@ -14,6 +14,9 @@ fi
 
 source "$SCRIPT_DIR/utils.sh"
 
+# Example configuration
+EXAMPLE="network-metrics"
+
 # Setup standardized error trapping
 setup_error_trap
 
@@ -38,11 +41,12 @@ CONFIG_FILE="$SCRIPT_DIR/network-metrics.yaml"
 STREAM_NAME="NETWORK_STREAM"
 SUBJECT="network.metrics"
 NUM_MESSAGES="${NUM_MESSAGES:-1000}"
+TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
+INPUT_FILE="$TESTDATA_DIR/${EXAMPLE}-${NUM_MESSAGES}-input.data"
 PID_FILE="$SCRIPT_DIR/network-metrics-connector.pid"
 LOG_FILE="$SCRIPT_DIR/network-metrics-connector.log"
 CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
 EXPORT_DIR="$SCRIPT_DIR/exports"
-TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
 
 # Worker configuration
 WORKERS=${WORKERS:-$(get_default_workers)}
@@ -119,15 +123,16 @@ action_generate() {
         die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
-    # Verify we can write to the data file directory
-    local data_dir
-    data_dir=$(dirname "$DATA_FILE")
-    if [[ ! -w "$data_dir" ]]; then
-        die "Cannot write to data directory: $data_dir. Please check permissions."
+    # Create testdata directory if it doesn't exist
+    mkdir -p "$TESTDATA_DIR"
+
+    # Verify we can write to the testdata directory
+    if [[ ! -w "$TESTDATA_DIR" ]]; then
+        die "Cannot write to testdata directory: $TESTDATA_DIR. Please check permissions."
     fi
 
     log_info "Generating $NUM_MESSAGES network metrics messages..."
-    # Generate flat structure first
+    # Generate flat structure first and save to INPUT_FILE
     ../bin/qdb-data-gen network-metrics-generator.yaml --count "$NUM_MESSAGES" | \
     jq -c '{
       device: {
@@ -158,8 +163,13 @@ action_generate() {
           dropped: .errors_packets_dropped
         }
       } end)
-    } | del(.device_info_id, .metrics_network_inbound_bytes, .metrics_network_outbound_bytes, .metrics_performance_latency_percentiles_p99, .errors_packets_dropped, ."$table")' > "$DATA_FILE"
-    log_info "Generated $NUM_MESSAGES network metrics messages in $DATA_FILE"
+    } | del(.device_info_id, .metrics_network_inbound_bytes, .metrics_network_outbound_bytes, .metrics_performance_latency_percentiles_p99, .errors_packets_dropped, ."$table")' > "$INPUT_FILE"
+    
+    # Copy to DATA_FILE for backward compatibility
+    cp "$INPUT_FILE" "$DATA_FILE"
+    
+    log_info "Generated $NUM_MESSAGES network metrics messages in $INPUT_FILE"
+    log_debug "Backward compatibility copy created: $DATA_FILE"
 }
 
 # Create NATS JetStream stream and QuasarDB table
@@ -243,11 +253,18 @@ action_load() {
 
     # Validate environment first
     validate_environment
+    require_command nats
 
-    # Generate data if not exists
-    if [[ ! -f "$DATA_FILE" ]]; then
-        log_info "Data file not found, generating first..."
-        action_generate
+    # Determine which data file to use
+    local data_to_load=""
+    if [[ -n "$INPUT_FILE" ]] && [[ -f "$INPUT_FILE" ]]; then
+        data_to_load="$INPUT_FILE"
+        log_debug "Using INPUT_FILE: $INPUT_FILE"
+    elif [[ -f "$DATA_FILE" ]]; then
+        data_to_load="$DATA_FILE"
+        log_debug "Using DATA_FILE: $DATA_FILE"
+    else
+        die "Input data not found. Run '$0 generate' or 'make generate-golden EXAMPLE=$EXAMPLE SIZE=<size>' first"
     fi
 
     # Check if stream exists
@@ -259,8 +276,10 @@ action_load() {
     local load_timeout=$(calculate_timeout "$NUM_MESSAGES")
     log_info "Using timeout of ${load_timeout}s for loading $NUM_MESSAGES messages"
     
+    log_info "Loading data from $data_to_load into NATS JetStream..."
+    
     # Run loader with calculated timeout
-    timeout "$load_timeout" ../bin/qdb-data-loader --file "$DATA_FILE" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    timeout "$load_timeout" ../bin/qdb-data-loader --file "$data_to_load" --topic "$SUBJECT" --stream "$STREAM_NAME" \
                           --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     log_info "Data loaded successfully"
 
@@ -466,13 +485,17 @@ action_stop() {
 
 # Export data from QuasarDB to CSV files
 action_export() {
-    log_info "Exporting data from QuasarDB to CSV files..."
+    log_info "Exporting data from QuasarDB to CSV file..."
 
     # Create export directory
     mkdir -p "$EXPORT_DIR"
 
-    # Export table to CSV
-    local csv_file="$EXPORT_DIR/${TABLE_NAME}.csv"
+    # Check for existing export to prevent accidental overwrite
+    local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${TABLE_NAME}.csv"
+    if [[ -f "$csv_file" ]]; then
+        die "Export file already exists: $csv_file. Clean exports/ directory before running: rm -rf $EXPORT_DIR"
+    fi
+
     log_info "Exporting table $TABLE_NAME to $csv_file"
 
     if ! qdb_export --ts "$TABLE_NAME" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
@@ -494,13 +517,17 @@ action_validate() {
 
     [[ -d "$EXPORT_DIR" ]] || die "Export directory $EXPORT_DIR not found. Run '$0 export' first"
 
-    local golden_dir="$TESTDATA_DIR/golden"
+    # Check if golden data has been extracted
+    local golden_marker="$TESTDATA_DIR/$EXAMPLE-$NUM_MESSAGES/.extracted"
+    [[ -f "$golden_marker" ]] || die "Golden data not extracted. Run 'make extract EXAMPLE=$EXAMPLE SIZE=<size>' first"
+
+    local golden_dir="$TESTDATA_DIR/$EXAMPLE-$NUM_MESSAGES/expected"
     [[ -d "$golden_dir" ]] || die "Golden data directory $golden_dir not found"
 
     local validation_errors=0
 
-    local exported_csv="$EXPORT_DIR/${TABLE_NAME}.csv"
-    local golden_csv="$golden_dir/${TABLE_NAME}.csv"
+    local exported_csv="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${TABLE_NAME}.csv"
+    local golden_csv="$golden_dir/${EXAMPLE}-${NUM_MESSAGES}-${TABLE_NAME}.csv"
 
     if [[ ! -f "$exported_csv" ]]; then
         log_error "Exported CSV not found: $exported_csv"
@@ -518,9 +545,10 @@ action_validate() {
             log_error "✗ $TABLE_NAME validation failed"
             validation_errors=$((validation_errors + 1))
 
-            # Show detailed differences
-            log_debug "Detailed differences for $TABLE_NAME:"
-            numdiff --tolerance=0.001 "$exported_csv" "$golden_csv" || true
+            # Show first 10 differences
+            log_debug "First 10 differences for $TABLE_NAME:"
+            numdiff --tolerance=0.001 "$exported_csv" "$golden_csv" 2>&1 | head -10 || true
+            log_debug "Run for full diff: numdiff --tolerance=0.001 $exported_csv $golden_csv"
         fi
     fi
 
@@ -536,15 +564,20 @@ action_prepare_golden() {
     log_info "Preparing golden data package..."
 
     [[ -d "$EXPORT_DIR" ]] || die "Export directory $EXPORT_DIR not found. Run '$0 export' first"
+    [[ -f "$INPUT_FILE" ]] || die "Input file not found: $INPUT_FILE. Run '$0 generate' first"
 
     local golden_dir="$TESTDATA_DIR/golden"
     mkdir -p "$golden_dir"
 
-    # Copy exported CSV file to golden directory
-    local csv_file="$EXPORT_DIR/${TABLE_NAME}.csv"
+    # Copy input data file to golden directory with proper naming
+    cp "$INPUT_FILE" "$golden_dir/${EXAMPLE}-${NUM_MESSAGES}-input.data"
+    log_debug "Copied input data: $INPUT_FILE -> $golden_dir/${EXAMPLE}-${NUM_MESSAGES}-input.data"
+
+    # Copy exported CSV file to golden directory with row-count prefix
+    local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${TABLE_NAME}.csv"
     if [[ -f "$csv_file" ]]; then
         cp "$csv_file" "$golden_dir/"
-        log_debug "Copied $csv_file to golden directory"
+        log_debug "Copied CSV file: $csv_file to golden directory"
     else
         log_error "CSV file not found: $csv_file"
     fi

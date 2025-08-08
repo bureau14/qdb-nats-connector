@@ -13,6 +13,7 @@ source "$SCRIPT_DIR/utils.sh"
 setup_error_trap
 
 # Script-specific configuration
+EXAMPLE="finance-ohlc"
 DATA_FILE="$SCRIPT_DIR/finance-ohlc-data.jsonl"
 CONFIG_FILE="$SCRIPT_DIR/finance-ohlc.yaml"
 STREAM_NAME="FINANCE_STREAM"
@@ -23,6 +24,9 @@ LOG_FILE="$SCRIPT_DIR/finance-ohlc-connector.log"
 CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
 EXPORT_DIR="$SCRIPT_DIR/exports"
 TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
+
+# Define INPUT_FILE with row-count naming for consistent access across functions
+INPUT_FILE="$TESTDATA_DIR/${EXAMPLE}-${NUM_MESSAGES}-input.data"
 
 # Worker configuration
 WORKERS=${WORKERS:-$(get_default_workers)}
@@ -37,6 +41,16 @@ declare -a DYNAMIC_TABLES=(
     "finance.NASDAQ.MSFT"
     "finance.NASDAQ.AMZN"
     "finance.NASDAQ.TSLA"
+    "finance.NYSE.AAPL"
+    "finance.NYSE.GOOGL"
+    "finance.NYSE.MSFT"
+    "finance.NYSE.AMZN"
+    "finance.NYSE.TSLA"
+    "finance.AMEX.AAPL"
+    "finance.AMEX.GOOGL"
+    "finance.AMEX.MSFT"
+    "finance.AMEX.AMZN"
+    "finance.AMEX.TSLA"
 )
 
 usage() {
@@ -67,9 +81,16 @@ action_generate() {
         die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
+    # Ensure testdata directory exists
+    mkdir -p "$TESTDATA_DIR"
+    
     log_info "Generating $NUM_MESSAGES OHLC messages..."
-    ../bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" > "$DATA_FILE"
-    log_info "Generated $NUM_MESSAGES messages in $DATA_FILE"
+    ../bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" > "$INPUT_FILE"
+    
+    # Keep DATA_FILE for backward compatibility during transition
+    cp "$INPUT_FILE" "$DATA_FILE"
+    
+    log_info "Generated $NUM_MESSAGES messages in $INPUT_FILE"
 }
 
 # Create NATS JetStream stream and QuasarDB tables
@@ -127,24 +148,32 @@ action_create() {
 
 action_load() {
     log_info "Loading data into NATS JetStream..."
-
+    
     # Validate environment first
     validate_environment
     require_command nats
-
-    # Generate data if not exists
-    if [[ ! -f "$DATA_FILE" ]]; then
-        log_info "Data file not found, generating first..."
-        action_generate
+    
+    # Determine which data file to use
+    local data_to_load=""
+    if [[ -n "$INPUT_FILE" ]] && [[ -f "$INPUT_FILE" ]]; then
+        data_to_load="$INPUT_FILE"
+        log_debug "Using INPUT_FILE: $INPUT_FILE"
+    elif [[ -f "$DATA_FILE" ]]; then
+        data_to_load="$DATA_FILE"
+        log_debug "Using DATA_FILE: $DATA_FILE"
+    else
+        die "Input data not found. Run '$0 generate' or 'make generate-golden EXAMPLE=$EXAMPLE SIZE=<size>' first"
     fi
-
+    
     # Check if stream exists
     if ! nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
-
-    log_info "Loading data into NATS JetStream..."
-    ../bin/qdb-data-loader --file "$DATA_FILE" --base64 --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    
+    log_info "Loading data from $data_to_load into NATS JetStream..."
+    
+    # Load data using the selected file
+    ../bin/qdb-data-loader --file "$data_to_load" --base64 --topic "$SUBJECT" --stream "$STREAM_NAME" \
                         --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     log_info "Data loaded successfully"
     
@@ -260,9 +289,17 @@ action_export() {
     # Create export directory
     mkdir -p "$EXPORT_DIR"
 
+    # Check for existing exports to prevent accidental overwrites
+    for table_name in "${DYNAMIC_TABLES[@]}"; do
+        local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
+        if [[ -f "$csv_file" ]]; then
+            die "Export file already exists: $csv_file. Clean exports/ directory before running: rm -rf $EXPORT_DIR"
+        fi
+    done
+
     # Export each table to CSV
     for table_name in "${DYNAMIC_TABLES[@]}"; do
-        local csv_file="$EXPORT_DIR/${table_name}.csv"
+        local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
         log_info "Exporting table $table_name to $csv_file"
 
         if ! qdb_export --ts "$table_name" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
@@ -285,14 +322,18 @@ action_validate() {
 
     [[ -d "$EXPORT_DIR" ]] || die "Export directory $EXPORT_DIR not found. Run '$0 export' first"
 
-    local golden_dir="$TESTDATA_DIR/golden"
+    # Check if golden data has been extracted
+    local golden_marker="$TESTDATA_DIR/$EXAMPLE-$NUM_MESSAGES/.extracted"
+    [[ -f "$golden_marker" ]] || die "Golden data not extracted. Run 'make extract EXAMPLE=$EXAMPLE SIZE=<size>' first"
+
+    local golden_dir="$TESTDATA_DIR/$EXAMPLE-$NUM_MESSAGES/expected"
     [[ -d "$golden_dir" ]] || die "Golden data directory $golden_dir not found"
 
     local validation_errors=0
 
     for table_name in "${DYNAMIC_TABLES[@]}"; do
-        local exported_csv="$EXPORT_DIR/${table_name}.csv"
-        local golden_csv="$golden_dir/${table_name}.csv"
+        local exported_csv="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
+        local golden_csv="$golden_dir/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
 
         if [[ ! -f "$exported_csv" ]]; then
             log_error "Exported CSV not found: $exported_csv"
@@ -315,9 +356,10 @@ action_validate() {
             log_error "✗ $table_name validation failed"
             validation_errors=$((validation_errors + 1))
 
-            # Show detailed differences
-            log_debug "Detailed differences for $table_name:"
-            numdiff --tolerance=0.001 "$exported_csv" "$golden_csv" || true
+            # Show first 10 differences
+            log_debug "First 10 differences for $table_name:"
+            numdiff --tolerance=0.001 "$exported_csv" "$golden_csv" 2>&1 | head -10 || true
+            log_debug "Run for full diff: numdiff --tolerance=0.001 $exported_csv $golden_csv"
         fi
     done
 
@@ -333,13 +375,19 @@ action_prepare_golden() {
     log_info "Preparing golden data package..."
 
     [[ -d "$EXPORT_DIR" ]] || die "Export directory $EXPORT_DIR not found. Run '$0 export' first"
+    
+    [[ -f "$INPUT_FILE" ]] || die "Input data file $INPUT_FILE not found. Run '$0 generate' first"
 
     local golden_dir="$TESTDATA_DIR/golden"
     mkdir -p "$golden_dir"
 
-    # Copy exported CSV files to golden directory
+    # Copy input data with proper naming
+    cp "$INPUT_FILE" "$golden_dir/${EXAMPLE}-${NUM_MESSAGES}-input.data"
+    log_debug "Copied input data to golden directory"
+
+    # Copy exported CSV files to golden directory (they already have row-count prefixes)
     for table_name in "${DYNAMIC_TABLES[@]}"; do
-        local csv_file="$EXPORT_DIR/${table_name}.csv"
+        local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
         if [[ -f "$csv_file" ]]; then
             cp "$csv_file" "$golden_dir/"
             log_debug "Copied $csv_file to golden directory"

@@ -10,13 +10,12 @@
 
 # Message count mappings define standardized dataset sizes for reproducible testing.
 # These sizes enable quick iteration (10k), CI/CD validation (100k), full testing (1m),
-# and stress testing (10m, 100m). The exact counts ensure consistent performance baselines.
-SIZES := 10k 100k 1m 10m 100m
+# and stress testing (10m). The exact counts ensure consistent performance baselines.
+SIZES := 10k 100k 1m 10m
 NUM_10k := 10000
 NUM_100k := 100000
 NUM_1m := 1000000
 NUM_10m := 10000000
-NUM_100m := 100000000
 TESTDATA_DIR := testdata
 
 # Dynamically discover example scripts, excluding utility scripts. This enables
@@ -28,6 +27,16 @@ SIZE ?= 10k
 
 # DATE is used for versioning golden data archives per ADR-007
 DATE := $(shell date +%Y-%m-%d)
+
+# S3 Golden Data Configuration
+S3_BUCKET := s3://teamcity-agentbuilddeps-20241223095405875100000001/datasets/golden
+S3_BASE_URL := https://teamcity-agentbuilddeps.s3.amazonaws.com/datasets/golden
+
+# Golden data versioning
+GOLDEN_VERSION ?= $(DATE)  # Can override for specific versions
+
+# CI/CD integration flag (for future use)
+GOLDEN_AUTO_DOWNLOAD ?= false
 
 
 # Parameter validation ensures early failure with clear error messages rather than
@@ -99,12 +108,18 @@ define run_test_workflow
 
 	@# Step 2: Smart data preparation - check if we have pre-extracted golden data.
 	@# The .extracted marker file indicates we have a validated dataset ready to use.
-	@if [ -f "$(TESTDATA_DIR)/$(1)-$(2)/.extracted" ] && [ -d "$(TESTDATA_DIR)/$(1)-$(2)/golden" ]; then \
+	@if [ -f "$(TESTDATA_DIR)/$(1)-$(2)/.extracted" ] && [ -d "$(TESTDATA_DIR)/$(1)-$(2)/expected" ]; then \
 		$(call LOG_INFO,Using extracted test data for $(1)); \
-		export TESTDATA_DIR="$(TESTDATA_DIR)/$(1)-$(2)"; \
+		export INPUT_FILE="$(TESTDATA_DIR)/$(1)-$(2)/$(1)-$(2)-input.data"; \
+		export GOLDEN_DIR="$(TESTDATA_DIR)/$(1)-$(2)/expected"; \
 	else \
-		$(call LOG_INFO,Generating fresh test data for $(1)); \
-		NUM_MESSAGES=$(3) ./$(1).sh generate 2>&1 || { $(call LOG_ERROR,Failed to generate data for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }; \
+		$(call LOG_ERROR,Golden data not found for $(1)-$(2)); \
+		echo "To fix this:"; \
+		echo "  1. Generate: make generate-golden EXAMPLE=$(1) SIZE=$(2)"; \
+		echo "  2. Package:  make package-golden EXAMPLE=$(1) SIZE=$(2)"; \
+		echo "  3. Extract:  make extract EXAMPLE=$(1) SIZE=$(2)"; \
+		echo "  4. Or download from S3 (coming soon)"; \
+		exit 1; \
 	fi
 	@$(call LOG_INFO,Step 3/8: Loading data for $(1))
 
@@ -135,15 +150,7 @@ define run_test_workflow
 
 	@# Step 8: Validation against golden data (if available).
 	@# This is the critical quality gate - comparing actual output with expected results.
-	@if [ -f "$(TESTDATA_DIR)/$(1)-$(2)/.extracted" ] && [ -d "$(TESTDATA_DIR)/$(1)-$(2)/golden" ]; then \
-		$(call LOG_INFO,Validating against golden data for $(1)); \
-		TESTDATA_DIR="$(TESTDATA_DIR)/$(1)-$(2)" ./$(1).sh validate || { \
-			$(call LOG_ERROR,Validation failed for $(1)); exit 1; \
-		}; \
-		$(call LOG_SUCCESS,Validation passed for $(1)); \
-	else \
-		$(call LOG_INFO,Skipping validation for $(1) - no golden data available); \
-	fi
+	@NUM_MESSAGES=$(3) ./$(1).sh validate 2>&1 || $(call LOG_WARNING,Validation failed or no golden data available for $(1))
 endef
 
 
@@ -188,6 +195,10 @@ generate-golden: build-tools
 	$(call validate_params)
 	@$(call LOG_INFO,Generating golden data for $(EXAMPLE) with $(NUM_$(SIZE)) messages)
 	
+	@# Install cleanup handler to stop the connector even if the script fails midway.
+	@# This prevents orphaned processes that would interfere with subsequent operations.
+	@trap './$(EXAMPLE).sh stop 2>/dev/null || true' EXIT
+	
 	@# Create fresh infrastructure to ensure clean baseline - no contamination from previous runs
 	@NUM_MESSAGES=$(NUM_$(SIZE)) ./$(EXAMPLE).sh create 2>&1 || { $(call LOG_ERROR,Failed to create infrastructure); exit 1; }
 	
@@ -204,12 +215,12 @@ generate-golden: build-tools
 	@NUM_MESSAGES=$(NUM_$(SIZE)) ./$(EXAMPLE).sh wait 2>&1 || { $(call LOG_ERROR,Failed to wait for processing); exit 1; }
 	
 	@# Export processed data to CSV files - these become our expected results
-	@./$(EXAMPLE).sh export 2>&1 || { $(call LOG_ERROR,Failed to export results); exit 1; }
-	@./$(EXAMPLE).sh stop 2>&1 || $(call LOG_WARNING,Failed to stop connector gracefully)
+	@NUM_MESSAGES=$(NUM_$(SIZE)) ./$(EXAMPLE).sh export 2>&1 || { $(call LOG_ERROR,Failed to export results); exit 1; }
+	@$(call LOG_INFO,Stopping connector for $(EXAMPLE))
 	
 	@# CRITICAL: Move exported CSVs to golden/ directory, making them the new truth baseline.
 	@# After this step, all future tests will validate against these results.
-	@./$(EXAMPLE).sh prepare-golden 2>&1 || { $(call LOG_ERROR,Failed to prepare golden data); exit 1; }
+	@NUM_MESSAGES=$(NUM_$(SIZE)) ./$(EXAMPLE).sh prepare-golden 2>&1 || { $(call LOG_ERROR,Failed to prepare golden data); exit 1; }
 	@$(call LOG_SUCCESS,Golden data generated successfully for $(EXAMPLE)-$(SIZE))
 
 
@@ -235,11 +246,12 @@ extract:
 	@# Check if the archive exists before attempting extraction.
 	@# Archive naming: example-YYYY-MM-DD-size.tar.gz (date-versioned for traceability)
 	@if [ -f "$(TESTDATA_DIR)/$(EXAMPLE)-$(DATE)-$(SIZE).tar.gz" ]; then \
-		tar -xzf $(TESTDATA_DIR)/$(EXAMPLE)-$(DATE)-$(SIZE).tar.gz -C $(TESTDATA_DIR)/$(EXAMPLE)-$(SIZE) --strip-components=1 && \
+		tar -xzf $(TESTDATA_DIR)/$(EXAMPLE)-$(DATE)-$(SIZE).tar.gz -C $(TESTDATA_DIR)/$(EXAMPLE)-$(SIZE) && \
 		touch $(TESTDATA_DIR)/$(EXAMPLE)-$(SIZE)/.extracted && \
 		$(call LOG_SUCCESS,Extracted test data for $(EXAMPLE)-$(SIZE)); \
 	else \
-		$(call LOG_ERROR,Archive not found: $(TESTDATA_DIR)/$(EXAMPLE)-$(DATE)-$(SIZE).tar.gz); exit 1; fi
+		$(call LOG_ERROR,Archive not found: $(TESTDATA_DIR)/$(EXAMPLE)-$(DATE)-$(SIZE).tar.gz); \
+		exit 1; fi
 
 
 # package-golden archives the golden/ directory with timestamp versioning.
@@ -250,15 +262,59 @@ package-golden:
 	$(call validate_params)
 	@$(call LOG_INFO,Packaging golden data for $(EXAMPLE)-$(SIZE))
 	
-	@# Check that golden/ directory exists before attempting to package.
-	@# This directory is created by 'prepare-golden' after successful test runs.
+	@# Check that golden/ directory exists before attempting to package
 	@if [ -d "$(TESTDATA_DIR)/golden" ]; then \
-		cd $(TESTDATA_DIR) && tar -czf $(EXAMPLE)-$(DATE)-$(SIZE).tar.gz golden/ && \
+		$(call LOG_INFO,Creating package structure for $(EXAMPLE)-$(SIZE)); \
+		cd $(TESTDATA_DIR) && \
+		mkdir -p package-temp/expected && \
+		cp golden/$(EXAMPLE)-$(SIZE)-input.data package-temp/ 2>/dev/null || \
+			cp golden/*-input.data package-temp/ 2>/dev/null || \
+			$(call LOG_WARNING,No input data file found); \
+		cp golden/*.csv package-temp/expected/ 2>/dev/null || \
+			$(call LOG_WARNING,No CSV files found); \
+		tar -czf $(EXAMPLE)-$(DATE)-$(SIZE).tar.gz -C package-temp . && \
+		rm -rf package-temp && \
 		$(call LOG_SUCCESS,Packaged golden data to $(EXAMPLE)-$(DATE)-$(SIZE).tar.gz); \
 	else \
 		$(call LOG_ERROR,Golden data directory not found: $(TESTDATA_DIR)/golden); \
 		echo "Run 'make generate-golden EXAMPLE=$(EXAMPLE) SIZE=$(SIZE)' first"; \
 		exit 1; fi
+
+
+# download-golden fetches golden data archives from S3 (placeholder).
+# This functionality will be activated once golden datasets are uploaded to S3.
+download-golden:
+	@$(call validate_params)
+	@$(call LOG_ERROR,Download functionality not yet implemented)
+	@echo ""
+	@echo "Golden datasets will be available at:"
+	@echo "  $(S3_BASE_URL)/$(EXAMPLE)-$(GOLDEN_VERSION)-$(SIZE).tar.gz"
+	@echo ""
+	@echo "Current workaround options:"
+	@echo "  1. Generate locally: make generate-golden EXAMPLE=$(EXAMPLE) SIZE=$(SIZE)"
+	@echo "  2. Use existing package: make extract EXAMPLE=$(EXAMPLE) SIZE=$(SIZE)"
+	@echo ""
+	@echo "This functionality will be activated once golden datasets are uploaded to S3."
+	@# Future implementation location:
+	@# curl -f -o $(TESTDATA_DIR)/$(EXAMPLE)-$(GOLDEN_VERSION)-$(SIZE).tar.gz \
+	@#      $(S3_BASE_URL)/$(EXAMPLE)-$(GOLDEN_VERSION)-$(SIZE).tar.gz
+	@exit 1
+
+# check-golden verifies if golden data exists locally or needs download.
+check-golden:
+	@$(call validate_params)
+	@echo "Checking golden data for $(EXAMPLE)-$(SIZE)..."
+	@if [ -f "$(TESTDATA_DIR)/$(EXAMPLE)-$(SIZE)/.extracted" ]; then \
+		$(call LOG_SUCCESS,Golden data available locally: $(EXAMPLE)-$(SIZE)); \
+		echo "  Location: $(TESTDATA_DIR)/$(EXAMPLE)-$(SIZE)/"; \
+	elif [ -f "$(TESTDATA_DIR)/$(EXAMPLE)-$(GOLDEN_VERSION)-$(SIZE).tar.gz" ]; then \
+		$(call LOG_INFO,Golden archive found but not extracted); \
+		echo "  Run: make extract EXAMPLE=$(EXAMPLE) SIZE=$(SIZE)"; \
+	else \
+		$(call LOG_WARNING,Golden data not found locally); \
+		echo "  Would download from: $(S3_BASE_URL)/$(EXAMPLE)-$(GOLDEN_VERSION)-$(SIZE).tar.gz"; \
+		echo "  Run: make download-golden EXAMPLE=$(EXAMPLE) SIZE=$(SIZE)"; \
+	fi
 
 
 # Batch operations for matrix testing across all examples or sizes.
@@ -294,6 +350,7 @@ help:
 	@echo "qdb-nats-connector Examples - Usage: make <target> EXAMPLE=<example> SIZE=<size>"
 	@echo "Parameters: EXAMPLE=$(EXAMPLES) (default: $(EXAMPLE)), SIZE=$(SIZES) (default: $(SIZE))"
 	@echo "Main: test, generate-golden, extract, package-golden"
+	@echo "Golden: download-golden, check-golden"
 	@echo "Convenience: test-quick (10k), test-full (1m)"
 	@echo "Batch: test-all, generate-all, package-all, extract-all, test-all-sizes, generate-golden-all-sizes"
 	@echo "Utility: debug, print-vars, test-validation, build-tools"

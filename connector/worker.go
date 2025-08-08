@@ -112,6 +112,7 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		circuitBreaker: circuitBreaker,
 		hooks:          opts.Hooks,
 		batchTimeout:   opts.NatsBatchTimeout,
+		lastFetch:      time.Now(), // Initialize lastFetch to prevent immediate unhealthy status
 	}, nil
 }
 

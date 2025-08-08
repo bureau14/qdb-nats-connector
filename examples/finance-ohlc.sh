@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source common infrastructure
 source "$SCRIPT_DIR/common.sh"
-source "$SCRIPT_DIR/utils.sh"
 
 # Setup standardized error trapping
 setup_error_trap
@@ -84,8 +83,8 @@ action_generate() {
     # Ensure testdata directory exists
     mkdir -p "$TESTDATA_DIR"
     
-    log_info "Generating $NUM_MESSAGES OHLC messages..."
-    ../bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" > "$INPUT_FILE"
+    log_info "Generating $NUM_MESSAGES OHLC messages with $WORKERS workers..."
+    ../bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" --workers "$WORKERS" > "$INPUT_FILE"
     
     # Keep DATA_FILE for backward compatibility during transition
     cp "$INPUT_FILE" "$DATA_FILE"

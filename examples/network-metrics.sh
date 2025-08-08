@@ -12,8 +12,6 @@ if ! source "$SCRIPT_DIR/common.sh"; then
     exit 1
 fi
 
-source "$SCRIPT_DIR/utils.sh"
-
 # Example configuration
 EXAMPLE="network-metrics"
 
@@ -133,7 +131,7 @@ action_generate() {
 
     log_info "Generating $NUM_MESSAGES network metrics messages..."
     # Generate flat structure first and save to INPUT_FILE
-    ../bin/qdb-data-gen network-metrics-generator.yaml --count "$NUM_MESSAGES" | \
+    ../bin/qdb-data-gen network-metrics-generator.yaml --count "$NUM_MESSAGES" --workers "$WORKERS" | \
     jq -c '{
       device: {
         info: {

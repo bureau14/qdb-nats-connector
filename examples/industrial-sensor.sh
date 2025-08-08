@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source common infrastructure
 source "$SCRIPT_DIR/common.sh"
-source "$SCRIPT_DIR/utils.sh"
 
 # Setup standardized error trapping
 setup_error_trap
@@ -99,7 +98,7 @@ action_generate() {
     # Generate data and count actual lines produced
     # First generate raw data to debug
     local temp_raw_file="${INPUT_FILE}.raw"
-    ../bin/qdb-data-gen industrial-sensor-generator.yaml --count "$NUM_MESSAGES" > "$temp_raw_file"
+    ../bin/qdb-data-gen industrial-sensor-generator.yaml --count "$NUM_MESSAGES" --workers "$WORKERS" > "$temp_raw_file"
     
     # DEBUG: Check raw data
     log_info "[DEBUG] First 3 lines of raw generated data:"

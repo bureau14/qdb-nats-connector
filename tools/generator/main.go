@@ -43,6 +43,7 @@ Arguments:
 
 Options:
     --count <n>                      Number of records to generate (default: 1000)
+    --workers <n>                    Number of parallel workers (default: CPU count)
     --mode <mode>                    Generation mode: batch or continuous (default: batch)
     --rate <rate>                    Messages per second (for continuous mode, default: 10000)
     --duration <duration>            Duration to run (0 = indefinite, e.g., 5m, 1h)
@@ -50,7 +51,7 @@ Options:
     -h, --help                       Show this message
 
 Examples:
-    qdb-data-gen finance-template.yaml --count 10000
+    qdb-data-gen finance-template.yaml --count 10000 --workers 8
     qdb-data-gen sensor-template.yaml --mode continuous --rate 5000
     qdb-data-gen metrics.yaml --mode continuous --rate 1000 --duration 5m
 `
@@ -85,10 +86,10 @@ func showVersion() {
 }
 
 // Generate creates JSON records according to template specifications
-// In: templateFile path, mode, count, rate, duration, writer for output
+// In: templateFile path, mode, count, workers, rate, duration, writer for output
 // Out: error if generation fails
-// Ex: Generate("template.yaml", "batch", 1000, 0, 0, writer) → generates 1000 JSON records
-func Generate(templateFile, mode string, count int, rate float64, duration time.Duration, writer io.Writer) error {
+// Ex: Generate("template.yaml", "batch", 1000, 4, 0, 0, writer) → generates 1000 JSON records
+func Generate(templateFile, mode string, count, workers int, rate float64, duration time.Duration, writer io.Writer) error {
 	// Create a new generation engine using the template file
 	engine, err := generator.NewEngine(templateFile)
 	if err != nil {
@@ -117,7 +118,11 @@ func Generate(templateFile, mode string, count int, rate float64, duration time.
 		return continuousEngine.Run(ctx, writer)
 
 	case "batch":
-		// Original batch generation
+		// Use parallel generation if workers > 1
+		if workers > 1 {
+			return engine.GenerateRecordsParallel(ctx, count, workers, writer)
+		}
+		// Original batch generation for single worker
 		return engine.GenerateRecords(ctx, count, writer)
 
 	default:
@@ -146,6 +151,7 @@ func runMain() int {
 	var showHelp bool
 	var showVersionFlag bool
 	var count int
+	var workers int
 	var mode string
 	var rate float64
 	var duration time.Duration
@@ -154,6 +160,7 @@ func runMain() int {
 	fs.BoolVarP(&showHelp, "help", "h", false, "Show this message")
 	fs.BoolVarP(&showVersionFlag, "version", "v", false, "Show version information")
 	fs.IntVar(&count, "count", 1000, "Number of records to generate")
+	fs.IntVar(&workers, "workers", runtime.NumCPU(), "Number of parallel workers")
 	fs.StringVar(&mode, "mode", "batch", "Generation mode")
 	fs.Float64Var(&rate, "rate", 10000, "Messages per second (for continuous mode)")
 	fs.DurationVar(&duration, "duration", 0, "Duration to run (0 = indefinite, e.g., 5m, 1h)")
@@ -192,7 +199,7 @@ func runMain() int {
 	writer := bufio.NewWriter(os.Stdout)
 
 	// Generate data using the extracted Generate function
-	err = Generate(templateFile, mode, count, rate, duration, writer)
+	err = Generate(templateFile, mode, count, workers, rate, duration, writer)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating data: %v\n", err)
 

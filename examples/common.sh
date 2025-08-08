@@ -47,6 +47,22 @@ log_debug() {
     fi
 }
 
+# CPU and Worker Configuration
+get_cpu_count() {
+    if command -v nproc >/dev/null 2>&1; then
+        nproc
+    elif command -v sysctl >/dev/null 2>&1; then
+        sysctl -n hw.ncpu
+    else
+        echo 4  # fallback
+    fi
+}
+
+# Calculate default worker count (use all CPUs)
+get_default_workers() {
+    get_cpu_count
+}
+
 # Error Handling
 die() {
     local message="$1"

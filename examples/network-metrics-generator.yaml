@@ -1,0 +1,60 @@
+name: "network_metrics"
+table: "network_metrics"
+
+fields:
+  # Device identification
+  device_info_id:
+    type: "sequence"
+    config:
+      values: ["router-01", "router-02", "switch-01", "switch-02", "firewall-01"]
+      repeat: true
+
+  # Datacenter mapping based on device
+  datacenter:
+    type: "sequence"
+    config:
+      values: ["DC1", "DC1", "DC1", "DC1", "DC2"]
+      repeat: true
+
+  # Rack mapping based on device
+  rack:
+    type: "sequence"
+    config:
+      values: ["R42", "R43", "R42", "R43", "R01"]
+      repeat: true
+
+  # Timestamp with nanosecond precision
+  timestamp:
+    type: "timestamp"
+    config:
+      start: "2025-01-16T10:00:00Z"
+      interval: "30s"
+      format: "2006-01-02T15:04:05.000000000Z"
+
+  # Network metrics
+  metrics_network_inbound_bytes:
+    type: "random_int"
+    config:
+      min: 500000
+      max: 50000000
+
+  metrics_network_outbound_bytes:
+    type: "random_int"
+    config:
+      min: 400000
+      max: 40000000
+
+  # Performance metrics
+  metrics_performance_latency_percentiles_p99:
+    type: "random_float"
+    config:
+      min: 0.2
+      max: 5.5
+      precision: 1
+
+  # Optional errors field - simulated by having a field that sometimes has 0
+  errors_packets_dropped:
+    type: "random_int"
+    config:
+      min: 0
+      max: 100

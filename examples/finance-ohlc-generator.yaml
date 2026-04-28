@@ -1,0 +1,90 @@
+name: "finance_ohlc"
+table: "finance.ohlc"
+
+fields:
+  # Exchange field
+  exchange:
+    type: "weighted_choice"
+    config:
+      choices:
+        - value: "NASDAQ"
+          weight: 5
+        - value: "NYSE"
+          weight: 3
+        - value: "AMEX"
+          weight: 1
+      
+  # Symbol field cycling through 5 stocks  
+  symbol:
+    type: "weighted_choice"
+    config:
+      choices:
+        - value: "AAPL"
+          weight: 5
+        - value: "GOOGL"
+          weight: 4
+        - value: "MSFT"
+          weight: 4
+        - value: "AMZN"
+          weight: 3
+        - value: "TSLA"
+          weight: 2
+      
+  # Timestamp with 60 second intervals
+  timestamp:
+    type: "timestamp"
+    config:
+      start: "2025-01-16T14:30:00Z"
+      interval: "60s"
+      format: "2006-01-02T15:04:05Z"
+      
+  # Open price with random walk
+  o:
+    type: "random_float"
+    config:
+      min: 150.00
+      max: 220.00
+      precision: 2
+      
+  # High price (higher than open)
+  h:
+    type: "random_float"
+    config:
+      min: 150.00
+      max: 225.00
+      precision: 2
+      
+  # Low price (lower than open)
+  l:
+    type: "random_float"
+    config:
+      min: 145.00
+      max: 220.00
+      precision: 2
+      
+  # Close price (between low and high)
+  c:
+    type: "random_float"
+    config:
+      min: 145.00
+      max: 225.00
+      precision: 2
+      
+  # Volume
+  v:
+    type: "random_int"
+    config:
+      min: 10000
+      max: 5000000
+
+# Post-transformations pipeline:
+# 1. encode_json - Convert record to JSON string
+# 2. compress - Gzip compress the JSON
+# 3. encode_base64 - Base64 encode the compressed data
+post_transformations:
+  - type: "encode_json"
+  - type: "compress"
+    config:
+      algorithm: "gzip"
+      level: 6
+  - type: "encode_base64"

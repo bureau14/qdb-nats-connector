@@ -1,0 +1,15 @@
+name: "pipeline_test"
+fields:
+  timestamp:
+    type: "timestamp"
+    config:
+      mode: "now"
+  id:
+    type: "sequence"
+    config:
+      start: 1
+  value:
+    type: "random_float"
+    config:
+      min: 0.0
+      max: 100.0

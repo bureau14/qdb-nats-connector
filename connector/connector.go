@@ -1,10 +1,7 @@
-// Package connector orchestrates the NATS-to-QuasarDB data pipeline.
-// This package bridges NATS messaging with QuasarDB time series storage through
-// a pluggable parser architecture that enables flexible message transformation.
-// Decision rationale:
-// - Public API package allows external usage and testing
-// - Component orchestration centralizes lifecycle management
-// - Signal handling enables graceful shutdown in production deployments
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package connector: NATS→QuasarDB pipeline orchestration
+// Types: Connector, Worker, Options
+// Ex: connector.New(opts).Run() → streams data
 package connector
 
 import (
@@ -12,167 +9,295 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
-	"github.com/bureau14/qdb-nats-connector/internal/errors"
-	"github.com/bureau14/qdb-nats-connector/internal/parser"
-	"github.com/bureau14/qdb-nats-connector/internal/sink"
+	"github.com/bureau14/qdb-nats-connector/connector/resilience"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
-	"github.com/nats-io/nats.go"
 )
 
-// Connector orchestrates the NATS source, message parser, and QuasarDB sink.
-// Key assumptions:
-// - Components are initialized in dependency order during NewConnector
-// - Each component manages its own connection lifecycle
-// - Connector handles graceful shutdown coordination between components
+// Connector: orchestrates NATS→QuasarDB pipeline, goroutine-safe
 type Connector struct {
-	Source *source.Source
-	Parser *parser.Parser
-	Sink   *sink.Sink
+	source         *source.Source            // Single shared source
+	workers        []*Worker                 // Worker pool
+	workCh         chan *source.MessageBatch // Work distribution channel
+	breakerManager *resilience.Manager
+	wg             sync.WaitGroup
+	cancel         context.CancelFunc
 }
 
-// NewConnector creates and initializes a new Connector.
+// NewConnector creates NATS→QuasarDB connector.
+// Args:
 //
-// This function orchestrates the creation of source, parser, and sink components,
-// handling proper resource cleanup on any initialization failure.
+//	opts: NATS/QuasarDB config & topic filters
 //
-// Decision rationale:
-// - Options are validated first to fail fast on invalid configuration
-// - Components are created in dependency order: source -> parser -> sink
-// - Each component failure triggers cleanup of previously created components
+// Returns:
 //
-// Key assumptions:
-// - The provided Options have been populated with valid endpoints
-// - Network connectivity to NATS and QuasarDB endpoints is available
-// - Component initialization is synchronous and blocking
+//	*Connector: configured pipeline
+//	error: invalid options/worker creation failed
 //
-// Usage example:
+// Example:
 //
-//	opts := &Options{
-//	    NatsEndpoint: "nats://localhost:4222",
-//	    NatsTopic:    "my.topic",
-//	    QdbEndpoint:  "qdb://localhost:2836",
-//	}
-//	conn, err := NewConnector(opts)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer conn.Close()
+//	conn := NewConnector(&Options{...}) // → *Connector
 func NewConnector(opts *Options) (*Connector, error) {
-	// Validate options before attempting to create components
-	if validationErr := ValidateOptions(opts); validationErr != nil {
+	// Validate config
+	validationErr := validateOptions(opts)
+	if validationErr != nil {
 		slog.Error("Options not valid", "options", opts, "error", validationErr)
+
 		return nil, validationErr
 	}
 
-	// Create source using a provider that builds options from the connector's config
-	srcOpts := source.FromOptionsProvider(opts)
-	src, err := source.NewSource(srcOpts)
+	// Create circuit breaker manager
+	var breakerManager *resilience.Manager
+	if opts.CircuitBreakerShared {
+		breakerManager = resilience.NewManager(
+			resilience.WithDefaults(
+				opts.CircuitBreakerFailureThreshold,
+				opts.CircuitBreakerSuccessThreshold,
+				opts.CircuitBreakerTimeout,
+			),
+			resilience.WithDefaultJitter(opts.CircuitBreakerJitterMax),
+			resilience.WithDefaultHalfOpen(opts.CircuitBreakerHalfOpenBase, opts.CircuitBreakerHalfOpenMax),
+			resilience.WithHookRegistry(opts.Hooks),
+		)
+	}
+
+	// Create single shared source
+	sourceOpts := source.FromOptionsProvider(opts)
+	sourceOpts.ConsumerName = opts.ConsumerName()
+	src, err := source.NewSource(sourceOpts)
 	if err != nil {
-		slog.Error("Failed to create source", "options", opts, "error", err)
 		return nil, err
 	}
 
-	par, err := parser.NewParser()
-	if err != nil {
-		slog.Error("Failed to create parser", "error", err)
-		src.Close()
-		return nil, err
-	}
+	// Create buffered work channel (size = workers * 2)
+	workCh := make(chan *source.MessageBatch, opts.GetWorkers()*2)
 
-	// Create sink using a provider that builds options from the connector's config
-	snkOpts := sink.FromOptionsProvider(opts)
-	snk, err := sink.NewSink(snkOpts)
-	if err != nil {
-		slog.Error("Failed to create sink", "options", snkOpts, "error", err)
-		src.Close()
-		return nil, err
+	// Create workers - multiple workers for horizontal scaling
+	workers := make([]*Worker, opts.GetWorkers())
+
+	for i := range opts.GetWorkers() {
+		worker, err := NewWorker(i, opts, workCh, breakerManager)
+		if err != nil {
+			// Cleanup created workers
+			for j := range i {
+				_ = workers[j].shutdown()
+			}
+			src.Close()
+
+			return nil, err
+		}
+		workers[i] = worker
 	}
 
 	return &Connector{
-		Source: src,
-		Parser: par,
-		Sink:   snk,
+		source:         src,
+		workers:        workers,
+		workCh:         workCh,
+		breakerManager: breakerManager,
 	}, nil
 }
 
-// Run starts the connector and blocks until an error occurs or shutdown.
-// Decision rationale:
-// - Single method to start all connector operations
-// - Integrates NATS subscription with parsing and sink pipeline
-// - Handles message processing errors gracefully without stopping
-// Performance trade-offs:
-// - Each NATS message handled in separate goroutine (via NATS async)
-// - Non-blocking sink writes prevent message handler stalls
+// Run starts connector, blocks until shutdown/error.
+// Args:
+//
+//	none
+//
+// Returns:
+//
+//	error: worker failure/context cancelled
+//
+// Example:
+//
+//	conn.Run() // blocks until SIGINT/error
 func (c *Connector) Run() error {
 	return c.RunWithContext(context.Background())
 }
 
-// RunWithContext starts the connector with context support for cancellation.
-// Decision rationale:
-// - Context enables graceful shutdown and cancellation
-// - Signal handling for production deployments
-// - Maintains backward compatibility through Run() method
+// RunWithContext runs connector with cancellation control.
+// Args:
+//
+//	ctx: cancellation context
+//
+// Returns:
+//
+//	error: worker error/context cancelled
+//
+// Example:
+//
+//	RunWithContext(ctx) // blocks until ctx.Done()/error
 func (c *Connector) RunWithContext(ctx context.Context) error {
-	slog.Info("Starting connector")
+	ctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	defer cancel()
 
-	// Define message handler that processes NATS messages
-	handler := func(msg *nats.Msg) {
-		// Parse the message
-		tables, err := c.Parser.Parse(msg.Data)
-		if err != nil {
-			slog.Error("Failed to parse message", "subject", msg.Subject, "error", err)
-			return
-		}
+	slog.Info("Starting connector with workers", "worker_count", len(c.workers))
 
-		// Skip empty results
-		if len(tables) == 0 {
-			slog.Debug("Parser returned no tables", "subject", msg.Subject)
-			return
-		}
+	// Connect to source before starting workers
+	err := c.source.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.source.Close()
 
-		// Write to sink
-		if err := c.Sink.Write(tables); err != nil {
-			slog.Error("Failed to write to sink", "subject", msg.Subject, "num_tables", len(tables), "error", err)
-			return
-		}
+	// Error channel for worker failures
+	errCh := make(chan error, len(c.workers))
 
-		slog.Debug("Message processed successfully", "subject", msg.Subject, "num_tables", len(tables))
+	// Start fetchLoop goroutine
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.fetchLoop(ctx)
+	}()
+
+	// Start workers
+	for _, worker := range c.workers {
+		c.wg.Add(1)
+		go func(w *Worker) {
+			defer c.wg.Done()
+			err := w.Run(ctx)
+			if err != nil && err != context.Canceled {
+				errCh <- err
+			}
+		}(worker)
 	}
 
-	// Subscribe to NATS with our handler
-	if err := c.Source.Subscribe(handler); err != nil {
-		return errors.NewSubscriptionFailedError("connector", "unknown", err)
-	}
-
-	slog.Info("Connector running, processing messages...")
+	// Start health monitor
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.monitorWorkers(ctx)
+	}()
 
 	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Wait for context cancellation or interrupt signal
+	slog.Info("Connector running, processing messages...")
+
+	// Wait for error, signal, or cancellation
 	select {
-	case <-ctx.Done():
-		slog.Info("Context cancelled, shutting down")
-		return ctx.Err()
+	case err := <-errCh:
+		slog.Error("Worker error, shutting down", "error", err)
+		cancel() // Stop all workers
+		c.wg.Wait()
+
+		return err
 	case sig := <-sigCh:
 		slog.Info("Received signal, shutting down", "signal", sig)
+		cancel()
+		c.wg.Wait()
+
 		return nil
+	case <-ctx.Done():
+		slog.Info("Context cancelled, shutting down")
+		c.wg.Wait()
+
+		return ctx.Err()
 	}
 }
 
-// Close gracefully shuts down the connector's components.
+// Close gracefully shuts down connector & workers.
+// Args:
 //
-// Components are closed in reverse initialization order to ensure
-// clean shutdown without data loss.
+//	none
 //
-// Key assumptions:
-// - Component Close() methods are idempotent
-// - Close() methods handle nil receivers gracefully
+// Returns:
+//
+//	none
+//
+// Example:
+//
+//	conn.Close() // cancels ctx, waits workers, frees resources
 func (c *Connector) Close() {
 	slog.Info("Closing connector")
-	c.Source.Close()
-	c.Sink.Close()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.wg.Wait()
+	for _, worker := range c.workers {
+		_ = worker.shutdown()
+	}
+}
+
+// monitorWorkers checks worker health every 30s
+// In: ctx context.Context - cancellation
+// Out: none - logs warnings
+// Ex: monitorWorkers(ctx) → logs unhealthy
+func (c *Connector) monitorWorkers(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, w := range c.workers {
+				if !w.isHealthy() {
+					slog.Warn("Worker unhealthy", "worker_id", w.id)
+					// Workers auto-recover via consumer recreation
+				}
+			}
+		}
+	}
+}
+
+// fetchLoop continuously fetches message batches from the source and distributes them to workers
+// In: ctx context.Context - cancellation
+// Out: none - writes to workCh, closes it when done
+// Ex: go c.fetchLoop(ctx) → distributes work to workers
+func (c *Connector) fetchLoop(ctx context.Context) {
+	defer close(c.workCh) // Creator closes channel
+
+	// Exponential backoff for fetch errors
+	backoffBase := 100 * time.Millisecond
+	backoffMax := 5 * time.Second
+	currentBackoff := backoffBase
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Fetch batch from source
+			batch, err := c.source.FetchBatch(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					// Context was cancelled, exit gracefully
+					return
+				}
+				// Log error and apply backoff
+				slog.Error("Failed to fetch batch", "error", err, "backoff", currentBackoff)
+
+				// Sleep with context check
+				select {
+				case <-time.After(currentBackoff):
+					// Double backoff up to max
+					currentBackoff *= 2
+					if currentBackoff > backoffMax {
+						currentBackoff = backoffMax
+					}
+				case <-ctx.Done():
+					return
+				}
+
+				continue
+			}
+
+			// Reset backoff on success
+			currentBackoff = backoffBase
+
+			// Send batch to workers
+			select {
+			case c.workCh <- batch:
+				// Successfully sent batch to worker
+			case <-ctx.Done():
+				// Context cancelled while sending
+				return
+			}
+		}
+	}
 }

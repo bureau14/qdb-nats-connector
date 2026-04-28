@@ -1,0 +1,30 @@
+name: "pattern_composite_test"
+fields:
+  sensor_id:
+    type: "pattern_composite"
+    config:
+      cardinality: 10000
+      patterns:
+        - weight: 60
+          template: "{location}/{equipment}-{sensor}"
+          components:
+            location: ["ZONE01", "ZONE02", "ZONE03"]
+            equipment: ["PUMP", "VALVE", "MOTOR"]
+            sensor:
+              type: "pattern"
+              prefix: ["TEMP"]
+              base: [""]
+              digits: 3
+        - weight: 40
+          template: "{type}-{id}"
+          components:
+            type: ["FLOW", "PRESS", "LEVEL"]
+            id:
+              type: "sequence"
+              start: 1000
+              end: 9999
+  value:
+    type: "random_float"
+    config:
+      min: 0.0
+      max: 100.0

@@ -1,58 +1,44 @@
-// Package parser implements the message transformation pipeline for the connector.
-// This internal package provides pluggable parsers that transform raw NATS messages
-// into structured data suitable for QuasarDB time series storage.
-// Decision rationale:
-// - Plugin architecture enables runtime parser loading
-// - Chain of responsibility pattern for complex transformations
-// - Internal package prevents external dependencies
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package parser: NATS→QuasarDB message transformation
+// Types: Parser, NoopParser, YAMLParser
+// Ex: parser.Parse(msg) → []WriterTable
 package parser
 
 import (
-	"fmt"
-	"log/slog"
-
 	qdb "github.com/bureau14/qdb-api-go/v3"
-	"github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/nats-io/nats.go"
 )
 
-// Parser orchestrates message transformation through configured parser plugins.
-// Key assumptions:
-// - Parser plugins are loaded at initialization time
-// - Parse operations are thread-safe
-// - Failed parsing returns error without side effects
-type Parser struct {
-	// TODO: Add parser configuration fields here.
+// ParserOptions: parser factory configuration
+type ParserOptions struct {
+	ParserType  string // noop, yaml
+	ConfigPath  string // Path to parser config file (for yaml parser)
+	ErrorAction string // drop, fail
 }
 
-// NewParser creates a parser instance ready for message transformation.
-// Decision rationale:
-// - Initialization validates parser configuration early
-// - Returns error for invalid plugin paths or configurations
-// - Empty parser for now, plugin loading to be implemented
-// Performance trade-offs:
-// - Plugin loading happens once at startup
-// - Runtime parsing avoids plugin lookup overhead
-func NewParser() (*Parser, error) {
-	slog.Info("Initializing new parser")
-	return &Parser{}, nil
-}
-
-// Parse transforms raw message data into QuasarDB writer tables.
-// Decision rationale:
-// - Returns slice of WriterTable to support multiple table writes per message
-// - Plugin architecture allows for extensible parsing logic
-// Performance trade-offs:
-// - Memory allocation for slice and tables on each parse
-// - Trade-off between memory usage and flexibility for multi-table writes
-func (p *Parser) Parse(data []byte) ([]*qdb.WriterTable, error) {
-	if len(data) == 0 {
-		return nil, errors.NewParsingFailedError("parser", fmt.Errorf("empty message data"))
-	}
-
-	// TODO: Implement actual parsing logic with plugins
-	slog.Debug("Parsing message data", "data_len", len(data))
-
-	// Placeholder - return empty slice for now
-	// In real implementation, this would parse the message and create appropriate WriterTable instances
-	return []*qdb.WriterTable{}, nil
+// Parser: transforms NATS messages into QuasarDB timeseries tables. Needed for pluggable data transformations.
+// Who: connector uses, NoopParser/YAMLParser implement.
+// Parse: converts single message to tables
+//
+// CRITICAL MEMORY PINNING CONTRACT:
+// =================================
+// ALL Parser implementations MUST ensure that strings in WriterTable are compatible
+// with Go's runtime.Pinner. This is a HARD REQUIREMENT due to QuasarDB's zero-copy
+// architecture using unsafe.StringData() and direct memory access from C++.
+//
+// IMPLEMENTATION RULES FOR PARSER AUTHORS:
+// 1. NEVER use strings.Builder for any string that will be written to QuasarDB
+// 2. ALWAYS use direct concatenation (+) or fmt.Sprintf() for string construction
+// 3. String literals and simple conversions are safe
+// 4. Strings from buffers or pools may NOT be contiguous - verify before use
+//
+// TESTING YOUR PARSER:
+// - Run with large batches to trigger memory pressure
+// - Look for segfaults in qdb_batch_push_columns
+// - Use race detector to find memory access issues
+// - Test with concurrent writes to expose pinning problems
+type Parser interface {
+	// Parse transforms single NATS message to QuasarDB tables
+	// Returns: WriterTable slice where ALL strings MUST be pinnable by runtime.Pinner
+	Parse(msg *nats.Msg) ([]qdb.WriterTable, error)
 }

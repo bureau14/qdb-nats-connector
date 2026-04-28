@@ -1,35 +1,85 @@
-// Package connector bridges NATS messaging with QuasarDB time series storage.
-// This package provides the core orchestration logic for subscribing to NATS topics,
-// parsing messages through a configurable pipeline, and storing the results in QuasarDB.
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package connector: NATS→QuasarDB pipeline orchestration
+// Types: Connector, Worker, Options
+// Ex: connector.New(opts).Run() → streams data
 package connector
 
 import (
-	"encoding/json"
-	"flag"
 	"fmt"
+	"os"
+	"strings"
+	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
+	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 )
 
-// Options aggregates configuration for the entire connector pipeline.
-// It implements both source.OptionsProvider and sink.OptionsProvider
-// to allow seamless configuration propagation to child components.
-// Decision rationale:
-// - Embeds source and sink options to avoid duplication
-// - Uses provider pattern for flexible configuration passing
-// - JSON tags enable configuration via files
+// Options: connector config, implements sink/source.OptionsProvider
 type Options struct {
-	PidFile string `json:"pid"`
+	PidFile string `mapstructure:"pid"`
 
-	// sourceOptions contains NATS connection settings including endpoint and topic.
-	sourceOptions source.Options
+	// NATS options
+	NatsEndpoint     string        `mapstructure:"nats"`
+	NatsStreamName   string        `mapstructure:"stream"`
+	NatsConsumerName string        `mapstructure:"consumer"`
+	NatsBatchSize    int           `mapstructure:"batch-size"`
+	NatsBatchTimeout time.Duration `mapstructure:"batch-timeout"`
+	NatsFetchTimeout time.Duration `mapstructure:"fetch-timeout"`
+	NatsAckWait      time.Duration `mapstructure:"ack-wait"`
+	NatsMaxDeliver   int           `mapstructure:"max-deliver"`
+	Workers          int           `mapstructure:"workers"`
 
-	// sinkOptions contains QuasarDB connection and performance settings.
-	sinkOptions sink.Options
+	// QDB options
+	QdbClusterUri           string `mapstructure:"qdb"`
+	QdbClusterPublicKeyFile string `mapstructure:"qdb-pubkey-file"`
+	QdbUserSecurityFile     string `mapstructure:"qdb-user-sec-file"`
+	QdbCompression          string `mapstructure:"qdb-compression"`
+	QdbEncryption           string `mapstructure:"qdb-encryption"`
+	QdbPushMode             string `mapstructure:"qdb-push-mode"`
+	QdbDeduplicationMode    string `mapstructure:"qdb-deduplication-mode"`
+	QdbClientMaxParallelism uint   `mapstructure:"qdb-client-max-parallelism"`
+	QdbClientMaxInBufSize   uint   `mapstructure:"qdb-client-inbuf-size"`
+
+	MaxRetries                     int           `mapstructure:"max-retries"`
+	CircuitBreakerFailureThreshold int           `mapstructure:"circuit-breaker-failure-threshold"`
+	CircuitBreakerSuccessThreshold int           `mapstructure:"circuit-breaker-success-threshold"`
+	CircuitBreakerTimeout          time.Duration `mapstructure:"circuit-breaker-timeout"`
+	CircuitBreakerShared           bool          `mapstructure:"circuit-breaker-shared"`
+	CircuitBreakerJitterMax        time.Duration `mapstructure:"circuit-breaker-jitter-max"`
+	CircuitBreakerHalfOpenBase     int           `mapstructure:"circuit-breaker-half-open-base"`
+	// CircuitBreakerHalfOpenMax is the maximum requests allowed in half-open state.
+	// Special values:
+	//   0: No limit - allows unlimited requests in half-open state
+	//   >0: Maximum number of concurrent requests before closing circuit
+	CircuitBreakerHalfOpenMax int `mapstructure:"circuit-breaker-half-open-max"`
+
+	// Parser configuration
+	Parser           string `mapstructure:"parser"`
+	ParserConfig     string `mapstructure:"parser-config"`
+	ParseErrorAction string `mapstructure:"parse-error-action"`
+
+	// Hooks for observability/testing
+	Hooks *hooks.HookRegistry `json:"-"`
+
+	// Internal parsed options for OptionsProvider interface
+	parsedSinkOptions   sink.Options
+	parsedSourceOptions struct {
+		URL          string
+		StreamName   string
+		ConsumerName string
+		BatchSize    int
+		BatchTimeout time.Duration
+		FetchTimeout time.Duration
+		AckWait      time.Duration
+		MaxDeliver   int
+	}
+	initialized bool // tracks if parsedOptions have been set
 }
 
 var (
@@ -37,188 +87,537 @@ var (
 	_ source.OptionsProvider = (*Options)(nil)
 )
 
-// ConfigureOptions parses command-line arguments into a validated Options struct.
-// Key assumptions:
-// - Short and long flag variants are equivalent (e.g., -n and --nats)
-// - Zero values for performance tuning flags mean "use defaults"
-// - Help request returns nil options without error
-// Decision rationale:
-// - Supports both short and long flags for user convenience
-// - Custom flag.Value implementations for type-safe parsing
-// - Performance flags use pointers to distinguish unset from zero
-// Usage example:
+// LoadConfig loads config from CLI arguments and environment variables.
+// Args:
 //
-//	opts, err := ConfigureOptions(flag.CommandLine, os.Args[1:], usage)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	if opts == nil {
-//	    return // help was requested
-//	}
-func ConfigureOptions(fs *flag.FlagSet, args []string, printHelp func()) (*Options, error) {
-	opts := &Options{}
-	var (
-		showHelp bool
-	)
+//	args: command-line arguments
+//	printHelp: help display function
+//
+// Returns:
+//
+//	*Options: parsed config (nil if help requested)
+//	error: parsing/validation failure
+//
+// Example:
+//
+//	LoadConfig(os.Args[1:], showHelp) // → *Options
+func LoadConfig(args []string, printHelp func()) (*Options, error) {
+	v := viper.New()
+	fs := pflag.NewFlagSet("qdb-nats-connector", pflag.ExitOnError)
 
-	fs.BoolVar(&showHelp, "h", false, "Show this message.")
-	fs.BoolVar(&showHelp, "help", false, "Show this message.")
+	// Configure viper for environment variables only
 
-	fs.StringVar(&opts.sourceOptions.Endpoint, "n", nats.DefaultURL, "NATS cluster endpoint (e.g. 10.192.172.166:4222)")
-	fs.StringVar(&opts.sourceOptions.Endpoint, "nats", nats.DefaultURL, "NATS cluster endpoint (e.g. 10.192.172.166:4222)")
+	// Set environment variable prefix and replacer
+	v.SetEnvPrefix("QDB_NATS")
+	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	v.AutomaticEnv()
 
-	fs.StringVar(&opts.sourceOptions.Topic, "t", "", "Topic to subscribe to.")
-	fs.StringVar(&opts.sourceOptions.Topic, "topic", "", "Topic to subscribe to.")
+	// Set defaults
+	v.SetDefault("nats", nats.DefaultURL)
+	v.SetDefault("consumer", "qdb-connector")
+	v.SetDefault("workers", 4)
+	v.SetDefault("batch-size", 100)
+	v.SetDefault("batch-timeout", time.Second)
+	v.SetDefault("fetch-timeout", 5*time.Second)
+	v.SetDefault("ack-wait", 30*time.Second)
+	v.SetDefault("max-deliver", 3)
+	v.SetDefault("max-retries", 3)
+	v.SetDefault("qdb-compression", "none")
+	v.SetDefault("qdb-encryption", "none")
+	v.SetDefault("qdb-push-mode", "async")
+	v.SetDefault("qdb-deduplication-mode", "drop")
+	v.SetDefault("circuit-breaker-failure-threshold", 5)
+	v.SetDefault("circuit-breaker-success-threshold", 2)
+	v.SetDefault("circuit-breaker-timeout", 30*time.Second)
+	v.SetDefault("circuit-breaker-shared", true)
+	v.SetDefault("circuit-breaker-jitter-max", 100*time.Millisecond)
+	v.SetDefault("circuit-breaker-half-open-base", 1)
+	v.SetDefault("circuit-breaker-half-open-max", 32)
+	v.SetDefault("parser", "noop")
+	v.SetDefault("parser-config", "")
+	v.SetDefault("parse-error-action", "drop")
 
-	fs.StringVar(&opts.PidFile, "P", "", "File to store PID.")
-	fs.StringVar(&opts.PidFile, "pid", "", "File to store PID.")
+	var showHelp bool
+
+	// Define CLI flags with pflag
+	fs.BoolVarP(&showHelp, "help", "h", false, "Show this message.")
+
+	// NATS flags
+	fs.StringP("nats", "n", nats.DefaultURL, "NATS cluster endpoint (e.g. 10.192.172.166:4222)")
+	fs.String("stream", "", "JetStream stream name")
+	fs.String("consumer", "qdb-connector", "Consumer name")
+	fs.IntP("workers", "w", 4, "Number of concurrent workers")
+	fs.Int("batch-size", 100, "Messages per fetch")
+	fs.Duration("batch-timeout", time.Second, "Max wait for batch")
+	fs.Duration("fetch-timeout", 5*time.Second, "Total fetch timeout")
+	fs.Duration("ack-wait", 30*time.Second, "Message ACK timeout")
+	fs.Int("max-deliver", 3, "Max delivery attempts")
+
+	// General flags
+	fs.Int("max-retries", 3, "Poison message threshold")
+	fs.StringP("pid", "P", "", "File to store PID.")
 
 	// QuasarDB connection flags
-	fs.StringVar(&opts.sinkOptions.ClusterUri, "qdb", "", "QuasarDB cluster endpoint (e.g. qdb://127.0.0.1:2836)")
-	fs.StringVar(&opts.sinkOptions.ClusterPublicKeyFile, "qdb-pubkey-file", "", "QuasarDB cluster public key file")
-	fs.StringVar(&opts.sinkOptions.UserSecurityFile, "qdb-user-sec-file", "", "QuasarDB user security file")
+	fs.String("qdb", "", "QuasarDB cluster endpoint (e.g. qdb://127.0.0.1:2836)")
+	fs.String("qdb-pubkey-file", "", "QuasarDB cluster public key file")
+	fs.String("qdb-user-sec-file", "", "QuasarDB user security file")
+	fs.String("qdb-compression", "", "QuasarDB sink compression (none|balanced)")
+	fs.String("qdb-encryption", "", "QuasarDB sink encryption (none|aes)")
+	fs.String("qdb-push-mode", "", "QuasarDB sink push mode (transactional|async|fast)")
+	fs.String("qdb-deduplication-mode", "", "QuasarDB deduplication mode (disabled|drop|upsert)")
+	fs.Uint("qdb-client-max-parallelism", 0, "QuasarDB sink max parallelism")
+	fs.Uint("qdb-client-inbuf-size", 0, "QuasarDB sink max input buffer size")
 
-	// Compression (custom flag.Value)
-	fs.Var(&compressionFlag{dst: &opts.sinkOptions.Compression}, "qdb-compression", "QuasarDB sink compression (none|best|speed)")
-	// Encryption (custom flag.Value)
-	fs.Var(&encryptionFlag{dst: &opts.sinkOptions.Encryption}, "qdb-encryption", "QuasarDB sink encryption (none|aes)")
+	// Circuit breaker flags
+	fs.Int("circuit-breaker-failure-threshold", 5, "Circuit breaker failure threshold")
+	fs.Int("circuit-breaker-success-threshold", 2, "Circuit breaker success threshold")
+	fs.Duration("circuit-breaker-timeout", 30*time.Second, "Circuit breaker timeout")
+	fs.Bool("circuit-breaker-shared", true, "Enable shared circuit breakers across workers")
+	fs.Duration("circuit-breaker-jitter-max", 100*time.Millisecond, "Maximum jitter for circuit breaker operations")
+	fs.Int("circuit-breaker-half-open-base", 1, "Initial requests allowed in half-open state")
+	fs.Int("circuit-breaker-half-open-max", 32, "Maximum requests before closing circuit")
 
-	// Performance-tuning flags
-	var pm uint
-	fs.UintVar(&pm, "qdb-client-max-parallelism", 0, "QuasarDB sink max parallelism")
-	opts.sinkOptions.ClientMaxParallelism = &pm
+	// Parser flags
+	fs.String("parser", "noop", "Parser type: yaml|noop")
+	fs.String("parser-config", "", "Path to parser configuration file (required for yaml parser)")
+	fs.String("parse-error-action", "drop", "Action on parse error: drop|fail")
 
-	var ib uint
-	fs.UintVar(&ib, "qdb-client-inbuf-size", 0, "QuasarDB sink max input buffer size")
-	opts.sinkOptions.ClientMaxInBufSize = &ib
-
-	if err := fs.Parse(args); err != nil {
+	err := fs.Parse(args)
+	if err != nil {
 		return nil, err
 	}
 
 	if showHelp {
 		printHelp()
+
 		return nil, nil
+	}
+
+	// Bind parser flags individually
+	err = v.BindPFlag("parser", fs.Lookup("parser"))
+	if err != nil {
+		return nil, fmt.Errorf("error binding parser flag: %w", err)
+	}
+	err = v.BindPFlag("parser-config", fs.Lookup("parser-config"))
+	if err != nil {
+		return nil, fmt.Errorf("error binding parser-config flag: %w", err)
+	}
+	err = v.BindPFlag("parse-error-action", fs.Lookup("parse-error-action"))
+	if err != nil {
+		return nil, fmt.Errorf("error binding parse-error-action flag: %w", err)
+	}
+
+	// Bind flags to viper - this handles precedence automatically
+	err = v.BindPFlags(fs)
+	if err != nil {
+		return nil, fmt.Errorf("error binding flags: %w", err)
+	}
+
+	// Direct unmarshal to Options
+	opts := &Options{}
+	err = v.Unmarshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshaling config: %w", err)
+	}
+
+	// Parse and set the typed fields
+	err = parseAndSetFields(opts, v)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate options
+	validationErr := validateOptions(opts)
+	if validationErr != nil {
+		return nil, validationErr
 	}
 
 	return opts, nil
 }
 
-// ValidateOptions ensures all required connector options are properly set.
-// Key assumptions:
-// - Topic is the only mandatory field (endpoints have defaults)
-// - Further validation happens in component constructors
-// Decision rationale:
-// - Minimal validation here, components validate their own requirements
-// - Early failure on missing topic prevents cryptic downstream errors
-func ValidateOptions(opts *Options) *errors.ConnectorError {
-	if opts.sourceOptions.Topic == "" {
-		return errors.NewNoTopicProvidedError("connector")
+// Initialize ensures parsedSourceOptions and parsedSinkOptions are populated from raw fields.
+// This is called automatically by OptionsProvider methods but can be called explicitly.
+// Safe to call multiple times.
+func (o *Options) Initialize() error {
+	return o.parseAndSetFields(nil)
+}
+
+// parseAndSetFields parses string fields into typed fields and sets internal options
+func parseAndSetFields(opts *Options, v *viper.Viper) error {
+	return opts.parseAndSetFields(v)
+}
+
+// validateOptions validates required config fields.
+// Args:
+//
+//	opts: configuration to validate
+//
+// Returns:
+//
+//	*errors.ConnectorError: validation error or nil
+//
+// Example:
+//
+//	validateOptions(opts) // → nil if valid
+func validateOptions(opts *Options) *errors.ConnectorError {
+	if opts.Workers <= 0 {
+		return errors.NewInvalidConfigError("connector", "workers must be positive")
+	}
+
+	if opts.NatsStreamName == "" {
+		return errors.NewInvalidConfigError("connector", "stream name is required")
+	}
+
+	if opts.NatsEndpoint == "" {
+		return errors.NewInvalidConfigError("connector", "NATS URL is required")
+	}
+
+	// Validate circuit breaker configuration
+	if opts.CircuitBreakerFailureThreshold <= 0 {
+		return errors.NewInvalidConfigError("connector", "circuit breaker failure threshold must be positive")
+	}
+
+	if opts.CircuitBreakerSuccessThreshold <= 0 {
+		return errors.NewInvalidConfigError("connector", "circuit breaker success threshold must be positive")
+	}
+
+	if opts.CircuitBreakerTimeout <= 0 {
+		return errors.NewInvalidConfigError("connector", "circuit breaker timeout must be positive")
+	}
+
+	// Validate half-open progression
+	if opts.CircuitBreakerHalfOpenBase <= 0 {
+		return errors.NewInvalidConfigError("connector", "circuit breaker half-open base must be positive")
+	}
+
+	if opts.CircuitBreakerHalfOpenMax != 0 && opts.CircuitBreakerHalfOpenMax < opts.CircuitBreakerHalfOpenBase {
+		return errors.NewInvalidConfigError("connector", "circuit breaker half-open max must be >= base (or 0 for no limit)")
+	}
+
+	// Special case: 0 means "no limit" for max
+	if opts.CircuitBreakerHalfOpenMax != 0 && opts.CircuitBreakerHalfOpenMax > 1000000 {
+		return errors.NewInvalidConfigError("connector", "circuit breaker half-open max too large (max 1000000, or 0 for no limit)")
+	}
+
+	// Validate jitter - it should not exceed timeout
+	if opts.CircuitBreakerJitterMax < 0 {
+		return errors.NewInvalidConfigError("connector", "circuit breaker jitter max cannot be negative")
+	}
+
+	if opts.CircuitBreakerJitterMax > opts.CircuitBreakerTimeout/2 {
+		return errors.NewInvalidConfigError("connector", "circuit breaker jitter max cannot exceed half the timeout")
+	}
+
+	// Validate parser configuration
+	validParsers := map[string]bool{"yaml": true, "noop": true}
+	if !validParsers[opts.Parser] {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("invalid parser type: %s (valid: yaml, noop)", opts.Parser))
+	}
+
+	// Validate parse error action
+	validErrorActions := map[string]bool{"drop": true, "fail": true}
+	if !validErrorActions[opts.ParseErrorAction] {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("invalid parse-error-action: %s (valid: drop, fail)", opts.ParseErrorAction))
+	}
+
+	// Validate YAML parser requirements
+	if opts.Parser == "yaml" && opts.ParserConfig == "" {
+		return errors.NewInvalidConfigError("connector",
+			"yaml parser requires --parser-config flag pointing to a YAML configuration file")
+	}
+
+	// Validate parser config path security
+	if opts.ParserConfig != "" {
+		// Check for path traversal attempts
+		if strings.Contains(opts.ParserConfig, "..") {
+			return errors.NewInvalidConfigError("connector",
+				"parser-config path must not contain '..' (path traversal)")
+		}
+
+		// Verify file exists and is readable
+		_, err := os.Stat(opts.ParserConfig)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return errors.NewInvalidConfigError("connector",
+					fmt.Sprintf("parser-config file not found: %s", opts.ParserConfig))
+			}
+
+			return errors.NewInvalidConfigError("connector",
+				fmt.Sprintf("cannot access parser-config file: %v", err))
+		}
 	}
 
 	return nil
 }
 
-// sink.OptionsProvider implementation
-// These methods delegate to embedded sinkOptions to fulfill the provider interface.
-// Decision rationale:
-// - Simple delegation avoids data duplication
-// - Provider pattern allows sink to remain decoupled from connector
-func (o *Options) ClusterUri() string            { return o.sinkOptions.ClusterUri }
-func (o *Options) ClusterPublicKeyFile() string  { return o.sinkOptions.ClusterPublicKeyFile }
-func (o *Options) UserSecurityFile() string      { return o.sinkOptions.UserSecurityFile }
-func (o *Options) Encryption() *qdb.Encryption   { return o.sinkOptions.Encryption }
-func (o *Options) Compression() *qdb.Compression { return o.sinkOptions.Compression }
-func (o *Options) ClientMaxParallelism() *uint   { return o.sinkOptions.ClientMaxParallelism }
-func (o *Options) ClientMaxInBufSize() *uint     { return o.sinkOptions.ClientMaxInBufSize }
+// ClusterUri returns QuasarDB URI
+// In: none
+// Out: string - cluster URI
+// Ex: ClusterUri() → "qdb://localhost:2836"
+func (o *Options) ClusterUri() string {
+	o.ensureInitialized()
 
-// source.OptionsProvider implementation
-// These methods delegate to embedded sourceOptions to fulfill the provider interface.
-// Decision rationale:
-// - Simple delegation avoids data duplication
-// - Provider pattern allows source to remain decoupled from connector
-func (o *Options) Endpoint() string { return o.sourceOptions.Endpoint }
-func (o *Options) Topic() string    { return o.sourceOptions.Topic }
-
-// compressionFlag implements flag.Value for *qdb.Compression.
-// Decision rationale:
-// - Double pointer allows distinguishing unset from explicit "none"
-// - Custom parsing provides user-friendly string values
-type compressionFlag struct{ dst **qdb.Compression }
-
-func (f *compressionFlag) String() string {
-	// Keep the output symmetrical with encryptionFlag.
-	if f == nil || f.dst == nil || *f.dst == nil {
-		return ""
-	}
-
-	b, _ := json.Marshal(*f.dst)
-	return string(b)
+	return o.parsedSinkOptions.ClusterUri
 }
-func (f *compressionFlag) Set(val string) error {
-	comp, err := parseCompression(val)
-	if err != nil {
-		return err
+
+// ClusterPublicKeyFile returns public key path
+// In: none
+// Out: string - path or empty
+// Ex: ClusterPublicKeyFile() → "/etc/qdb/cluster.pub"
+func (o *Options) ClusterPublicKeyFile() string {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.ClusterPublicKeyFile
+}
+
+// UserSecurityFile returns user auth file path
+// In: none
+// Out: string - path or empty
+// Ex: UserSecurityFile() → "/etc/qdb/user.key"
+func (o *Options) UserSecurityFile() string {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.UserSecurityFile
+}
+
+// Encryption returns QDB encryption mode
+// In: none
+// Out: *qdb.Encryption - nil=none
+// Ex: Encryption() → &EncryptAES
+func (o *Options) Encryption() *qdb.Encryption {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.Encryption
+}
+
+// Compression returns QDB compression mode
+// In: none
+// Out: qdb.Compression - none|balanced
+// Ex: Compression() → CompBalanced
+func (o *Options) Compression() qdb.Compression {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.Compression
+}
+
+// DeduplicationMode returns QDB deduplication mode
+// In: none
+// Out: qdb.WriterDeduplicationMode - disabled|drop|upsert
+// Ex: DeduplicationMode() → WriterDeduplicationModeDrop
+func (o *Options) DeduplicationMode() qdb.WriterDeduplicationMode {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.DeduplicationMode
+}
+
+// ClientMaxParallelism returns max QDB threads
+// In: none
+// Out: *uint - nil=default
+// Ex: ClientMaxParallelism() → &8
+func (o *Options) ClientMaxParallelism() *uint {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.ClientMaxParallelism
+}
+
+// ClientMaxInBufSize returns max QDB buffer
+// In: none
+// Out: *uint - nil=default
+// Ex: ClientMaxInBufSize() → &1048576
+func (o *Options) ClientMaxInBufSize() *uint {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.ClientMaxInBufSize
+}
+
+// Timeout returns QDB operation timeout
+// In: none
+// Out: *time.Duration - nil=default
+// Ex: Timeout() → &30s
+func (o *Options) Timeout() *time.Duration {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.Timeout
+}
+
+// URL returns NATS server endpoint
+// In: none
+// Out: string - NATS URL
+// Ex: URL() → "nats://localhost:4222"
+func (o *Options) URL() string {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.URL
+}
+
+// StreamName returns JetStream stream name
+// In: none
+// Out: string - stream name
+// Ex: StreamName() → "EVENTS"
+func (o *Options) StreamName() string {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.StreamName
+}
+
+// ConsumerName returns JetStream consumer name
+// In: none
+// Out: string - consumer name
+// Ex: ConsumerName() → "qdb-connector"
+func (o *Options) ConsumerName() string {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.ConsumerName
+}
+
+// GetWorkers returns number of concurrent workers
+// In: none
+// Out: int - worker count
+// Ex: GetWorkers() → 4
+func (o *Options) GetWorkers() int { return o.Workers }
+
+// BatchSize returns messages per fetch.
+// Out: int - batch size
+// Ex: BatchSize() → 100
+func (o *Options) BatchSize() int {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.BatchSize
+}
+
+// BatchTimeout returns max wait for batch.
+// Out: time.Duration - timeout
+// Ex: BatchTimeout() → 1s
+func (o *Options) BatchTimeout() time.Duration {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.BatchTimeout
+}
+
+// FetchTimeout returns total fetch timeout.
+// Out: time.Duration - timeout
+// Ex: FetchTimeout() → 5s
+func (o *Options) FetchTimeout() time.Duration {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.FetchTimeout
+}
+
+// AckWait returns message ACK timeout.
+// Out: time.Duration - timeout
+// Ex: AckWait() → 30s
+func (o *Options) AckWait() time.Duration {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.AckWait
+}
+
+// MaxDeliver returns max redelivery count.
+// Out: int - max attempts
+// Ex: MaxDeliver() → 3
+func (o *Options) MaxDeliver() int {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.MaxDeliver
+}
+
+// parseAndSetFields parses string fields into typed fields and sets internal options
+func (o *Options) parseAndSetFields(v *viper.Viper) error {
+	// Set internal parsed source options
+	o.parsedSourceOptions.URL = o.NatsEndpoint
+	o.parsedSourceOptions.StreamName = o.NatsStreamName
+	o.parsedSourceOptions.ConsumerName = o.NatsConsumerName
+	o.parsedSourceOptions.BatchSize = o.NatsBatchSize
+	o.parsedSourceOptions.BatchTimeout = o.NatsBatchTimeout
+	o.parsedSourceOptions.FetchTimeout = o.NatsFetchTimeout
+	o.parsedSourceOptions.AckWait = o.NatsAckWait
+	o.parsedSourceOptions.MaxDeliver = o.NatsMaxDeliver
+
+	// Set sink options
+	o.parsedSinkOptions.ClusterUri = o.QdbClusterUri
+	o.parsedSinkOptions.ClusterPublicKeyFile = o.QdbClusterPublicKeyFile
+	o.parsedSinkOptions.UserSecurityFile = o.QdbUserSecurityFile
+
+	// Parse compression
+	if o.QdbCompression != "" {
+		comp, err := parseCompression(o.QdbCompression)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.Compression = comp
 	}
-	*f.dst = &comp
+
+	// Parse encryption
+	if o.QdbEncryption != "" {
+		enc, err := parseEncryption(o.QdbEncryption)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.Encryption = &enc
+	}
+
+	// Parse push mode
+	if o.QdbPushMode != "" {
+		pushMode, err := parsePushMode(o.QdbPushMode)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.PushMode = pushMode
+	}
+
+	// Parse deduplication mode
+	if o.QdbDeduplicationMode != "" {
+		dedupMode, err := parseDeduplicationMode(o.QdbDeduplicationMode)
+		if err != nil {
+			return err
+		}
+		o.parsedSinkOptions.DeduplicationMode = dedupMode
+	}
+
+	// Set performance settings
+	if o.QdbClientMaxParallelism > 0 {
+		o.parsedSinkOptions.ClientMaxParallelism = &o.QdbClientMaxParallelism
+	}
+	if o.QdbClientMaxInBufSize > 0 {
+		o.parsedSinkOptions.ClientMaxInBufSize = &o.QdbClientMaxInBufSize
+	}
+
+	o.initialized = true
+
 	return nil
 }
 
-// encryptionFlag implements flag.Value for *qdb.Encryption.
-// Decision rationale:
-// - Double pointer allows distinguishing unset from default
-// - String representation matches command-line input format
-type encryptionFlag struct{ dst **qdb.Encryption }
-
-func (f *encryptionFlag) String() string {
-	if f == nil || f.dst == nil || *f.dst == nil {
-		return ""
-	}
-	switch **f.dst {
-	case qdb.EncryptNone:
-		return "none"
-	case qdb.EncryptAES:
-		return "aes"
-	default:
-		return ""
+// ensureInitialized checks if parsed options are set and initializes them if not
+func (o *Options) ensureInitialized() {
+	if !o.initialized {
+		// Ignore error since this is a fallback for programmatic creation
+		// Errors would have been caught during validation in LoadConfig
+		_ = o.parseAndSetFields(nil)
 	}
 }
-func (f *encryptionFlag) Set(val string) error {
-	enc, err := parseEncryption(val)
-	if err != nil {
-		return err
-	}
-	*f.dst = &enc
-	return nil
-}
 
-// parseCompression parses string compression values into qdb.Compression constants.
-// Key assumptions:
-// - "fast" and "speed" are synonyms for user convenience
-// - Invalid values return CompNone with error
-// Decision rationale:
-// - Explicit string matching avoids strconv parsing issues
-// - Clear error messages guide users to valid options
+// parseCompression converts string→qdb.Compression.
+// In: val string - none|balanced
+// Out: qdb.Compression, error
+// Ex: parseCompression("none") → CompNone, nil
 func parseCompression(val string) (qdb.Compression, error) {
 	switch val {
 	case "none":
 		return qdb.CompNone, nil
-	case "fast", "speed":
-		return qdb.CompFast, nil
-	case "best":
-		return qdb.CompBest, nil
+	case "balanced":
+		return qdb.CompBalanced, nil
 	default:
-		return qdb.CompNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid compression value: %s (valid values: none, fast, speed, best)", val))
+		return qdb.CompNone, errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("invalid compression value: %s (valid values: none, balanced)", val))
 	}
 }
 
-// parseEncryption parses string encryption values into qdb.Encryption constants.
-// Key assumptions:
-// - Only "none" and "aes" are valid options
-// - Invalid values return EncryptNone with error
-// Decision rationale:
-// - Type-safe parsing prevents invalid encryption settings
-// - Defaults to no encryption on error for safety
+// parseEncryption converts string→qdb.Encryption.
+// In: val string - none|aes
+// Out: qdb.Encryption, error
+// Ex: parseEncryption("aes") → EncryptAES, nil
 func parseEncryption(val string) (qdb.Encryption, error) {
 	switch val {
 	case "none":
@@ -227,5 +626,39 @@ func parseEncryption(val string) (qdb.Encryption, error) {
 		return qdb.EncryptAES, nil
 	default:
 		return qdb.EncryptNone, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid encryption value: %s (valid values: none, aes)", val))
+	}
+}
+
+// parsePushMode converts string→qdb.WriterPushMode.
+// In: val string - transactional|async|fast
+// Out: qdb.WriterPushMode, error
+// Ex: parsePushMode("async") → WriterPushModeAsync, nil
+func parsePushMode(val string) (qdb.WriterPushMode, error) {
+	switch val {
+	case "transactional":
+		return qdb.WriterPushModeTransactional, nil
+	case "async":
+		return qdb.WriterPushModeAsync, nil
+	case "fast":
+		return qdb.WriterPushModeFast, nil
+	default:
+		return qdb.WriterPushModeAsync, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid push mode value: %s (valid values: transactional, async, fast)", val))
+	}
+}
+
+// parseDeduplicationMode converts string→qdb.WriterDeduplicationMode.
+// In: val string - disabled|drop|upsert
+// Out: qdb.WriterDeduplicationMode, error
+// Ex: parseDeduplicationMode("drop") → WriterDeduplicationModeDrop, nil
+func parseDeduplicationMode(val string) (qdb.WriterDeduplicationMode, error) {
+	switch val {
+	case "disabled":
+		return qdb.WriterDeduplicationModeDisabled, nil
+	case "drop":
+		return qdb.WriterDeduplicationModeDrop, nil
+	case "upsert":
+		return qdb.WriterDeduplicationModeUpsert, nil
+	default:
+		return qdb.WriterDeduplicationModeDrop, errors.NewInvalidConfigError("connector", fmt.Sprintf("invalid deduplication mode value: %s (valid values: disabled, drop, upsert)", val))
 	}
 }

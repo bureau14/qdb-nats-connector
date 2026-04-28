@@ -1,3 +1,7 @@
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package logging: logger setup & configuration
+// Types: none
+// Ex: logging.SetupDefault("v1.0", "app") → global logger configured
 package logging
 
 import (
@@ -6,8 +10,9 @@ import (
 	"strings"
 )
 
-// Setup configures and returns a structured logger based on environment variables.
-// It supports different log levels and formats for development vs production use.
+// Setup creates logger from env vars.
+// Out: *slog.Logger - JSON|text based on LOG_FORMAT
+// Ex: Setup() → JSONHandler logger
 func Setup() *slog.Logger {
 	opts := &slog.HandlerOptions{
 		Level:     getLogLevel(),
@@ -25,7 +30,9 @@ func Setup() *slog.Logger {
 	}
 }
 
-// SetupDefault configures the default slog logger with service metadata.
+// SetupDefault sets global logger with metadata.
+// In: version, instanceID string - service info
+// Ex: SetupDefault("v1.0", "node-1") → global logger set
 func SetupDefault(version, instanceID string) {
 	logger := Setup()
 
@@ -39,7 +46,9 @@ func SetupDefault(version, instanceID string) {
 	slog.SetDefault(logger)
 }
 
-// getLogLevel returns the log level from environment variable or defaults to Info.
+// getLogLevel parses LOG_LEVEL env var.
+// Out: slog.Level - DEBUG|INFO|WARN|ERROR
+// Ex: getLogLevel() → slog.LevelInfo
 func getLogLevel() slog.Level {
 	switch strings.ToUpper(os.Getenv("LOG_LEVEL")) {
 	case "DEBUG":
@@ -53,17 +62,23 @@ func getLogLevel() slog.Level {
 	}
 }
 
-// getLogFormat returns the log format from environment variable or defaults to json.
+// getLogFormat reads LOG_FORMAT env var.
+// Out: string - "json"|"text", default "json"
+// Ex: getLogFormat() → "json"
 func getLogFormat() string {
 	format := os.Getenv("LOG_FORMAT")
 	if format == "" {
 		return "json" // default for production
 	}
+
 	return strings.ToLower(format)
 }
 
-// isDevelopment checks if we're running in development mode.
+// isDevelopment checks ENVIRONMENT=dev.
+// Out: bool - true if dev|development|∅
+// Ex: isDevelopment() → true
 func isDevelopment() bool {
 	env := strings.ToLower(os.Getenv("ENVIRONMENT"))
+
 	return env == "development" || env == "dev" || env == ""
 }

@@ -1,0 +1,89 @@
+# Network device metrics YAML parser configuration with static table routing
+# Uses single table: network_metrics
+
+output:
+  columns:
+    - name: "device_id"
+      type: "string"
+    - name: "bytes_in"
+      type: "int64"
+    - name: "bytes_out"
+      type: "int64"
+    - name: "packets_dropped"
+      type: "int64"
+    - name: "latency_ms"
+      type: "double"
+    - name: "device_path"
+      type: "string"
+
+transformations:
+  # Parse incoming JSON message
+  - step: "parse_json"
+    config: {}
+
+  # Static table routing to network_metrics table
+  - step: "extract_table"
+    config:
+      value: "network_metrics"
+
+  # Extract and convert timestamp field (high-precision RFC3339Nano)
+  - step: "extract_index"
+    config:
+      source: "timestamp"
+      format: "rfc3339nano"
+
+  # Extract device identifier from nested device hierarchy
+  - step: "extract_field"
+    config:
+      source: "device.info.id"
+      target: "device_id"
+      type: "string"
+
+  # Extract network traffic metrics from deep nested structure
+  - step: "extract_field"
+    config:
+      source: "metrics.network.inbound.bytes"
+      target: "bytes_in"
+      type: "int64"
+
+  - step: "extract_field"
+    config:
+      source: "metrics.network.outbound.bytes"
+      target: "bytes_out"
+      type: "int64"
+
+  - step: "extract_field"
+    config:
+      source: "errors.packets.dropped"
+      target: "packets_dropped"
+      type: "int64"
+      on_error: "skip"
+
+  # Extract latency metric from deep nested structure
+  - step: "extract_field"
+    config:
+      source: "metrics.performance.latency_percentiles.p99"
+      target: "latency_ms"
+      type: "float64"
+
+  # Extract datacenter field for device_path computation
+  - step: "extract_field"
+    config:
+      source: "datacenter"
+      target: "datacenter"
+      type: "string"
+
+  # Extract rack field for device_path computation
+  - step: "extract_field"
+    config:
+      source: "rack" 
+      target: "rack"
+      type: "string"
+
+  # Create device_path from datacenter/rack/device_id
+  - step: "compute_field"
+    config:
+      target: "device_path"
+      operation: "concat"
+      fields: ["datacenter", "/", "rack", "/", "device_id"]
+

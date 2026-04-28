@@ -24,8 +24,7 @@ go.work.sum
 # env file
 .env
 
-qdb-nats-connector
-qdb_nats_connector
+bin/
 
 # Where we extract our qdb archives
 qdb/
@@ -38,6 +37,10 @@ secure/
 user_private.key
 users.cfg
 
+# Examples specific
+examples/*.log
+examples/*.pid
+
 # Datatbase log file
 *.out.txt
 *.err.txt
@@ -45,9 +48,20 @@ users.cfg
 
 # START Ruler Generated Files
 .aider.conf.yml
+.aider.conf.yml.bak
+.codex/config.toml
+.codex/config.toml.bak
+.gemini/settings.json
+.gemini/settings.json.bak
+.mcp.json.bak
 AGENTS.md
+AGENTS.md.bak
 CLAUDE.md
+CLAUDE.md.bak
+GEMINI.md
+GEMINI.md.bak
 ruler_aider_instructions.md
+ruler_aider_instructions.md.bak
 # END Ruler Generated Files
 
 # Added by ruler, but not as a gitignore? Probably because it's for MCP servers.
@@ -64,3 +78,4 @@ claude_desktop_config.json
 
 # Claude code local rules
 .claude/settings.local.json
+**/testdata/**

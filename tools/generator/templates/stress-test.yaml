@@ -1,0 +1,39 @@
+name: "Stress Test Pattern Generator"
+table: "stress_test"
+pattern: "stress-{id}"
+
+fields:
+  timestamp:
+    type: "timestamp"
+    config:
+      format: "2006-01-02T15:04:05.000Z"
+  
+  id:
+    type: "sequence"
+    config:
+      start: 1
+      step: 1
+  
+  load_level:
+    type: "stress_pattern"
+    config:
+      pattern: "sine_burst"
+      period: "1m"
+      burst_factor: 100
+      baseline_rate: 1000
+  
+  peak_indicator:
+    type: "stress_pattern"
+    config:
+      pattern: "square_wave"
+      period: "30s"
+      burst_factor: 5
+      baseline_rate: 1
+  
+  ramp_value:
+    type: "stress_pattern"
+    config:
+      pattern: "sawtooth"
+      period: "2m"
+      burst_factor: 50
+      baseline_rate: 10

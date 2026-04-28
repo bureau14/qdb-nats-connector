@@ -1,0 +1,84 @@
+name: "finance_ohlc"
+table: "finance.ohlc"
+
+fields:
+  # Sensor identification - cycling through 5 sensors
+  sensor_id:
+    type: "sequence"
+    config:
+      values: ["sensor-01", "sensor-02", "sensor-03", "sensor-04", "sensor-05"]
+      repeat: true
+      
+  sensor_location:
+    type: "sequence"
+    config:
+      values: ["Floor1", "Floor2", "Floor3", "Basement", "Rooftop"]
+      repeat: true
+
+  # Building identification
+  building:
+    type: "sequence"
+    config:
+      values: ["B1", "B1", "B1", "B2", "B2"]
+      repeat: true
+
+  # Floor identification
+  floor:
+    type: "sequence"  
+    config:
+      values: ["1", "2", "3", "B", "R"]
+      repeat: true
+
+  # Timestamp with 10 second intervals
+  timestamp:
+    type: "timestamp"
+    config:
+      start: "2025-01-16T09:00:00Z"
+      interval: "10s"
+      format: "2006-01-02 15:04:05"
+
+  # Temperature value - we'll need to handle errors in transformation
+  temp_value:
+    type: "random_float"
+    config:
+      min: 15.0
+      max: 35.0
+      precision: 1
+
+  # Error indicator (used to determine if temp should be error string)
+  temp_error_flag:
+    type: "random_int"
+    config:
+      min: 1
+      max: 100
+
+  # Pressure reading
+  pressure:
+    type: "random_float"
+    config:
+      min: 0.8
+      max: 1.5
+      precision: 2
+
+  # Humidity reading
+  humidity:
+    type: "random_float"
+    config:
+      min: 30.0
+      max: 80.0
+      precision: 1
+
+  # Vibration sensor reading
+  vibration:
+    type: "random_float"
+    config:
+      min: 0.0
+      max: 10.0
+      precision: 2
+
+  # Status indicator
+  status:
+    type: "sequence"
+    config:
+      values: ["NORMAL", "NORMAL", "NORMAL", "NORMAL", "WARNING", "CRITICAL"]
+      repeat: true

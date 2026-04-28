@@ -1,15 +1,14 @@
-// Package sink manages the QuasarDB connection and data persistence.
-// This internal package handles batching, compression, encryption, and
-// retry logic for reliable time series data storage.
-// Decision rationale:
-// - Internal package isolates QuasarDB-specific logic
-// - Batching improves write throughput
-// - Configurable compression/encryption for security
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package sink: QuasarDB connection & persistence
+// Types: Sink, Options, OptionsProvider
+// Ex: sink.NewSink(opts).Write(tables) → writes to QDB
 package sink
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,121 +17,88 @@ import (
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 )
 
-// Sink manages the QuasarDB client connection and write operations.
-// Decision rationale:
-// - Worker pool pattern with dedicated handles prevents resource contention
-// - Each worker has 1:1 mapping with QuasarDB handle for thread safety
-// - Buffered channel provides backpressure control
-// Key assumptions:
-// - QuasarDB cluster is reachable at configured endpoint
-// - Authentication credentials are valid if provided
-// - Sink handles reconnection on transient failures
+// Sink: synchronous QuasarDB writer with single handle. Needed for direct writes with proper backpressure.
+// Who: connector creates, parser results consumed.
+// Options: connection config
+// handle: single QDB connection handle
+// mu: protects handle during concurrent writes (handles are not goroutine-safe)
+// closed: atomic shutdown flag
 type Sink struct {
 	Options Options
-	workers []*worker
-	jobs    chan []*qdb.WriterTable
-	wg      sync.WaitGroup
+	handle  qdb.HandleType
+	mu      sync.Mutex
 	closed  atomic.Bool
 }
 
-// worker represents a single writer with dedicated QuasarDB handle.
-// Decision rationale:
-// - 1:1 handle to writer mapping ensures thread safety
-// - Dedicated goroutine per worker for concurrent processing
-// Performance trade-offs:
-// - Higher memory usage per worker (handle + connection)
-// - Better isolation and parallel write capability
-type worker struct {
-	id                int
-	handle            qdb.HandleType
-	options           Options
-	handleInitialized bool
-}
-
-// NewSink establishes connections to the QuasarDB cluster with worker pool.
-// Decision rationale:
-// - Creates dedicated workers with individual handles for thread safety
-// - Validates configuration before creating expensive resources
-// - Pre-connects all workers to fail fast on connection issues
-// Performance trade-offs:
-// - Higher memory usage for multiple handles but better concurrency
-// - Connection establishment overhead during initialization
+// NewSink creates synchronous writer with single QDB handle.
+// In: opts Options - cluster URI, connection config
+// Out: *Sink, error - ready for writes or config/connection err
+// Ex: NewSink(opts) → &Sink{handle}, nil
 func NewSink(opts Options) (*Sink, error) {
-	slog.Info("Initializing new sink", "num_workers", opts.NumWriters)
+	slog.Info("Initializing new sink")
 
-	if opts.NumWriters <= 0 {
-		return nil, errors.NewInvalidConfigError("sink", "num_writers must be positive")
+	err := validateSinkOptions(opts)
+	if err != nil {
+		return nil, err
 	}
 
-	if opts.ClusterUri == "" {
-		return nil, errors.NewInvalidConfigError("sink", "cluster_uri is required")
+	// Create single QDB handle
+	handleOpts, err := buildHandleOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	handle, err := createHandle(handleOpts)
+	if err != nil {
+		return nil, errors.NewConnectionFailedError("sink", opts.ClusterUri, err)
 	}
 
 	s := &Sink{
 		Options: opts,
-		workers: make([]*worker, opts.NumWriters),
-		jobs:    make(chan []*qdb.WriterTable, opts.QueueSize),
+		handle:  handle,
 	}
 
-	// Create workers with dedicated handles
-	for i := range opts.NumWriters {
-		w, err := newWorker(i, opts)
-		if err != nil {
-			// Clean up previously created workers
-			for j := range i {
-				s.workers[j].close()
-			}
-			return nil, errors.NewConnectionFailedError("sink", opts.ClusterUri, err)
-		}
-		s.workers[i] = w
+	slog.Info("Sink initialized successfully")
 
-		// Start worker goroutine
-		s.wg.Add(1)
-		go w.run(s.jobs, &s.wg)
-	}
-
-	slog.Info("Sink initialized successfully", "workers", len(s.workers))
 	return s, nil
 }
 
-// Close gracefully shuts down all workers and connections.
-// Decision rationale:
-// - Stops accepting new work first to prevent resource leaks
-// - Waits for workers to complete current tasks
-// - Closes all handles to release QuasarDB resources
-// Key assumptions:
-// - Pending writes are completed before closure
-// - Method is idempotent and safe to call multiple times
+// Connect satisfies interface, no-op (already connected).
+// In: ctx context.Context - unused
+// Out: error - always nil
+// Ex: Connect(ctx) → nil
+func (s *Sink) Connect(ctx context.Context) error {
+	// Sink is already initialized with workers in NewSink
+	return nil
+}
+
+// Close releases QDB handle.
+// In: none
+// Out: none - closes handle immediately
+// Ex: Close() → handle released
 func (s *Sink) Close() {
 	if s.closed.Swap(true) {
 		return // Already closed
 	}
 
-	slog.Info("Closing sink", "workers", len(s.workers))
+	slog.Info("Closing sink")
 
-	// Stop accepting new work
-	close(s.jobs)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Wait for all workers to finish
-	s.wg.Wait()
-
-	// Close all worker handles
-	for _, w := range s.workers {
-		w.close()
+	err := s.handle.Close()
+	if err != nil {
+		slog.Error("Failed to close QDB handle", "error", err)
 	}
 
 	slog.Info("Sink closed successfully")
 }
 
-// Write enqueues writer tables for processing by worker pool.
-// Decision rationale:
-// - Non-blocking enqueue prevents NATS handler goroutines from stalling
-// - Returns error immediately if system is overloaded
-// - Worker pool handles actual QuasarDB write operations
-// Performance trade-offs:
-// - Additional memory allocation for channel buffering
-// - Lower latency for NATS message processing
-func (s *Sink) Write(tables []*qdb.WriterTable) error {
+// Write performs synchronous QDB write with retry logic.
+// In: ctx context.Context - cancellation context, tables []WriterTable - timeseries data
+// Out: error - nil or write/retry failure
+// Ex: Write(ctx, tables) → nil (data written to QDB)
+func (s *Sink) Write(ctx context.Context, tables []qdb.WriterTable) error {
 	if s.closed.Load() {
 		return errors.NewWriteFailedError("sink", fmt.Errorf("sink is closed"))
 	}
@@ -141,151 +107,225 @@ func (s *Sink) Write(tables []*qdb.WriterTable) error {
 		return errors.NewWriteFailedError("sink", fmt.Errorf("no tables provided"))
 	}
 
-	select {
-	case s.jobs <- tables:
-		return nil
-	default:
-		return errors.NewQueueFullError("sink", len(s.jobs))
-	}
+	return s.writeWithRetry(ctx, tables)
 }
 
-// newWorker creates a worker with dedicated QuasarDB handle.
-// Decision rationale:
-// - Individual handle per worker ensures thread safety
-// - Connection established during initialization for fail-fast behavior
-// - Security and compression settings applied per handle
-func newWorker(id int, opts Options) (*worker, error) {
-	handle, err := qdb.NewHandle()
-	if err != nil {
-		return nil, err
-	}
-
-	// Configure handle options
-	if opts.Encryption != nil {
-		if err := handle.SetEncryption(*opts.Encryption); err != nil {
-			handle.Close()
-			return nil, err
-		}
-	}
-	if opts.Compression != nil {
-		if err := handle.SetCompression(*opts.Compression); err != nil {
-			handle.Close()
-			return nil, err
-		}
-	}
-	if opts.ClientMaxParallelism != nil {
-		if err := handle.SetClientMaxParallelism(*opts.ClientMaxParallelism); err != nil {
-			handle.Close()
-			return nil, err
-		}
-	}
-	if opts.ClientMaxInBufSize != nil {
-		if err := handle.SetClientMaxInBufSize(*opts.ClientMaxInBufSize); err != nil {
-			handle.Close()
-			return nil, err
-		}
-	}
-
-	// Connect to cluster
-	if err := handle.Connect(opts.ClusterUri); err != nil {
-		handle.Close()
-		return nil, err
-	}
-
-	return &worker{
-		id:                id,
-		handle:            handle,
-		options:           opts,
-		handleInitialized: true,
-	}, nil
-}
-
-// run processes write jobs in dedicated goroutine.
-// Decision rationale:
-// - Dedicated goroutine per worker for parallel processing
-// - Retry logic handles transient QuasarDB async pipeline full errors
-// - Error logging preserves diagnostic information without stopping worker
-func (w *worker) run(jobs <-chan []*qdb.WriterTable, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	slog.Info("Worker started", "worker_id", w.id)
-	defer slog.Info("Worker stopped", "worker_id", w.id)
-
-	for tables := range jobs {
-		if err := w.processTables(tables); err != nil {
-			slog.Error("Failed to process tables", "worker_id", w.id, "error", err, "num_tables", len(tables))
-		}
-	}
-}
-
-// processTables writes all tables with retry logic.
-// Decision rationale:
-// - Exponential backoff handles async pipeline full conditions
-// - Retries only on retryable errors to avoid infinite loops
-// - Batch processing of all tables in single operation
-func (w *worker) processTables(tables []*qdb.WriterTable) error {
+// writeWithRetry performs synchronous write with exponential backoff.
+// In: ctx context.Context - cancellation context, tables []qdb.WriterTable - data to write
+// Out: error - write failure or retry exhausted
+// Ex: writeWithRetry(ctx, tables) → nil (successful write)
+func (s *Sink) writeWithRetry(ctx context.Context, tables []qdb.WriterTable) error {
 	if len(tables) == 0 {
 		return nil
 	}
 
-	backoff := 100 * time.Millisecond
-	maxBackoff := 5 * time.Second
+	backoff := 3 * time.Second
+	maxBackoff := 300 * time.Second
 
-	for attempt := range w.options.RetryAttempts {
+	for attempt := range s.Options.RetryAttempts {
 		if attempt > 0 {
-			time.Sleep(backoff)
+			// Check context cancellation during backoff
+			select {
+			case <-ctx.Done():
+				return errors.NewWriteFailedError("sink", fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err()))
+			case <-time.After(backoff):
+				// Continue with retry
+			}
+
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
 		}
 
+		// Check context before attempting write
+		select {
+		case <-ctx.Done():
+			return errors.NewWriteFailedError("sink", fmt.Errorf("context cancelled before write attempt: %w", ctx.Err()))
+		default:
+			// Continue with write
+		}
+
 		// Push all tables
-		if err := w.pushTables(tables); err != nil {
-			if w.isRetryable(err) && attempt < w.options.RetryAttempts-1 {
-				slog.Debug("Retryable error, backing off", "worker_id", w.id, "attempt", attempt+1, "backoff", backoff, "error", err)
+		err := s.pushTables(tables)
+		if err != nil {
+			// Check if error is retryable using qdb.IsRetryable()
+			if !qdb.IsRetryable(err) {
+				slog.Error("Non-retryable error, failing immediately", "error", err, "retryable", false)
+
+				return errors.NewWriteFailedError("sink", fmt.Errorf("permanent failure: %w", err))
+			}
+
+			if attempt < s.Options.RetryAttempts-1 {
+				slog.Debug("Retryable error, backing off", "attempt", attempt+1, "backoff", backoff, "error", err, "retryable", true)
+
 				continue
 			}
-			return errors.NewWriteFailedError("sink", err)
+
+			slog.Error("Max retries exceeded for retryable error", "attempts", s.Options.RetryAttempts, "error", err, "retryable", true)
+
+			return errors.NewMaxRetriesExceededError("sink", s.Options.RetryAttempts)
 		}
 
 		return nil
 	}
 
-	return errors.NewMaxRetriesExceededError("sink", w.options.RetryAttempts)
+	return errors.NewMaxRetriesExceededError("sink", s.Options.RetryAttempts)
 }
 
-// pushTables executes the actual QuasarDB write operation.
-// Decision rationale:
-// - Single push operation for all tables to minimize network calls
-// - Uses dedicated handle for thread safety
-func (w *worker) pushTables(tables []*qdb.WriterTable) error {
-	writer := qdb.NewWriterWithDefaultOptions()
+// pushTables writes batch to QDB with mutex protection.
+// In: tables []qdb.WriterTable - data to write
+// Out: error - QDB write error
+// Ex: pushTables(tables) → nil
+func (s *Sink) pushTables(tables []qdb.WriterTable) error {
+	slog.Debug("Pushing tables to QDB", "num_tables", len(tables))
+
+	// Protect handle access with mutex since handles are not goroutine-safe
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Create writer options with push mode and deduplication mode
+	writerOpts := qdb.NewWriterOptions().WithPushMode(s.Options.PushMode).WithDeduplicationMode(s.Options.DeduplicationMode)
+	writer := qdb.NewWriter(writerOpts)
 
 	// Add all tables to the writer
-	for _, table := range tables {
-		if err := writer.SetTable(*table); err != nil {
+	for i, table := range tables {
+		slog.Debug("Adding table to writer", "table_index", i, "table_name", table.TableName)
+
+		// CRITICAL MEMORY PINNING CHECKPOINT:
+		// ===================================
+		// At this point, ALL string data in `table` MUST be pinnable by runtime.Pinner.
+		// QuasarDB's writer.SetTable() and subsequent batch.Push() operations will:
+		// 1. Call PinToC() on each string value
+		// 2. Use unsafe.StringData() to get raw memory pointers
+		// 3. Pin memory using runtime.Pinner to prevent GC movement
+		// 4. Pass pointers directly to C++ code for zero-copy operations
+		//
+		// COMMON FAILURE POINTS:
+		// - strings.Builder generated strings → SEGFAULT
+		// - Strings from certain buffer pools → SEGFAULT
+		// - Any non-contiguous string memory → SEGFAULT
+		//
+		// If you see crashes in qdb_batch_push_columns, check ALL string
+		// creation methods in the parser pipeline. Use + operator for safety.
+		err := writer.SetTable(table)
+		if err != nil {
+			slog.Error("Failed to set table in writer", "table_name", table.TableName, "error", err)
+
 			return err
 		}
 	}
 
 	// Push to QuasarDB
-	return writer.Push(w.handle)
-}
+	slog.Debug("Pushing data to QuasarDB")
 
-// isRetryable determines if an error should trigger retry logic.
-// Decision rationale:
-// - Async pipeline full is temporary condition worth retrying
-// - Connection errors might be transient network issues
-// - Data validation errors are permanent and shouldn't be retried
-func (w *worker) isRetryable(err error) bool {
-	// TODO: Implement proper error classification based on qdb-api-go error types
-	return true
-}
-
-// close releases the worker's QuasarDB handle.
-func (w *worker) close() {
-	if w.handleInitialized {
-		w.handle.Close()
+	// IMPORTANT: This function is synchronous, and **always** returns immediately.
+	// It pins all the memory provided
+	err := writer.Push(s.handle)
+	if err != nil {
+		slog.Error("Failed to push to QuasarDB", "error", err)
+	} else {
+		slog.Debug("Successfully pushed to QuasarDB")
 	}
+
+	return err
+}
+
+// validateSinkOptions ensures configuration safety before sink creation.
+// Separated from NewSink to fail fast on invalid config without side effects.
+// In: opts Options - user-provided configuration
+// Out: error if ClusterUri empty
+// Ex: validateSinkOptions(opts{ClusterUri:""}) → "cluster_uri is required"
+func validateSinkOptions(opts Options) error {
+	if opts.ClusterUri == "" {
+		return errors.NewInvalidConfigError("sink", "cluster_uri is required")
+	}
+
+	return nil
+}
+
+// buildHandleOptions transforms sink config into QuasarDB connection parameters.
+// Centralized to ensure consistent handle configuration across all workers.
+// In: opts Options - sink configuration with connection details
+// Out: *qdb.HandleOptions configured, error if client params invalid
+// Ex: buildHandleOptions(opts{ClusterUri:"qdb://localhost"}) → HandleOptions
+func buildHandleOptions(opts Options) (*qdb.HandleOptions, error) {
+	// Transform sink options to QDB handle configuration
+	handleOpts := qdb.NewHandleOptions().
+		WithClusterUri(opts.ClusterUri).
+		WithClusterPublicKeyFile(opts.ClusterPublicKeyFile).
+		WithUserSecurityFile(opts.UserSecurityFile).
+		WithCompression(opts.Compression)
+
+	// Apply encryption settings if configured
+	if opts.Encryption != nil {
+		handleOpts = handleOpts.WithEncryption(*opts.Encryption)
+	}
+
+	err := configureClientParameters(handleOpts, opts)
+	if err != nil {
+		return handleOpts, err
+	}
+
+	configureOptionalParameters(handleOpts, opts)
+
+	return handleOpts, nil
+}
+
+// configureClientParameters applies performance tuning to QuasarDB client.
+// Separated to validate numeric constraints before handle creation.
+// In: handleOpts to modify, opts with optional tuning parameters
+// Out: error if parallelism exceeds math.MaxInt
+// Ex: configureClientParameters(h,opts{ClientMaxParallelism:&8}) → nil
+func configureClientParameters(handleOpts *qdb.HandleOptions, opts Options) error {
+	// Apply performance tuning parameters
+	if opts.ClientMaxParallelism != nil {
+		parallelism := *opts.ClientMaxParallelism
+		if parallelism > math.MaxInt {
+			return fmt.Errorf("client max parallelism %d exceeds maximum allowed value %d", parallelism, math.MaxInt)
+		}
+		handleOpts.WithClientMaxParallelism(int(parallelism))
+	}
+	if opts.ClientMaxInBufSize != nil {
+		handleOpts.WithClientMaxInBufSize(*opts.ClientMaxInBufSize)
+	}
+
+	return nil
+}
+
+// configureOptionalParameters applies auth/timeout settings to handle.
+// Separated from required params for cleaner nil-checking logic.
+// In: handleOpts to modify, opts with optional settings
+// Out: modifies handleOpts in-place, no error possible
+// Ex: configureOptionalParameters(h,opts{Timeout:&5s}) → timeout set
+func configureOptionalParameters(handleOpts *qdb.HandleOptions, opts Options) {
+	// Apply connection timeout if specified
+	if opts.Timeout != nil {
+		handleOpts.WithTimeout(*opts.Timeout)
+	}
+
+	// Apply authentication if both credentials present
+	if opts.UserName != "" && opts.UserSecret != "" {
+		handleOpts.WithUserName(opts.UserName).WithUserSecret(opts.UserSecret)
+	}
+
+	// Apply cluster key authentication if configured
+	if opts.ClusterPublicKey != "" {
+		handleOpts.WithClusterPublicKey(opts.ClusterPublicKey)
+	}
+}
+
+// createHandle establishes connection to QuasarDB cluster.
+// Isolated to enable connection retry logic in future versions.
+// In: handleOpts *qdb.HandleOptions - fully configured options
+// Out: qdb.HandleType connected, error if connection fails
+// Ex: createHandle(opts) → handle ready for operations
+func createHandle(handleOpts *qdb.HandleOptions) (qdb.HandleType, error) {
+	// Establish connection to QuasarDB cluster
+	handle, err := qdb.NewHandleFromOptions(handleOpts)
+	if err != nil {
+		return qdb.HandleType{}, err
+	}
+
+	return handle, nil
 }

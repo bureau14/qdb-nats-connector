@@ -1,0 +1,101 @@
+# Finance OHLC market data YAML parser configuration
+# Routes data to exchange-specific tables: finance.{exchange}.{symbol}
+# Demonstrates dynamic table routing based on message content
+# Example: AAPL on NASDAQ → "finance.NASDAQ.AAPL", MSFT on NYSE → "finance.NYSE.MSFT"
+
+output:
+  columns:
+    - name: "stock_id"
+      type: "string"
+    - name: "open"
+      type: "double"
+    - name: "high"
+      type: "double"
+    - name: "low"
+      type: "double"
+    - name: "close"
+      type: "double"
+    - name: "volume"
+      type: "int64"
+    - name: "trading_pair"
+      type: "string"
+
+transformations:
+  # Decompress gzipped message first
+  - step: "decompress"
+    config:
+      algorithm: "gzip"
+
+  # Parse incoming JSON message
+  - step: "parse_json"
+    config: {}
+
+  # Extract exchange and symbol for dynamic table routing (must happen first)
+  - step: "extract_field"
+    config:
+      source: "exchange"
+      target: "exchange"
+      type: "string"
+
+  - step: "extract_field"
+    config:
+      source: "symbol"
+      target: "stock_id"
+      type: "string"
+
+  # Create dynamic table name: finance.{exchange}.{symbol}
+  # This enables routing like: NASDAQ.AAPL → "finance.NASDAQ.AAPL"
+  - step: "compute_field"
+    config:
+      operation: "concat"
+      target: "$table"
+      fields: ["finance", ".", "exchange", ".", "stock_id"]
+
+  # Extract the computed table name for dynamic routing
+  - step: "extract_table"
+    # Uses default source: "$table"
+
+  # Extract and convert timestamp field (ISO8601 format)
+  - step: "extract_index"
+    config:
+      source: "timestamp"
+      format: "2006-01-02T15:04:05Z"
+
+  # Extract OHLC price data
+  - step: "extract_field"
+    config:
+      source: "o"
+      target: "open"
+      type: "float64"
+
+  - step: "extract_field"
+    config:
+      source: "h"
+      target: "high"
+      type: "float64"
+
+  - step: "extract_field"
+    config:
+      source: "l"
+      target: "low"
+      type: "float64"
+
+  - step: "extract_field"
+    config:
+      source: "c"
+      target: "close"
+      type: "float64"
+
+  # Extract volume data
+  - step: "extract_field"
+    config:
+      source: "v"
+      target: "volume"
+      type: "int64"
+
+  # Create composite trading pair field
+  - step: "compute_field"
+    config:
+      operation: "concat"
+      target: "trading_pair"
+      fields: ["exchange", ":", "stock_id"]

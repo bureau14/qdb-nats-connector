@@ -1,29 +1,17 @@
-// Package errors provides structured error handling for the qdb-nats-connector.
-// This internal package centralizes error creation and management to avoid
-// circular dependencies between connector and internal packages.
-// Decision rationale:
-// - Structured errors enable better debugging and monitoring
-// - Component tagging helps identify error sources in distributed logs
-// - Error codes allow programmatic error classification
-// - Metadata field supports context-specific debugging information
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package errors: structured error handling
+// Types: ConnectorError, ErrorCode
+// Ex: errors.NewParsingFailedError("json", err) → structured error
 package errors
 
 import (
 	"fmt"
 )
 
-// ErrorCode represents a unique identifier for different error categories.
-// Starting at 1000 to avoid conflicts with standard HTTP status codes.
+// ErrorCode: unique identifier for error categories, starts at 1000
 type ErrorCode uint16
 
-// ConnectorError provides structured error information with component context.
-// Key assumptions:
-// - Component field identifies the source module (source, parser, sink, etc.)
-// - Code field enables programmatic error handling and classification
-// - Metadata field stores error-specific debugging context
-// Performance trade-offs:
-// - Additional memory overhead per error for structured information
-// - Faster debugging and monitoring through consistent error format
+// ConnectorError: structured error with component context & metadata
 type ConnectorError struct {
 	Code      ErrorCode
 	Message   string
@@ -33,44 +21,30 @@ type ConnectorError struct {
 }
 
 const (
-	// ErrCodeNoTopicProvided indicates missing topic configuration
+	// ErrCodeNoTopicProvided: missing topic config
 	ErrCodeNoTopicProvided ErrorCode = iota + 1000
-	// ErrCodeInvalidConfig indicates malformed or invalid configuration
+	// ErrCodeInvalidConfig: malformed config
 	ErrCodeInvalidConfig
-	// ErrCodeConnectionFailed indicates network connectivity issues
+	// ErrCodeConnectionFailed: network issues
 	ErrCodeConnectionFailed
-	// ErrCodeSubscriptionFailed indicates NATS subscription setup failure
+	// ErrCodeSubscriptionFailed: NATS sub failure
 	ErrCodeSubscriptionFailed
-	// ErrCodeParsingFailed indicates message transformation errors
+	// ErrCodeParsingFailed: message transform errors
 	ErrCodeParsingFailed
-	// ErrCodeWriteFailed indicates QuasarDB write operation failure
+	// ErrCodeWriteFailed: QDB write failure
 	ErrCodeWriteFailed
-	// ErrCodeQueueFull indicates sink queue is at capacity
+	// ErrCodeQueueFull: sink queue at capacity
 	ErrCodeQueueFull
-	// ErrCodeMaxRetriesExceeded indicates retry limit reached
+	// ErrCodeMaxRetriesExceeded: retry limit reached
 	ErrCodeMaxRetriesExceeded
-	// ErrCodeUnexpectedError indicates unhandled system-level errors
+	// ErrCodeUnexpectedError: unhandled system errors
 	ErrCodeUnexpectedError
 )
 
-// Error implements the error interface with structured formatting.
-// Returns format: "[component] message (code: N)" for consistent log parsing.
-func (e *ConnectorError) Error() string {
-	return fmt.Sprintf("[%s] %s (code: %d)", e.Component, e.Message, e.Code)
-}
-
-// Unwrap implements the errors.Unwrap interface for error chain traversal.
-// Enables errors.Is() and errors.As() to work with wrapped underlying errors.
-func (e *ConnectorError) Unwrap() error {
-	return e.Wrapped
-}
-
-// NewNoTopicProvidedError creates an error for missing topic configuration.
-// Decision rationale:
-// - Topic is mandatory for NATS subscription setup
-// - Early validation prevents runtime subscription failures
-// Key assumptions:
-// - Component parameter identifies the calling module for debugging
+// NewNoTopicProvidedError creates no topic provided error.
+// In: component string - caller module
+// Out: *ConnectorError - code 1000 with metadata
+// Ex: NewNoTopicProvidedError("source") → &ConnectorError{Code:1000}
 func NewNoTopicProvidedError(component string) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeNoTopicProvided,
@@ -80,13 +54,11 @@ func NewNoTopicProvidedError(component string) *ConnectorError {
 	}
 }
 
-// NewInvalidConfigError creates an error for malformed configuration values.
-// Decision rationale:
-// - Configuration errors should fail fast during startup
-// - Specific error message helps identify the invalid setting
-// Key assumptions:
-// - Message parameter contains user-readable description of the issue
-func NewInvalidConfigError(component string, message string) *ConnectorError {
+// NewInvalidConfigError creates config validation error.
+// In: component string, message string - module & issue
+// Out: *ConnectorError - code 1001 with formatted msg
+// Ex: NewInvalidConfigError("sink", "missing URI") → &ConnectorError{Code:1001}
+func NewInvalidConfigError(component, message string) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeInvalidConfig,
 		Component: component,
@@ -95,14 +67,11 @@ func NewInvalidConfigError(component string, message string) *ConnectorError {
 	}
 }
 
-// NewConnectionFailedError creates an error for network connectivity failures.
-// Decision rationale:
-// - Network errors should include endpoint for debugging connectivity issues
-// - Original error wrapped to preserve low-level diagnostic information
-// Key assumptions:
-// - Endpoint parameter contains the target address (host:port format)
-// - Underlying error contains OS-level connection failure details
-func NewConnectionFailedError(component string, endpoint string, err error) *ConnectorError {
+// NewConnectionFailedError creates network failure error.
+// In: component, endpoint string, err error
+// Out: *ConnectorError with endpoint metadata
+// Ex: NewConnectionFailedError("sink", "qdb://host:2836", err) → err
+func NewConnectionFailedError(component, endpoint string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeConnectionFailed,
 		Component: component,
@@ -112,14 +81,11 @@ func NewConnectionFailedError(component string, endpoint string, err error) *Con
 	}
 }
 
-// NewSubscriptionFailedError creates an error for NATS subscription failures.
-// Decision rationale:
-// - Topic information critical for debugging subscription issues
-// - NATS-specific error details preserved through wrapping
-// Key assumptions:
-// - Topic parameter contains the exact NATS subject pattern
-// - Underlying error contains NATS client-specific failure reason
-func NewSubscriptionFailedError(component string, topic string, err error) *ConnectorError {
+// NewSubscriptionFailedError creates NATS sub error.
+// In: component, topic string, err error
+// Out: *ConnectorError with topic metadata
+// Ex: NewSubscriptionFailedError("source", "data.*", err) → err
+func NewSubscriptionFailedError(component, topic string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeSubscriptionFailed,
 		Component: component,
@@ -129,13 +95,10 @@ func NewSubscriptionFailedError(component string, topic string, err error) *Conn
 	}
 }
 
-// NewParsingFailedError creates an error for message transformation failures.
-// Decision rationale:
-// - Parser errors indicate malformed input data or plugin issues
-// - Underlying error preserves parser-specific diagnostic information
-// Key assumptions:
-// - Component identifies the specific parser that failed
-// - Underlying error contains details about the parsing failure
+// NewParsingFailedError creates parser failure error.
+// In: component string, err error
+// Out: *ConnectorError
+// Ex: NewParsingFailedError("yaml-parser", err) → err
 func NewParsingFailedError(component string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeParsingFailed,
@@ -146,13 +109,10 @@ func NewParsingFailedError(component string, err error) *ConnectorError {
 	}
 }
 
-// NewWriteFailedError creates an error for data persistence failures.
-// Decision rationale:
-// - Write errors indicate QuasarDB connectivity or data format issues
-// - Underlying error preserves database-specific failure information
-// Key assumptions:
-// - Component identifies the sink module attempting the write
-// - Underlying error contains QuasarDB client error details
+// NewWriteFailedError creates QDB write error.
+// In: component string, err error
+// Out: *ConnectorError
+// Ex: NewWriteFailedError("sink", err) → err
 func NewWriteFailedError(component string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeWriteFailed,
@@ -163,12 +123,10 @@ func NewWriteFailedError(component string, err error) *ConnectorError {
 	}
 }
 
-// NewQueueFullError creates an error for sink queue capacity reached.
-// Decision rationale:
-// - Queue full indicates backpressure from downstream systems
-// - Queue depth metadata helps with capacity planning
-// Key assumptions:
-// - Queue depth represents current number of pending messages
+// NewQueueFullError creates queue capacity error.
+// In: component string, queueDepth int
+// Out: *ConnectorError with depth metadata
+// Ex: NewQueueFullError("sink", 1000) → err
 func NewQueueFullError(component string, queueDepth int) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeQueueFull,
@@ -178,12 +136,10 @@ func NewQueueFullError(component string, queueDepth int) *ConnectorError {
 	}
 }
 
-// NewMaxRetriesExceededError creates an error for retry limit reached.
-// Decision rationale:
-// - Retry exhaustion indicates persistent downstream issues
-// - Attempt count metadata helps tune retry configuration
-// Key assumptions:
-// - Max attempts represents the configured retry limit
+// NewMaxRetriesExceededError creates retry exhaustion error.
+// In: component string, maxAttempts int
+// Out: *ConnectorError with attempts metadata
+// Ex: NewMaxRetriesExceededError("sink", 3) → err
 func NewMaxRetriesExceededError(component string, maxAttempts int) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeMaxRetriesExceeded,
@@ -193,14 +149,11 @@ func NewMaxRetriesExceededError(component string, maxAttempts int) *ConnectorErr
 	}
 }
 
-// NewUnexpectedError creates an error for unhandled system-level failures.
-// Decision rationale:
-// - Catch-all for errors that don't fit specific categories
-// - Custom message provides context for debugging unexpected conditions
-// Key assumptions:
-// - Message parameter describes the unexpected condition or operation
-// - Underlying error contains system-level failure details
-func NewUnexpectedError(component string, message string, err error) *ConnectorError {
+// NewUnexpectedError creates catch-all error.
+// In: component, message string, err error
+// Out: *ConnectorError
+// Ex: NewUnexpectedError("sink", "panic recovery", err) → err
+func NewUnexpectedError(component, message string, err error) *ConnectorError {
 	return &ConnectorError{
 		Code:      ErrCodeUnexpectedError,
 		Component: component,
@@ -208,4 +161,22 @@ func NewUnexpectedError(component string, message string, err error) *ConnectorE
 		Wrapped:   err,
 		Metadata:  make(map[string]interface{}),
 	}
+}
+
+// Error formats error as "[component] message (code: N)".
+// Out: string - formatted error message
+// Ex: Error() → "[sink] failed to write (code: 1005)"
+func (e *ConnectorError) Error() string {
+	if e.Wrapped != nil {
+		return fmt.Sprintf("[%s] %s: %s (code: %d)", e.Component, e.Message, e.Wrapped.Error(), e.Code)
+	}
+
+	return fmt.Sprintf("[%s] %s (code: %d)", e.Component, e.Message, e.Code)
+}
+
+// Unwrap returns wrapped error for errors.Is().
+// Out: error - underlying cause
+// Ex: Unwrap() → original error
+func (e *ConnectorError) Unwrap() error {
+	return e.Wrapped
 }

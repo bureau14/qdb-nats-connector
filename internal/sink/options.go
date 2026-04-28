@@ -1,21 +1,25 @@
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+// Package sink: QuasarDB connection & persistence
+// Types: Sink, Options, OptionsProvider
+// Ex: sink.NewSink(opts).Write(tables) → writes to QDB
 package sink
 
 import (
+	"time"
+
 	qdb "github.com/bureau14/qdb-api-go/v3"
 )
 
-// Option is a function that configures an Options object.
-// Decision rationale:
-// - Functional options pattern provides flexible configuration
-// - Immutable options prevent concurrent modification issues
-// - Builder pattern enables fluent API
+// Option: functional option pattern for sink configuration. Needed for flexible option composition.
+// Who: WithX functions return, NewOptions consumes.
 type Option func(Options) Options
 
-// Options configures the QuasarDB sink behavior and connection parameters.
-// Key assumptions:
-// - Either file paths or direct values for security credentials
-// - Nil pointers mean "use QuasarDB defaults"
-// - JSON tags enable config file support
+// Options: QuasarDB sink configuration with auth, connection, and retry settings. Needed for customizable synchronous writes.
+// Who: connector config provides, sink consumes via NewSink.
+// ClusterUri-UserSecret: QDB connection & auth credentials
+// Encryption-DeduplicationMode: data handling policies
+// ClientMaxParallelism-ClientMaxInBufSize: QDB client tuning
+// RetryAttempts-Timeout: write retry configuration
 type Options struct {
 	ClusterUri           string `json:"cluster_uri"`
 	ClusterPublicKeyFile string `json:"cluster_public_key_file"`
@@ -25,190 +29,235 @@ type Options struct {
 	UserSecret           string `json:"user_secret"`
 	Encryption           *qdb.Encryption
 
-	// Defaults to `qdb.CompBest`
-	Compression *qdb.Compression
+	// Defaults to `qdb.WriterPushModeAsync`
+	PushMode qdb.WriterPushMode
+
+	// Defaults to `qdb.CompNone`
+	Compression qdb.Compression
+
+	// Defaults to `qdb.WriterDeduplicationModeDrop`
+	DeduplicationMode qdb.WriterDeduplicationMode
 
 	ClientMaxParallelism *uint
 	ClientMaxInBufSize   *uint
 
-	// Worker pool configuration
-	NumWriters    int `json:"num_writers"`
-	QueueSize     int `json:"queue_size"`
-	RetryAttempts int `json:"retry_attempts"`
+	// Retry configuration
+	RetryAttempts int            `json:"retry_attempts"`
+	Timeout       *time.Duration `json:"timeout"`
 }
 
-// NewOptions creates a new Options object and serves as the entrypoint for the
-// builder pattern.
-//
-// Usage example:
-//
-//	opts := sink.NewOptions(
-//	           sink.WithClusterUri("qdb://127.0.0.1:2836"),
-//	           sink.WithNumWriters(4),
-//	         )
+// NewOptions applies options to default sink config.
+// In: opts ...Option - functional options
+// Out: Options - async push, 10 retries
+// Ex: NewOptions(WithClusterUri("qdb://host")) → Options{}
 func NewOptions(opts ...Option) Options {
-	defComp := qdb.CompBest
 	options := Options{
-		Compression:   &defComp,
-		NumWriters:    4,
-		QueueSize:     100,
-		RetryAttempts: 3,
+		PushMode:          qdb.WriterPushModeAsync,
+		Compression:       qdb.CompNone,
+		DeduplicationMode: qdb.WriterDeduplicationModeDrop,
+		RetryAttempts:     10,
 	}
 	for _, opt := range opts {
 		options = opt(options)
 	}
+
 	return options
 }
 
-// WithClusterUri configures the QuasarDB cluster uri for the sink.
-// Key assumptions:
-// - URI format follows qdb:// scheme (e.g., qdb://host:port)
-// - Connection validation happens during sink initialization
+// WithClusterUri sets QDB cluster URI.
+// In: uri string - qdb://host:port
+// Out: Option
+// Ex: WithClusterUri("qdb://127.0.0.1:2836")
 func WithClusterUri(uri string) Option {
 	return func(o Options) Options {
 		o.ClusterUri = uri
+
 		return o
 	}
 }
 
-// WithClusterPublicKeyFile sets the cluster public key file path.
-// Key assumptions:
-// - File path is absolute or relative to working directory
-// - File contains valid QuasarDB cluster public key
+// WithClusterPublicKeyFile sets pubkey file path.
+// In: file string - path to key file
+// Out: Option
+// Ex: WithClusterPublicKeyFile("/etc/qdb/cluster.pub")
 func WithClusterPublicKeyFile(file string) Option {
 	return func(o Options) Options {
 		o.ClusterPublicKeyFile = file
+
 		return o
 	}
 }
 
-// WithClusterPublicKey sets the cluster public key content directly.
-// Decision rationale:
-// - Alternative to WithClusterPublicKeyFile for embedded key content
-// - Useful for containerized deployments with secret injection
+// WithClusterPublicKey sets pubkey content.
+// In: key string - inline key
+// Out: Option
+// Ex: WithClusterPublicKey("base64key...")
 func WithClusterPublicKey(key string) Option {
 	return func(o Options) Options {
 		o.ClusterPublicKey = key
+
 		return o
 	}
 }
 
-// WithUserSecurityFile sets the user security file path.
+// WithUserSecurityFile sets user sec file.
+// In: file string - path to file
+// Out: Option
+// Ex: WithUserSecurityFile("/etc/qdb/user.sec")
 func WithUserSecurityFile(file string) Option {
 	return func(o Options) Options {
 		o.UserSecurityFile = file
+
 		return o
 	}
 }
 
-// WithUserName sets the user name.
+// WithUserName sets auth username.
+// In: name string
+// Out: Option
+// Ex: WithUserName("admin")
 func WithUserName(name string) Option {
 	return func(o Options) Options {
 		o.UserName = name
+
 		return o
 	}
 }
 
-// WithUserSecret sets the user secret.
+// WithUserSecret sets auth secret.
+// In: secret string
+// Out: Option
+// Ex: WithUserSecret("secret123")
 func WithUserSecret(secret string) Option {
 	return func(o Options) Options {
 		o.UserSecret = secret
+
 		return o
 	}
 }
 
-// WithEncryption sets the encryption config.
+// WithEncryption sets encryption mode.
+// In: enc *qdb.Encryption - none|aes
+// Out: Option
+// Ex: WithEncryption(&qdb.EncryptAES)
 func WithEncryption(enc *qdb.Encryption) Option {
 	return func(o Options) Options {
 		o.Encryption = enc
+
 		return o
 	}
 }
 
-// WithCompression sets the compression mode.
-func WithCompression(c *qdb.Compression) Option {
+// WithPushMode sets push mode.
+// In: mode qdb.WriterPushMode - transactional|async|fast
+// Out: Option
+// Ex: WithPushMode(qdb.WriterPushModeTransactional)
+func WithPushMode(mode qdb.WriterPushMode) Option {
+	return func(o Options) Options {
+		o.PushMode = mode
+
+		return o
+	}
+}
+
+// WithCompression sets compression level.
+// In: c qdb.Compression - none|balanced
+// Out: Option
+// Ex: WithCompression(qdb.CompBalanced)
+func WithCompression(c qdb.Compression) Option {
 	return func(o Options) Options {
 		o.Compression = c
+
 		return o
 	}
 }
 
-// WithClientMaxParallelism sets the maximum client parallelism.
+// WithDeduplicationMode sets deduplication mode.
+// In: mode qdb.WriterDeduplicationMode - disabled|drop|upsert
+// Out: Option
+// Ex: WithDeduplicationMode(qdb.WriterDeduplicationModeDrop)
+func WithDeduplicationMode(mode qdb.WriterDeduplicationMode) Option {
+	return func(o Options) Options {
+		o.DeduplicationMode = mode
+
+		return o
+	}
+}
+
+// WithClientMaxParallelism sets max threads.
+// In: par uint - parallelism limit
+// Out: Option
+// Ex: WithClientMaxParallelism(8)
 func WithClientMaxParallelism(par uint) Option {
 	return func(o Options) Options {
 		o.ClientMaxParallelism = &par
+
 		return o
 	}
 }
 
-// WithClientMaxInBufSize sets the maximum input buffer size.
+// WithClientMaxInBufSize sets buffer limit.
+// In: size uint - buffer bytes
+// Out: Option
+// Ex: WithClientMaxInBufSize(1024)
 func WithClientMaxInBufSize(size uint) Option {
 	return func(o Options) Options {
 		o.ClientMaxInBufSize = &size
+
 		return o
 	}
 }
 
-// WithNumWriters sets the number of writer workers.
-// Decision rationale:
-// - Controls parallelism for QuasarDB write operations
-// - Each worker maintains dedicated connection handle
-// Performance trade-offs:
-// - More workers increase memory usage but improve throughput
-// - Optimal value depends on QuasarDB cluster capacity
-func WithNumWriters(num int) Option {
-	return func(o Options) Options {
-		o.NumWriters = num
-		return o
-	}
-}
-
-// WithQueueSize sets the queue size for buffering messages.
-// Decision rationale:
-// - Provides backpressure control for incoming NATS messages
-// - Larger queue handles traffic spikes but uses more memory
-// Performance trade-offs:
-// - Smaller queue fails fast on overload but may drop messages
-// - Larger queue smooths traffic but increases memory usage
-func WithQueueSize(size int) Option {
-	return func(o Options) Options {
-		o.QueueSize = size
-		return o
-	}
-}
-
-// WithRetryAttempts sets the maximum number of retry attempts.
-// Decision rationale:
-// - Handles transient QuasarDB errors (async pipeline full, network issues)
-// - Exponential backoff prevents overwhelming downstream systems
-// Performance trade-offs:
-// - More retries increase resilience but delay error reporting
-// - Fewer retries fail fast but may drop data on transient issues
+// WithRetryAttempts sets max retries.
+// In: attempts int - retry limit
+// Out: Option
+// Ex: WithRetryAttempts(5) // retry 5x
 func WithRetryAttempts(attempts int) Option {
 	return func(o Options) Options {
 		o.RetryAttempts = attempts
+
 		return o
 	}
 }
 
-// OptionsProvider defines an interface for providing sink options.
-// This allows decoupling the connector's options from the sink's options,
-// making the configuration scalable.
-type OptionsProvider interface {
-	ClusterUri() string
-	ClusterPublicKeyFile() string
-	UserSecurityFile() string
-	Encryption() *qdb.Encryption
-	Compression() *qdb.Compression
-	ClientMaxParallelism() *uint
-	ClientMaxInBufSize() *uint
+// WithTimeout sets connection timeout.
+// In: timeout time.Duration - connection timeout
+// Out: Option
+// Ex: WithTimeout(30*time.Second) // 30s timeout
+func WithTimeout(timeout time.Duration) Option {
+	return func(o Options) Options {
+		o.Timeout = &timeout
+
+		return o
+	}
 }
 
-// FromOptionsProvider creates a new Options object from a provider.
-//
-// Decision rationale:
-// - Uses the builder pattern to construct the Options object.
-// - Checks for nil pointers on optional values to avoid panics.
+// OptionsProvider: interface for sink config decoupling from connector
+type OptionsProvider interface {
+	// ClusterUri returns QuasarDB cluster URI (e.g., "qdb://host:2836")
+	ClusterUri() string
+	// ClusterPublicKeyFile returns path to cluster public key file for authentication
+	ClusterPublicKeyFile() string
+	// UserSecurityFile returns path to user security credentials file
+	UserSecurityFile() string
+	// Encryption returns encryption mode (nil for none, or qdb.EncryptAES)
+	Encryption() *qdb.Encryption
+	// Compression returns data compression algorithm (qdb.CompNone or qdb.CompBalanced)
+	Compression() qdb.Compression
+	// DeduplicationMode returns how duplicate timestamps are handled
+	DeduplicationMode() qdb.WriterDeduplicationMode
+	// ClientMaxParallelism returns max client threads (nil for default)
+	ClientMaxParallelism() *uint
+	// ClientMaxInBufSize returns max input buffer size in bytes (nil for default)
+	ClientMaxInBufSize() *uint
+	// Timeout returns connection timeout duration (nil for default)
+	Timeout() *time.Duration
+}
+
+// FromOptionsProvider extracts sink config from provider.
+// In: p OptionsProvider - config source interface
+// Out: Options - built from provider fields
+// Ex: FromOptionsProvider(connOpts) → Options{uri,auth,workers}
 func FromOptionsProvider(p OptionsProvider) Options {
 	// Build base options with required fields
 	opts := []Option{
@@ -217,6 +266,7 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithUserSecurityFile(p.UserSecurityFile()),
 		WithEncryption(p.Encryption()),
 		WithCompression(p.Compression()),
+		WithDeduplicationMode(p.DeduplicationMode()),
 	}
 
 	// Use Go 1.21+ slice operations for conditional appends
@@ -226,5 +276,9 @@ func FromOptionsProvider(p OptionsProvider) Options {
 	if p.ClientMaxInBufSize() != nil {
 		opts = append(opts, WithClientMaxInBufSize(*p.ClientMaxInBufSize()))
 	}
+	if p.Timeout() != nil {
+		opts = append(opts, WithTimeout(*p.Timeout()))
+	}
+
 	return NewOptions(opts...)
 }

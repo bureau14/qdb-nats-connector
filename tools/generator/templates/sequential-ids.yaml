@@ -1,0 +1,70 @@
+# Sequential IDs Template
+# Demonstrates various sequential ID generation patterns
+# Useful for order processing, transaction logs, or batch processing systems
+
+name: "sequential_identifiers"
+table: "transactions"
+pattern: "txn-{transaction_id}"
+
+fields:
+  # Timestamp with 1-second intervals
+  timestamp:
+    type: "timestamp"
+    config:
+      format: "2006-01-02T15:04:05.000Z"
+      interval: "1s"
+
+  # Primary transaction ID starting from 100000
+  transaction_id:
+    type: "sequence"
+    config:
+      start: 100000
+      step: 1
+
+  # User ID cycling through a smaller range
+  user_id:
+    type: "sequence"
+    config:
+      start: 1000
+      end: 1999
+      step: 1
+      repeat: true
+
+  # Batch ID incrementing every 100 transactions
+  batch_id:
+    type: "sequence"
+    config:
+      start: 1
+      step: 1
+
+  # Order sequence within each batch (1-100, repeating)
+  order_in_batch:
+    type: "sequence"
+    config:
+      start: 1
+      end: 100
+      step: 1
+      repeat: true
+
+  # Account number with larger step size
+  account_number:
+    type: "sequence"
+    config:
+      start: 1000000
+      step: 7
+      end: 9999999
+      repeat: true
+
+  # Transaction amount as random value
+  amount:
+    type: "random_float"
+    config:
+      min: 1.00
+      max: 10000.00
+
+  # Transaction type as random string
+  type:
+    type: "random_string"
+    config:
+      length: 3
+      charset: "ABCDEFGH"

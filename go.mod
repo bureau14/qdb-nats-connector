@@ -1,6 +1,6 @@
 module github.com/bureau14/qdb-nats-connector
 
-go 1.23.0
+go 1.24.0
 
 toolchain go1.24.4
 
@@ -31,7 +31,7 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
-	golang.org/x/crypto v0.32.0 // indirect
-	golang.org/x/sys v0.29.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 )

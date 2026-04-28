@@ -483,18 +483,24 @@ action_stop() {
 
 # Export data from QuasarDB to CSV files
 action_export() {
-    log_info "Exporting data from QuasarDB to CSV file..."
+    log_info "Starting export of QuasarDB table to CSV file"
+    log_info "Export directory: $EXPORT_DIR"
+    log_info "Table to export: $TABLE_NAME"
 
     # Create export directory
     mkdir -p "$EXPORT_DIR"
+    log_info "Export directory created/verified"
 
     # Check for existing export to prevent accidental overwrite
+    log_info "Checking for existing export file..."
     local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${TABLE_NAME}.csv"
     if [[ -f "$csv_file" ]]; then
         die "Export file already exists: $csv_file. Clean exports/ directory before running: rm -rf $EXPORT_DIR"
     fi
+    log_info "No existing export found - safe to proceed"
 
-    log_info "Exporting table $TABLE_NAME to $csv_file"
+    log_info "Exporting $TABLE_NAME..."
+    log_debug "  Command: qdb_export --ts '$TABLE_NAME' --start-date '2000-01-01T00:00:00' --end-date '2100-01-01T00:00:00' -f '$csv_file' -c '$QDB_URI'"
 
     if ! qdb_export --ts "$TABLE_NAME" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
         die "Failed to export table $TABLE_NAME"
@@ -502,6 +508,9 @@ action_export() {
 
     local row_count
     row_count=$(tail -n +2 "$csv_file" | wc -l)  # Skip header row
+    local file_size
+    file_size=$(du -h "$csv_file" | cut -f1)
+    log_info "  ✓ Exported: $row_count rows, $file_size"
     log_debug "Exported $row_count rows from $TABLE_NAME"
 
     log_info "Export completed to directory: $EXPORT_DIR"

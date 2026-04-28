@@ -254,31 +254,126 @@ extract:
 		exit 1; fi
 
 
-# package-golden archives the golden/ directory with timestamp versioning.
-# This creates distributable test datasets for CI/CD systems and team sharing.
+# package-golden archives ONLY the specific example+size golden data.
+# Creates clean, minimal archives with just the needed files.
 # Archives follow the naming pattern: example-YYYY-MM-DD-size.tar.gz
 package-golden:
 	@# Validate parameters to ensure consistent archive naming
 	$(call validate_params)
-	@$(call LOG_INFO,Packaging golden data for $(EXAMPLE)-$(SIZE))
+	@$(call LOG_INFO,Starting packaging process for $(EXAMPLE)-$(SIZE))
 	
 	@# Check that golden/ directory exists before attempting to package
-	@if [ -d "$(TESTDATA_DIR)/golden" ]; then \
-		$(call LOG_INFO,Creating package structure for $(EXAMPLE)-$(SIZE)); \
-		cd $(TESTDATA_DIR) && \
-		mkdir -p package-temp/expected && \
-		cp golden/$(EXAMPLE)-$(SIZE)-input.data package-temp/ 2>/dev/null || \
-			cp golden/*-input.data package-temp/ 2>/dev/null || \
-			$(call LOG_WARNING,No input data file found); \
-		cp golden/*.csv package-temp/expected/ 2>/dev/null || \
-			$(call LOG_WARNING,No CSV files found); \
-		tar -czf $(EXAMPLE)-$(DATE)-$(SIZE).tar.gz -C package-temp . && \
-		rm -rf package-temp && \
-		$(call LOG_SUCCESS,Packaged golden data to $(EXAMPLE)-$(DATE)-$(SIZE).tar.gz); \
-	else \
+	@if [ ! -d "$(TESTDATA_DIR)/golden" ]; then \
 		$(call LOG_ERROR,Golden data directory not found: $(TESTDATA_DIR)/golden); \
 		echo "Run 'make generate-golden EXAMPLE=$(EXAMPLE) SIZE=$(SIZE)' first"; \
-		exit 1; fi
+		exit 1; \
+	fi
+	
+	@# Step 1: Create clean staging directory
+	@$(call LOG_INFO,Step 1/5: Creating staging directory)
+	@rm -rf $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE)
+	@mkdir -p $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE)/expected
+	@$(call LOG_SUCCESS,Staging directory created: $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE))
+	
+	@# Step 2: Copy input data file (must exist and be specific)
+	@$(call LOG_INFO,Step 2/5: Copying input data file)
+	@INPUT_FILE="$(TESTDATA_DIR)/golden/$(EXAMPLE)-$(NUM_$(SIZE))-input.data"; \
+	if [ -f "$$INPUT_FILE" ]; then \
+		$(call LOG_INFO,Found input file: $$INPUT_FILE); \
+		cp -v "$$INPUT_FILE" "$(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE)/$(EXAMPLE)-$(NUM_$(SIZE))-input.data"; \
+		$(call LOG_SUCCESS,Input file copied successfully); \
+	else \
+		$(call LOG_ERROR,Required input file not found: $$INPUT_FILE); \
+		echo "Expected: $(EXAMPLE)-$(NUM_$(SIZE))-input.data"; \
+		echo "Run 'make generate-golden EXAMPLE=$(EXAMPLE) SIZE=$(SIZE)' first"; \
+		rm -rf $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE); \
+		exit 1; \
+	fi
+	
+	@# Step 3: Copy ONLY the CSV files for this specific example
+	@$(call LOG_INFO,Step 3/5: Copying CSV files for $(EXAMPLE))
+	@# Use shell script to handle the table-specific CSV copying
+	@case "$(EXAMPLE)" in \
+		finance-ohlc) \
+			$(call LOG_INFO,Copying 15 finance tables: 3 exchanges x 5 symbols); \
+			for table in finance.NASDAQ.AAPL finance.NASDAQ.GOOGL finance.NASDAQ.MSFT finance.NASDAQ.AMZN finance.NASDAQ.TSLA \
+			            finance.NYSE.AAPL finance.NYSE.GOOGL finance.NYSE.MSFT finance.NYSE.AMZN finance.NYSE.TSLA \
+			            finance.AMEX.AAPL finance.AMEX.GOOGL finance.AMEX.MSFT finance.AMEX.AMZN finance.AMEX.TSLA; do \
+				CSV_FILE="$(TESTDATA_DIR)/golden/$$table.csv"; \
+				if [ -f "$$CSV_FILE" ]; then \
+					echo "  Copying: $$table.csv"; \
+					cp "$$CSV_FILE" "$(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE)/expected/"; \
+				else \
+					$(call LOG_ERROR,Missing expected CSV: $$table.csv); \
+					rm -rf $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE); \
+					exit 1; \
+				fi; \
+			done; \
+			;; \
+		industrial-sensor) \
+			$(call LOG_INFO,Copying 5 industrial sensor tables); \
+			for table in industrial.B1.1 industrial.B1.2 industrial.B1.3 industrial.B2.B industrial.B2.R; do \
+				CSV_FILE="$(TESTDATA_DIR)/golden/$$table.csv"; \
+				if [ -f "$$CSV_FILE" ]; then \
+					echo "  Copying: $$table.csv"; \
+					cp "$$CSV_FILE" "$(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE)/expected/"; \
+				else \
+					$(call LOG_ERROR,Missing expected CSV: $$table.csv); \
+					rm -rf $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE); \
+					exit 1; \
+				fi; \
+			done; \
+			;; \
+		network-metrics) \
+			$(call LOG_INFO,Copying 1 network metrics table); \
+			CSV_FILE="$(TESTDATA_DIR)/golden/network_metrics.csv"; \
+			if [ -f "$$CSV_FILE" ]; then \
+				echo "  Copying: network_metrics.csv"; \
+				cp "$$CSV_FILE" "$(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE)/expected/"; \
+			else \
+				$(call LOG_ERROR,Missing expected CSV: network_metrics.csv); \
+				rm -rf $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE); \
+				exit 1; \
+			fi; \
+			;; \
+		*) \
+			$(call LOG_ERROR,Unknown example: $(EXAMPLE)); \
+			rm -rf $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE); \
+			exit 1; \
+			;; \
+	esac
+	@$(call LOG_SUCCESS,All expected CSV files copied)
+	
+	@# Step 4: Validate staging directory contents
+	@$(call LOG_INFO,Step 4/5: Validating staged files)
+	@echo "Staged files for packaging:"
+	@find $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE) -type f | sort | while read f; do \
+		echo "  - $$(basename $$f) ($$(wc -c < $$f) bytes)"; \
+	done
+	@FILE_COUNT=$$(find $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE) -type f | wc -l); \
+	case "$(EXAMPLE)" in \
+		finance-ohlc) EXPECTED=16 ;; \
+		industrial-sensor) EXPECTED=6 ;; \
+		network-metrics) EXPECTED=2 ;; \
+	esac; \
+	if [ "$$FILE_COUNT" -ne "$$EXPECTED" ]; then \
+		$(call LOG_ERROR,File count mismatch: found $$FILE_COUNT, expected $$EXPECTED files); \
+		rm -rf $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE); \
+		exit 1; \
+	fi; \
+	$(call LOG_SUCCESS,Validation passed: $$FILE_COUNT files ready for packaging)
+	
+	@# Step 5: Create the archive from staging directory
+	@$(call LOG_INFO,Step 5/5: Creating archive)
+	@ARCHIVE_NAME="$(EXAMPLE)-$(DATE)-$(SIZE).tar.gz"; \
+	cd $(TESTDATA_DIR)/package-staging-$(EXAMPLE)-$(SIZE) && \
+	tar -czf "../$$ARCHIVE_NAME" . && \
+	cd .. && \
+	rm -rf package-staging-$(EXAMPLE)-$(SIZE) && \
+	$(call LOG_SUCCESS,Archive created: $(TESTDATA_DIR)/$$ARCHIVE_NAME) && \
+	echo "Archive size: $$(du -h $(TESTDATA_DIR)/$$ARCHIVE_NAME | cut -f1)" && \
+	echo "Archive contents:" && \
+	tar -tzf "$(TESTDATA_DIR)/$$ARCHIVE_NAME" | head -20
 
 
 # download-golden fetches golden data archives from S3 (placeholder).

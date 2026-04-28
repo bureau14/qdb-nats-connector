@@ -380,23 +380,31 @@ action_stop() {
 
 # Export data from QuasarDB to CSV files
 action_export() {
-    log_info "Exporting data from QuasarDB to CSV files..."
+    log_info "Starting export of QuasarDB tables to CSV files"
+    log_info "Export directory: $EXPORT_DIR"
+    log_info "Total tables to export: ${#DYNAMIC_TABLES[@]} (building/sensor combinations)"
 
     # Create export directory
     mkdir -p "$EXPORT_DIR"
+    log_info "Export directory created/verified"
 
     # Check for existing exports to prevent accidental overwrites
+    log_info "Checking for existing export files..."
     for table_name in "${DYNAMIC_TABLES[@]}"; do
         local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
         if [[ -f "$csv_file" ]]; then
             die "Export file already exists: $csv_file. Clean exports/ directory before running: rm -rf $EXPORT_DIR"
         fi
     done
+    log_info "No existing exports found - safe to proceed"
 
     # Export each table to CSV
+    local export_count=0
     for table_name in "${DYNAMIC_TABLES[@]}"; do
+        export_count=$((export_count + 1))
         local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
-        log_info "Exporting table $table_name to $csv_file"
+        log_info "[$export_count/${#DYNAMIC_TABLES[@]}] Exporting $table_name..."
+        log_debug "  Command: qdb_export --ts '$table_name' --start-date '2000-01-01T00:00:00' --end-date '2100-01-01T00:00:00' -f '$csv_file' -c '$QDB_URI'"
 
         if ! qdb_export --ts "$table_name" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
             die "Failed to export table $table_name"
@@ -404,6 +412,9 @@ action_export() {
 
         local row_count
         row_count=$(tail -n +2 "$csv_file" | wc -l)  # Skip header row
+        local file_size
+        file_size=$(du -h "$csv_file" | cut -f1)
+        log_info "  ✓ Exported: $row_count rows, $file_size"
         log_debug "Exported $row_count rows from $table_name"
     done
 

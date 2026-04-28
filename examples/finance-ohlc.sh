@@ -283,23 +283,31 @@ action_stop() {
 
 # Export data from QuasarDB to CSV files
 action_export() {
-    log_info "Exporting data from QuasarDB to CSV files..."
+    log_info "Starting export of QuasarDB tables to CSV files"
+    log_info "Export directory: $EXPORT_DIR"
+    log_info "Total tables to export: ${#DYNAMIC_TABLES[@]} (3 exchanges × 5 symbols)"
 
     # Create export directory
     mkdir -p "$EXPORT_DIR"
+    log_info "Export directory created/verified"
 
     # Check for existing exports to prevent accidental overwrites
+    log_info "Checking for existing export files..."
     for table_name in "${DYNAMIC_TABLES[@]}"; do
         local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
         if [[ -f "$csv_file" ]]; then
             die "Export file already exists: $csv_file. Clean exports/ directory before running: rm -rf $EXPORT_DIR"
         fi
     done
+    log_info "No existing exports found - safe to proceed"
 
     # Export each table to CSV
+    local export_count=0
     for table_name in "${DYNAMIC_TABLES[@]}"; do
+        export_count=$((export_count + 1))
         local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
-        log_info "Exporting table $table_name to $csv_file"
+        log_info "[$export_count/${#DYNAMIC_TABLES[@]}] Exporting $table_name..."
+        log_debug "  Command: qdb_export --ts '$table_name' --start-date '2000-01-01T00:00:00' --end-date '2100-01-01T00:00:00' -f '$csv_file' -c '$QDB_URI'"
 
         if ! qdb_export --ts "$table_name" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
             die "Failed to export table $table_name"
@@ -307,6 +315,9 @@ action_export() {
 
         local row_count
         row_count=$(tail -n +2 "$csv_file" | wc -l)  # Skip header row
+        local file_size
+        file_size=$(du -h "$csv_file" | cut -f1)
+        log_info "  ✓ Exported: $row_count rows, $file_size"
         log_debug "Exported $row_count rows from $table_name"
     done
 
@@ -371,25 +382,36 @@ action_validate() {
 
 # Organize files for golden data packaging
 action_prepare_golden() {
-    log_info "Preparing golden data package..."
+    log_info "Preparing golden data package for ${EXAMPLE} with ${NUM_MESSAGES} messages"
+    log_info "This will become the reference dataset for all future validations"
 
     [[ -d "$EXPORT_DIR" ]] || die "Export directory $EXPORT_DIR not found. Run '$0 export' first"
     
     [[ -f "$INPUT_FILE" ]] || die "Input data file $INPUT_FILE not found. Run '$0 generate' first"
 
     local golden_dir="$TESTDATA_DIR/golden"
+    log_info "Creating/cleaning golden directory: $golden_dir"
     mkdir -p "$golden_dir"
 
     # Copy input data with proper naming
+    local input_size
+    input_size=$(du -h "$INPUT_FILE" | cut -f1)
+    log_info "Copying input data ($input_size) to golden directory"
     cp "$INPUT_FILE" "$golden_dir/${EXAMPLE}-${NUM_MESSAGES}-input.data"
-    log_debug "Copied input data to golden directory"
+    log_info "  ✓ Input data: ${EXAMPLE}-${NUM_MESSAGES}-input.data"
 
-    # Copy exported CSV files to golden directory (they already have row-count prefixes)
+    # Copy exported CSV files to golden directory
+    log_info "Copying ${#DYNAMIC_TABLES[@]} CSV files to golden directory"
+    local copy_count=0
     for table_name in "${DYNAMIC_TABLES[@]}"; do
+        copy_count=$((copy_count + 1))
         local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
+        local golden_csv="$golden_dir/${table_name}.csv"
         if [[ -f "$csv_file" ]]; then
-            cp "$csv_file" "$golden_dir/"
-            log_debug "Copied $csv_file to golden directory"
+            cp "$csv_file" "$golden_csv"
+            local file_size
+            file_size=$(du -h "$golden_csv" | cut -f1)
+            log_info "  [$copy_count/${#DYNAMIC_TABLES[@]}] ✓ ${table_name}.csv ($file_size)"
         else
             log_error "CSV file not found: $csv_file"
         fi

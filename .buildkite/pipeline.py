@@ -93,12 +93,12 @@ def _env(p: Platform, step_name: str) -> dict[str, str]:
 def _lint_step() -> dict:
     """Build the single lint step that gates the whole pipeline.
 
-    Lint pins to a specific Linux agent class (`default-debian-amd64`) via
-    the template; the docker plugin is applied here so golangci-lint runs
-    inside the rhel7 builder container.
+    The step's two plugins -- `bureau14/qdb-artifacts` (CGO header
+    provisioning) and `golangci-lint` (lint execution in its own container)
+    -- are declared in `_lint.yml`; no docker wrapper is applied here.
+    The step pins to `default-debian-amd64` via the template.
     """
     step = load_template(STEPS_DIR / "_lint.yml")
-    apply_docker(step, "bureau14/builder:rhel7", ())
     return step
 
 

@@ -1,8 +1,21 @@
 label: ":golangci-lint: lint"
 key: lint
 
-commands:
-  - bash scripts/cicd/10.lint.sh
+# qdb-artifacts runs first (pre-command hook order) to populate qdb/ with
+# CGO headers before the golangci-lint container starts.
+plugins:
+  - bureau14/qdb-artifacts#master:
+      download:
+        project_id: "quasardb"
+        output-dir: "qdb"
+        extract: true
+        clean: true
+        files:
+          - "*-c-api.tar.zst!*"
+          - "*-server.tar.zst!*"
+          - "*-utils.tar.zst!*"
+      promote: {}
+  - golangci-lint#v1.0.0: {}
 
 retry:
   automatic:

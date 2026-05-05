@@ -3,7 +3,7 @@ key: test-integration-{slug}
 depends_on: test-unit-{slug}
 
 commands:
-  - bash scripts/cicd/test-integration.sh
+  - bash scripts/cicd/40.test-integration.sh
 
 retry:
   automatic:

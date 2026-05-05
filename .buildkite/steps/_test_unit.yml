@@ -3,7 +3,7 @@ key: test-unit-{slug}
 depends_on: build-{slug}
 
 commands:
-  - bash scripts/cicd/test-unit.sh
+  - bash scripts/cicd/30.test-unit.sh
 
 plugins:
   - bureau14/qdb-artifacts#master:

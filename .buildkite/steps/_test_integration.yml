@@ -1,0 +1,15 @@
+label: ":construction: test-integration ({slug}) [stub]"
+key: test-integration-{slug}
+depends_on: test-unit-{slug}
+
+commands:
+  - bash scripts/cicd/test-integration.sh
+
+retry:
+  automatic:
+    limit: 3
+
+timeout_in_minutes: 5
+
+agents:
+  queue: "default-{queue}"

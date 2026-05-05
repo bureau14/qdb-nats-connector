@@ -1,0 +1,15 @@
+label: ":construction: test-e2e ({slug}) [stub]"
+key: test-e2e-{slug}
+depends_on: test-integration-{slug}
+
+commands:
+  - bash scripts/cicd/test-e2e.sh
+
+retry:
+  automatic:
+    limit: 3
+
+timeout_in_minutes: 5
+
+agents:
+  queue: "default-{queue}"

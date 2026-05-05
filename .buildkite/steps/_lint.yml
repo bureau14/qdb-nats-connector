@@ -2,7 +2,7 @@ label: ":golangci-lint: lint"
 key: lint
 
 commands:
-  - bash scripts/cicd/lint.sh
+  - bash scripts/cicd/10.lint.sh
 
 retry:
   automatic:

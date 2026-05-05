@@ -3,7 +3,7 @@ key: build-{slug}
 depends_on: lint
 
 commands:
-  - bash scripts/cicd/build.sh
+  - bash scripts/cicd/20.build.sh
 
 plugins:
   - bureau14/qdb-artifacts#master:

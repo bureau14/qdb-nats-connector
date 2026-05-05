@@ -3,7 +3,7 @@ key: test-e2e-{slug}
 depends_on: test-integration-{slug}
 
 commands:
-  - bash scripts/cicd/test-e2e.sh
+  - bash scripts/cicd/50.test-e2e.sh
 
 retry:
   automatic:

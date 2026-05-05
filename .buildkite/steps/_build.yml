@@ -1,0 +1,20 @@
+label: ":hammer: build ({slug})"
+key: build-{slug}
+depends_on: lint
+
+commands:
+  - bash scripts/cicd/build.sh
+
+plugins:
+  - bureau14/qdb-artifacts#master:
+      upload:
+        files: "artifacts/**/*.tar.zst"
+
+retry:
+  automatic:
+    limit: 3
+
+timeout_in_minutes: 30
+
+agents:
+  queue: "default-{queue}"

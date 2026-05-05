@@ -1,0 +1,25 @@
+label: ":go: test-unit ({slug})"
+key: test-unit-{slug}
+depends_on: build-{slug}
+
+commands:
+  - bash scripts/cicd/test-unit.sh
+
+plugins:
+  - bureau14/qdb-artifacts#master:
+      download:
+        step: "build-{slug}"
+        output-dir: "bin"
+        extract: true
+        clean: true
+        files:
+          - "qdb-nats-connector-*.tar.zst!bin/*"
+
+retry:
+  automatic:
+    limit: 3
+
+timeout_in_minutes: 30
+
+agents:
+  queue: "default-{queue}"

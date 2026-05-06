@@ -17,10 +17,6 @@ plugins:
       promote: {}
   - golangci-lint#v1.0.0: {}
 
-retry:
-  automatic:
-    limit: 3
-
 timeout_in_minutes: 15
 
 agents:

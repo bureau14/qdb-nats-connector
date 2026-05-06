@@ -1,8 +1,18 @@
 label: ":hammer: build ({slug})"
 key: build-{slug}
 
+# key must remain build-{slug}: scripts/cicd/20.build.sh derives SLUG from
+# ${BUILDKITE_STEP_KEY#build-}. Renaming would silently break that derivation.
+
+retry:
+  automatic:
+    limit: 3
+
 commands:
   - bash scripts/cicd/20.build.sh
+  - bash scripts/cicd/30.test-unit.sh
+  - bash scripts/cicd/40.test-integration.sh
+  - bash scripts/cicd/50.test-e2e.sh
 
 plugins:
   - bureau14/qdb-artifacts#master:
@@ -17,7 +27,7 @@ plugins:
           - "*-utils.tar.zst!*"
       promote: {}
 
-timeout_in_minutes: 30
+timeout_in_minutes: 60
 
 agents:
   queue: "default-{queue}"

@@ -1,6 +1,9 @@
 label: ":golangci-lint: lint"
 key: lint
 
+env:
+  AWS_DEFAULT_REGION: "eu-west-1"
+
 # qdb-artifacts runs first (pre-command hook order) to populate qdb/ with
 # CGO headers before the golangci-lint container starts.
 plugins:

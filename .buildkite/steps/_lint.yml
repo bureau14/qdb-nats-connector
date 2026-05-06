@@ -6,14 +6,15 @@ key: lint
 plugins:
   - bureau14/qdb-artifacts#master:
       download:
-        project_id: "quasardb"
-        output-dir: "qdb"
-        extract: true
         clean: true
-        files:
-          - "*-c-api.tar.zst!*"
-          - "*-server.tar.zst!*"
-          - "*-utils.tar.zst!*"
+        projects:
+        - project_id: "quasardb-build"
+          output-dir: "qdb"
+          extract: true
+          files:
+            - "*-c-api.tar.zst!*"
+            - "*-server.tar.zst!*"
+            - "*-utils.tar.zst!*"
       promote: {}
   - golangci-lint#v1.0.0: {}
 

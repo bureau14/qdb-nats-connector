@@ -1,8 +1,11 @@
 """Buildkite dynamic pipeline generator for qdb-nats-connector.
 
-Loads step templates from `steps/*.yml`, substitutes `{placeholder}` vars,
-overlays env and the Docker plugin per platform. Produces a 33-step graph:
-one lint gate, then per-platform build/unit/integration-stub/e2e-stub chains.
+Loads step templates from `steps/*.yml`, substitutes `{placeholder}`
+vars, overlays env, the Docker plugin, and qdb-artifacts options
+(variant + git-ref) per platform. Produces a 9-step graph: one
+lint step in parallel with eight per-platform combined steps,
+each combined step running build, unit, integration, and e2e
+scripts in sequence.
 
 Usage:
     python3 pipeline.py [generate|check]
@@ -23,9 +26,11 @@ sys.path.insert(0, str(Path(__file__).parent / "tools"))
 from qdb_pipeline import (
     Platform,
     apply_docker,
+    get_git_ref,
     load_template,
     merge_env,
     select_platforms,
+    set_artifact_plugin_options,
     validate_pipeline,
 )  # noqa: E402
 
@@ -91,60 +96,69 @@ def _env(p: Platform, step_name: str) -> dict[str, str]:
 
 
 def _lint_step() -> dict:
-    """Build the single lint step that gates the whole pipeline.
+    """Build the standalone lint step.
 
     The step's two plugins -- `bureau14/qdb-artifacts` (CGO header
-    provisioning) and `golangci-lint` (lint execution in its own container)
-    -- are declared in `_lint.yml`; no docker wrapper is applied here.
-    The step pins to `default-debian-amd64` via the template.
+    provisioning) and `golangci-lint` (lint execution in its own
+    container) -- are declared in `_lint.yml`. The step pins to
+    `default-debian-amd64` via the template. Lint is no longer a
+    gate: it runs in parallel with the per-platform combined
+    steps. Variant + git-ref for the qdb-artifacts download block
+    are injected later in `generate_pipeline()`.
     """
     step = load_template(STEPS_DIR / "_lint.yml")
     return step
 
 
-def _per_platform_steps(p: Platform) -> list[dict]:
-    """Generate the four-step chain (build, unit, integration-stub, e2e-stub)
-    for one platform.
+def _per_platform_step(p: Platform) -> dict:
+    """Generate the combined per-platform step (build + unit +
+    integration + e2e) for one platform.
 
-    Each template declares its own `depends_on`. The queue template var is
-    `"{queue_os}-{arch}"` (no prefix) -- templates spell `default-{queue}`.
-    Per-step env is composed via `_env(p, step_name)`; template env wins
-    over computed env via the canonical `env.update + assign` idiom.
-    `apply_docker` is a no-op when `p.docker_image` is empty (non-linux
-    platforms), so the same call works uniformly across all OSes.
+    The template declares the four bash invocations in its
+    `commands:` list; this function only handles env composition,
+    docker overlay, and template-var substitution. The queue
+    template var is `"{queue_os}-{arch}"` (no prefix); the
+    template spells `default-{queue}`. `apply_docker` is a no-op
+    when `p.docker_image` is empty (non-linux platforms) so the
+    same call works uniformly across all OSes. Variant + git-ref
+    for the qdb-artifacts download block are injected later in
+    `generate_pipeline()`.
     """
     tvars = {"slug": p.slug(), "queue": f"{p.queue_os}-{p.arch}"}
-    steps: list[dict] = []
-    for template_name, step_name in (
-        ("_build.yml", "build"),
-        ("_test_unit.yml", "test-unit"),
-        ("_test_integration.yml", "test-integration"),
-        ("_test_e2e.yml", "test-e2e"),
-    ):
-        step = load_template(STEPS_DIR / template_name, **tvars)
-        env = _env(p, step_name)
-        env.update(step.get("env") or {})
-        step["env"] = env
-        apply_docker(step, p.docker_image, p.docker_volumes)
-        steps.append(step)
-    return steps
+    step = load_template(STEPS_DIR / "_build.yml", **tvars)
+    env = _env(p, "build")
+    env.update(step.get("env") or {})
+    step["env"] = env
+    apply_docker(step, p.docker_image, p.docker_volumes)
+    return step
 
 
 def generate_pipeline() -> Pipeline:
     """Assemble the full pipeline and return it.
 
-    Resulting graph (33 steps total):
+    Resulting graph (9 steps total, all running in parallel):
         lint (1)
-            -> build-{slug} x8
-                -> test-unit-{slug} x8
-                    -> test-integration-{slug} x8
-                        -> test-e2e-{slug} x8
+        build-{slug} x8   (each running build + unit +
+                            integration + e2e in sequence)
     """
+    git_ref = get_git_ref()
     pipeline = Pipeline()
-    pipeline.add_step(CommandStep.from_dict(_lint_step()))
+
+    lint = _lint_step()
+    set_artifact_plugin_options(
+        lint,
+        {"download": {"variant": "linux-core2-release", "git-ref": git_ref}},
+    )
+    pipeline.add_step(CommandStep.from_dict(lint))
+
     for p in PLATFORMS:
-        for step in _per_platform_steps(p):
-            pipeline.add_step(CommandStep.from_dict(step))
+        step = _per_platform_step(p)
+        set_artifact_plugin_options(
+            step,
+            {"download": {"variant": p.slug("release"), "git-ref": git_ref}},
+        )
+        pipeline.add_step(CommandStep.from_dict(step))
+
     return pipeline
 
 

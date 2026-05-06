@@ -61,7 +61,9 @@ PLATFORMS: list[Platform] = [
 # Environment variable layering: global -> step -> os -> os+step -> cpu.
 # Empty dicts are kept on purpose so future env knobs land in the right
 # slot without refactoring the merge call.
-GLOBAL_ENV: dict[str, str] = {}
+GLOBAL_ENV: dict[str, str] = {
+    "AWS_DEFAULT_REGION": "eu-west-1",
+}
 
 STEP_ENV: dict[str, dict[str, str]] = {}
 

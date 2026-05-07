@@ -30,7 +30,7 @@ export BASE_DIR
 #
 # Outputs: Exports a subset of the following env vars depending on OS
 #          (the full matrix is defined in .envrc):
-#   Linux / FreeBSD : LD_LIBRARY_PATH
+#   Linux / FreeBSD : LD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
 #   Darwin          : DYLD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
 #   MINGW (Windows) : PATH
 cicd_setup_qdb_env() {
@@ -49,6 +49,8 @@ cicd_setup_qdb_env() {
     case "${os}" in
         Linux|FreeBSD)
             echo "cicd_setup_qdb_env: LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+            echo "cicd_setup_qdb_env: CGO_CFLAGS=${CGO_CFLAGS}"
+            echo "cicd_setup_qdb_env: CGO_LDFLAGS=${CGO_LDFLAGS}"
             ;;
         Darwin)
             echo "cicd_setup_qdb_env: DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}"

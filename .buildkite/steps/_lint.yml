@@ -27,9 +27,5 @@ commands:
 
 timeout_in_minutes: 15
 
-retry:
-  automatic:
-    limit: 3
-
 agents:
   queue: "default-debian-amd64"

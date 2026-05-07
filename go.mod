@@ -1,6 +1,6 @@
 module github.com/bureau14/qdb-nats-connector
 
-go 1.25.0
+go 1.24.0
 
 require (
 	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260506082511-78c7f15ef22f

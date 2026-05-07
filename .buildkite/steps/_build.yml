@@ -9,6 +9,7 @@ retry:
     limit: 3
 
 commands:
+  - find .
   - bash scripts/cicd/20.build.sh
   - bash scripts/cicd/30.test-unit.sh
   - bash scripts/cicd/40.test-integration.sh

@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# CGO env setup helpers shared by buildkite steps.
-# Sourced by 20.build.sh and 30.test-unit.sh; not an executable
-# pipeline step (the leading 00. signals "loaded first, runs nothing").
+# Thin shim that exposes cicd_setup_qdb_env for consumption by the CI build
+# and test steps.  The canonical CGO environment definitions live in .envrc
+# at the repo root; this file exists to:
+#   1. Preserve the existing CI call contract (source 00.common.sh; cicd_setup_qdb_env).
+#   2. Emit the diagnostic echo lines that CI log parsers rely on -- .envrc
+#      is deliberately silent so that the direnv developer experience is clean.
+#
+# Sourced by 20.build.sh and 30.test-unit.sh; not an executable pipeline step
+# (the leading 00. signals "loaded first, runs nothing").
 
 set -eu
 
@@ -15,47 +21,47 @@ fi
 BASE_DIR="$(dirname "$(dirname "${_CICD_SCRIPT_DIR}")")"
 export BASE_DIR
 
-# cicd_setup_qdb_env -- configure CGO environment variables to locate the
-# QuasarDB C API libraries installed at ${BASE_DIR}/qdb.
+# cicd_setup_qdb_env -- source .envrc to populate CGO environment variables,
+# then log the OS-specific subset of those variables for CI diagnostics.
 #
 # Inputs:  BASE_DIR (repo root, exported above)
 #          Expects qdb/lib and qdb/include to exist (populated by the
 #          user-managed qdb-c-api fetch step before CI scripts run).
 #
-# Outputs: Exports a subset of the following env vars depending on OS:
+# Outputs: Exports a subset of the following env vars depending on OS
+#          (the full matrix is defined in .envrc):
 #   Linux / FreeBSD : LD_LIBRARY_PATH
 #   Darwin          : DYLD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
 #   MINGW (Windows) : PATH
-#
-# Supported uname values: Linux, FreeBSD, Darwin, MINGW*.
 cicd_setup_qdb_env() {
-    local qdb_api_dir="${BASE_DIR}/qdb"
-    local qdb_lib_dir="${BASE_DIR}/qdb/lib"
+    # Source the canonical file.  bash functions share the parent shell's
+    # environment, so all `export` statements in .envrc propagate to the
+    # caller -- this is the load-bearing assumption of the shim design.
+    source "${BASE_DIR}/.envrc"
 
     local os
     os="$(uname)"
 
+    # Emit the same diagnostic lines the previous monolithic cicd_setup_qdb_env
+    # produced so that any CI log greps on "cicd_setup_qdb_env: " continue to
+    # match.  The variables being echoed are already exported by the source
+    # call above.
     case "${os}" in
         Linux|FreeBSD)
-            LD_LIBRARY_PATH="${qdb_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-            export LD_LIBRARY_PATH
             echo "cicd_setup_qdb_env: LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
             ;;
         Darwin)
-            DYLD_LIBRARY_PATH="${qdb_lib_dir}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
-            CGO_CFLAGS="${CGO_CFLAGS:+${CGO_CFLAGS} }-I${qdb_api_dir}/include"
-            CGO_LDFLAGS="${CGO_LDFLAGS:+${CGO_LDFLAGS} }-L${qdb_lib_dir} -Wl,-rpath -Wl,${qdb_lib_dir}"
-            export DYLD_LIBRARY_PATH CGO_CFLAGS CGO_LDFLAGS
             echo "cicd_setup_qdb_env: DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}"
             echo "cicd_setup_qdb_env: CGO_CFLAGS=${CGO_CFLAGS}"
             echo "cicd_setup_qdb_env: CGO_LDFLAGS=${CGO_LDFLAGS}"
             ;;
         MINGW*)
-            PATH="${qdb_lib_dir}:${qdb_api_dir}/bin:${PATH}"
-            export PATH
             echo "cicd_setup_qdb_env: PATH prepended with qdb/lib and qdb/bin"
             ;;
         *)
+            # .envrc already returned 1 for an unknown OS under set -e, so this
+            # branch is unreachable in normal execution.  Kept for defense-in-depth
+            # in case .envrc is sourced under a shell that does not honour set -e.
             echo "cicd_setup_qdb_env: unknown OS '${os}'" >&2
             return 1
             ;;

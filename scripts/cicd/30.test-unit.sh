@@ -38,4 +38,5 @@ cicd_setup_go_toolchain
 # --- test ---
 
 echo "Running unit tests (no -tags=integration)"
-"${GO}" test -short -race ./...
+# -buildvcs=false: same rhel7 uid-929/no-passwd VCS-stamping failure as 20.build.sh.
+"${GO}" test -buildvcs=false -short -race ./...

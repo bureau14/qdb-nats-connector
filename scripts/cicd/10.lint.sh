@@ -47,7 +47,7 @@ fi
 
 # Pin to a specific v2 release so the linter version is controlled by this repo,
 # not by whatever happens to be in the builder image or module proxy cache.
-GOLANGCI_LINT_VERSION="v2.5.0"
+GOLANGCI_LINT_VERSION="v2.12.2"
 GOLANGCI_LINT_BIN="${BASE_DIR}/bin/golangci-lint${SUFFIX}"
 
 if [[ ! -x "${GOLANGCI_LINT_BIN}" ]]; then

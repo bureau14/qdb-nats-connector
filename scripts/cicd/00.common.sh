@@ -69,3 +69,51 @@ cicd_setup_qdb_env() {
 }
 
 export -f cicd_setup_qdb_env
+
+# cicd_setup_go_toolchain -- derive GO from GOROOT and validate the binary.
+#
+# Inputs:  GOROOT  -- set by .buildkite/pipeline.py::_go_env_for_agent() from
+#                     the per-OS QDB_CICD_AGENT_GO124_ROOT agent env var; the
+#                     Buildkite agent shell substitutes the value at job-start.
+#          GOPATH  -- set by the same mechanism from QDB_CICD_AGENT_GO124_PATH.
+#
+# Outputs: GO      -- absolute path to the go binary (${GOROOT}/bin/go[.exe]).
+#          GOROOT, GOPATH, PATH -- re-exported (PATH prepended with ${GOROOT}/bin).
+#
+# Note:    This function intentionally does NOT source .envrc.  CGO-env wiring
+#          is the orthogonal concern of cicd_setup_qdb_env; the two functions
+#          are called in sequence but are fully independent.
+cicd_setup_go_toolchain() {
+    if [[ -z "${GOROOT:-}" ]]; then
+        echo "cicd_setup_go_toolchain: GOROOT is not set." >&2
+        echo "Expected injection from pipeline.py::_go_env_for_agent() via QDB_CICD_AGENT_GO124_ROOT." >&2
+        return 1
+    fi
+
+    # Windows MSYS shells report MINGW* from uname; the go binary uses .exe there.
+    local suffix=""
+    if [[ "$(uname)" == MINGW* ]]; then
+        suffix=".exe"
+    fi
+
+    GO="${GOROOT}/bin/go${suffix}"
+
+    if [[ ! -x "${GO}" ]]; then
+        echo "cicd_setup_go_toolchain: go binary not executable at ${GO}" >&2
+        echo "cicd_setup_go_toolchain: GOROOT=${GOROOT}" >&2
+        echo "cicd_setup_go_toolchain: contents of ${GOROOT}/bin:" >&2
+        ls "${GOROOT}/bin" >&2 || true
+        return 1
+    fi
+
+    export GO GOROOT GOPATH="${GOPATH:-}"
+    PATH="${GOROOT}/bin:${PATH}"
+    export PATH
+
+    echo "cicd_setup_go_toolchain: GOROOT=${GOROOT}"
+    echo "cicd_setup_go_toolchain: GOPATH=${GOPATH:-}"
+    echo "cicd_setup_go_toolchain: GO=${GO}"
+    echo "cicd_setup_go_toolchain: $("${GO}" version)"
+}
+
+export -f cicd_setup_go_toolchain

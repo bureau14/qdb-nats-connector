@@ -4,10 +4,6 @@ key: build-{slug}
 # key must remain build-{slug}: scripts/cicd/20.build.sh derives SLUG from
 # ${BUILDKITE_STEP_KEY#build-}. Renaming would silently break that derivation.
 
-retry:
-  automatic:
-    limit: 3
-
 commands:
   - find .
   - bash scripts/cicd/20.build.sh

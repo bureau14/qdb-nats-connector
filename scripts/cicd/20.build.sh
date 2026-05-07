@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Buildkite build step for qdb-nats-connector.
 # Invoked by .buildkite/steps/_build.yml.
-# Compiles the connector via `make build` and packages bin/qdb-nats-connector
-# into artifacts/qdb-nats-connector-{slug}.tar.zst for upload.
+# Compiles all three connector binaries via ${GO} build directly (no make),
+# and packages bin/qdb-nats-connector into artifacts/qdb-nats-connector-{slug}.tar.zst
+# for upload.  The Go toolchain is wired by cicd_setup_go_toolchain (00.common.sh),
+# which derives GO from GOROOT injected by pipeline.py::_go_env_for_agent().
 #
 # The qdb-c-api fetch (populating qdb/lib and qdb/include) is the
 # user's responsibility and must run before this script.
@@ -12,8 +14,13 @@ set -euxo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 
-# Source shared CGO env helpers (00.common.sh).
+# Source shared CGO and Go-toolchain env helpers (00.common.sh).
 source "${SCRIPT_DIR}/00.common.sh"
+
+# Required when the docker plugin propagates the host UID into the container:
+# git refuses to operate on a workspace owned by a different user without this.
+# Mirrors qdb-api-go/scripts/teamcity/10.build.sh:9.
+git config --global --add safe.directory '*'
 
 cd "${BASE_DIR}"
 
@@ -29,18 +36,47 @@ if [[ ! -d "qdb/lib" || ! -d "qdb/include" ]]; then
 fi
 
 cicd_setup_qdb_env
+cicd_setup_go_toolchain
 
 # --- build ---
 
-# GOAMD64 may already be set by the pipeline (decision 4: CPU_ENV injection).
-# The Makefile honours the env var, so no explicit override is needed here.
-make build
-
 # Detect platform-specific binary suffix (Windows under MINGW uses .exe).
+# Moved before the build block so SUFFIX is available for output path composition.
 SUFFIX=""
 if [[ "$(uname)" == MINGW* ]]; then
     SUFFIX=".exe"
 fi
+
+# Inline the same flag composition the Makefile uses in BUILD_MODE=release.
+# Calling ${GO} directly avoids GNU-make dependency on FreeBSD (BSD make
+# rejects ifeq) and Windows (no GNU make on MSYS2 agents).
+VERSION="$(cat VERSION)"
+GIT_SHA="$(git rev-parse HEAD)"
+BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+KERNEL_VERSION="$(uname -r)"
+BUILD_MODE="release"
+GOFLAGS="-trimpath"
+GCFLAGS=""
+LDFLAGS="-X main.version=${VERSION} \
+         -X main.commit=${GIT_SHA} \
+         -X main.buildTime=${BUILD_TIME} \
+         -X main.buildMode=${BUILD_MODE} \
+         -X main.goamd64=${GOAMD64:-} \
+         -X main.kernelVersion=${KERNEL_VERSION}"
+
+mkdir -p "${BASE_DIR}/bin"
+
+GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
+    "${GO}" build -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    -o "${BASE_DIR}/bin/qdb-nats-connector${SUFFIX}" ./cmd/qdb-nats-connector
+
+GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
+    "${GO}" build -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    -o "${BASE_DIR}/bin/qdb-data-gen${SUFFIX}" ./tools/generator
+
+GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
+    "${GO}" build -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    -o "${BASE_DIR}/bin/qdb-data-loader${SUFFIX}" ./tools/loader
 
 CONNECTOR_BIN="${BASE_DIR}/bin/qdb-nats-connector${SUFFIX}"
 

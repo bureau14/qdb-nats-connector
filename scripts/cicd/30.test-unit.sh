@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Buildkite unit-test step for qdb-nats-connector.
 # Invoked by .buildkite/steps/_test_unit.yml.
-# Runs all non-integration tests across the module.
+# Runs all non-integration tests across the module using ${GO} (wired by
+# cicd_setup_go_toolchain via GOROOT injected from pipeline.py::_go_env_for_agent).
 #
 # Integration tests live under test/integration/ and are guarded by
 # //go:build integration, so omitting -tags=integration excludes them.
@@ -13,9 +14,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 
-# Source shared CGO env helpers; CGO is required for compilation even when
-# the tests themselves exercise pure-Go logic.
+# Source shared CGO and Go-toolchain env helpers.
 source "${SCRIPT_DIR}/00.common.sh"
+
+# Required when the docker plugin propagates the host UID into the container:
+# git refuses to operate on a workspace owned by a different user without this.
+# Mirrors qdb-api-go/scripts/teamcity/10.build.sh:9.
+git config --global --add safe.directory '*'
 
 cd "${BASE_DIR}"
 
@@ -28,8 +33,9 @@ if [[ ! -d "qdb/lib" || ! -d "qdb/include" ]]; then
 fi
 
 cicd_setup_qdb_env
+cicd_setup_go_toolchain
 
 # --- test ---
 
 echo "Running unit tests (no -tags=integration)"
-go test -short -race ./...
+"${GO}" test -short -race ./...

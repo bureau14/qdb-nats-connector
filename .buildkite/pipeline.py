@@ -79,6 +79,34 @@ CPU_ENV: dict[str, dict[str, str]] = {
     "haswell": {"GOAMD64": "v3"},
 }
 
+# Go version slug used to form the per-OS agent env var names.
+# The slug is the major+minor with no dot: 1.24 -> "124".
+# Changing this constant is the single point of control for the Go version.
+GO_VERSION_SLUG = "124"  # Go 1.24; pinned per plan decision 1.
+
+
+def _go_env_for_agent() -> dict[str, str]:
+    """Return the GOROOT / GOPATH env vars for the current Go version.
+
+    The Buildkite agent shell substitutes $QDB_CICD_AGENT_GO<slug>_ROOT and
+    $QDB_CICD_AGENT_GO<slug>_PATH at job-start time; these vars are written by
+    the per-OS packer scripts in qdb-cloud-deployments (e.g.
+    agents/debian/scripts/36-write-agent-env.sh).  The doubled $$ is required
+    to escape Buildkite's own variable interpolation during pipeline upload so
+    that the literal string "$QDB_CICD_AGENT_GO124_ROOT" reaches the agent
+    shell rather than being expanded (to an empty string) by the Buildkite
+    server.  This is the same idiom qdb-api-go/.buildkite/pipeline.py uses.
+
+    macOS divergence (deferred): the macOS agent exports GO1_23 pointing at the
+    binary, not a ROOT/PATH pair.  The connector pipeline emits the canonical
+    _ROOT/_PATH names on macOS too; the step will fail until qdb-cloud-deployments
+    adds the canonical pair to the macOS agent environment hook.
+    """
+    return {
+        "GOROOT": f"$$QDB_CICD_AGENT_GO{GO_VERSION_SLUG}_ROOT",
+        "GOPATH": f"$$QDB_CICD_AGENT_GO{GO_VERSION_SLUG}_PATH",
+    }
+
 
 def _env(p: Platform, step_name: str) -> dict[str, str]:
     """Compose the full environment dict for one step.
@@ -100,15 +128,27 @@ def _env(p: Platform, step_name: str) -> dict[str, str]:
 def _lint_step() -> dict:
     """Build the standalone lint step.
 
-    The step's two plugins -- `bureau14/qdb-artifacts` (CGO header
-    provisioning) and `golangci-lint` (lint execution in its own
-    container) -- are declared in `_lint.yml`. The step pins to
-    `default-debian-amd64` via the template. Lint is no longer a
-    gate: it runs in parallel with the per-platform combined
-    steps. Variant + git-ref for the qdb-artifacts download block
-    are injected later in `generate_pipeline()`.
+    Layers the global env and injects the Go-toolchain variables from
+    _go_env_for_agent() so that cicd_setup_go_toolchain in 10.lint.sh
+    finds GOROOT and GOPATH at job-start time.  The step is then wrapped
+    with apply_docker(bureau14/builder:rhel7) so that the propagated env
+    and the qdb/ volume (populated by the qdb-artifacts plugin declared in
+    _lint.yml) are both visible inside the container -- the same container
+    the build steps use.  Only one plugin (qdb-artifacts) is declared in
+    _lint.yml; the docker plugin is injected here.  Lint runs in parallel
+    with the per-platform combined steps.  Variant + git-ref for the
+    qdb-artifacts download block are injected later in generate_pipeline().
     """
     step = load_template(STEPS_DIR / "_lint.yml")
+    # Compose env: global baseline, then template overrides, then Go toolchain.
+    # The Go env is last so the version slug in pipeline.py is authoritative.
+    env = merge_env(GLOBAL_ENV, STEP_ENV.get("lint", {}))
+    env.update(step.get("env") or {})
+    env.update(_go_env_for_agent())
+    step["env"] = env
+    # Run inside rhel7 so CGO headers from qdb/ and the propagated env reach
+    # golangci-lint -- same container as the build steps.
+    apply_docker(step, "bureau14/builder:rhel7")
     return step
 
 
@@ -117,12 +157,15 @@ def _per_platform_step(p: Platform) -> dict:
     integration + e2e) for one platform.
 
     The template declares the four bash invocations in its
-    `commands:` list; this function only handles env composition,
-    docker overlay, and template-var substitution. The queue
-    template var is `"{queue_os}-{arch}"` (no prefix); the
-    template spells `default-{queue}`. `apply_docker` is a no-op
-    when `p.docker_image` is empty (non-linux platforms) so the
-    same call works uniformly across all OSes. Variant + git-ref
+    `commands:` list; this function handles env composition, docker
+    overlay, and template-var substitution.  The Go-toolchain env
+    (GOROOT, GOPATH) is injected via _go_env_for_agent() so that
+    cicd_setup_go_toolchain in 20.build.sh and 30.test-unit.sh can
+    derive the correct go binary without relying on PATH or make.
+    The queue template var is `"{queue_os}-{arch}"` (no prefix);
+    the template spells `default-{queue}`. `apply_docker` is a
+    no-op when `p.docker_image` is empty (non-linux platforms) so
+    the same call works uniformly across all OSes. Variant + git-ref
     for the qdb-artifacts download block are injected later in
     `generate_pipeline()`.
     """
@@ -130,6 +173,8 @@ def _per_platform_step(p: Platform) -> dict:
     step = load_template(STEPS_DIR / "_build.yml", **tvars)
     env = _env(p, "build")
     env.update(step.get("env") or {})
+    # Go env last so the version slug in pipeline.py is authoritative.
+    env.update(_go_env_for_agent())
     step["env"] = env
     apply_docker(step, p.docker_image, p.docker_volumes)
     return step

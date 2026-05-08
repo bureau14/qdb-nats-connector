@@ -32,7 +32,7 @@ export BASE_DIR
 #          (the full matrix is defined in .envrc):
 #   Linux / FreeBSD : LD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
 #   Darwin          : DYLD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
-#   MINGW (Windows) : PATH
+#   MINGW (Windows) : PATH, CGO_CFLAGS, CGO_LDFLAGS
 cicd_setup_qdb_env() {
     # Source the canonical file.  bash functions share the parent shell's
     # environment, so all `export` statements in .envrc propagate to the
@@ -59,6 +59,8 @@ cicd_setup_qdb_env() {
             ;;
         MINGW*)
             echo "cicd_setup_qdb_env: PATH prepended with qdb/lib and qdb/bin"
+            echo "cicd_setup_qdb_env: CGO_CFLAGS=${CGO_CFLAGS}"
+            echo "cicd_setup_qdb_env: CGO_LDFLAGS=${CGO_LDFLAGS}"
             ;;
         *)
             # .envrc already returned 1 for an unknown OS under set -e, so this

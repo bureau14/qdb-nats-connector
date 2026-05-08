@@ -237,9 +237,11 @@ func TestProgressiveRecovery(t *testing.T) {
 		// Start a long-running request
 		longRunningStarted := make(chan struct{})
 		longRunningCanFinish := make(chan struct{})
+		longRunningDone := make(chan struct{})
 		var longRunningErr error
 
 		go func() {
+			defer close(longRunningDone)
 			longRunningErr = cb.Execute(func() error {
 				close(longRunningStarted)
 				<-longRunningCanFinish
@@ -258,11 +260,9 @@ func TestProgressiveRecovery(t *testing.T) {
 		require.True(t, errors.As(err, &connErr))
 		assert.Equal(t, connectorErrors.ErrCodeConnectionFailed, connErr.Code)
 
-		// Allow the long-running request to finish
+		// Allow the long-running request to finish and wait for it
 		close(longRunningCanFinish)
-
-		// Wait for it to complete
-		time.Sleep(10 * time.Millisecond)
+		<-longRunningDone
 		require.NoError(t, longRunningErr)
 
 		// Now should allow requests again

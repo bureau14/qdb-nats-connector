@@ -43,16 +43,15 @@ STEPS_DIR = Path(__file__).parent / "steps"
 _LINUX = dict(docker_image="bureau14/builder:rhel7")
 _OS_OVERLAY: dict[str, dict] = {"linux": _LINUX}
 
-# Full 8-platform matrix matching the quasardb release cadence.
+# 5-platform matrix: haswell (AVX2) baseline for all amd64 targets.
+# core2 is omitted because Go's GOAMD64 distinction is not a meaningful
+# performance lever here; the linked libqdb_api is built for haswell anyway.
 PLATFORMS: list[Platform] = [
     dataclasses.replace(p, **_OS_OVERLAY.get(p.os, {}))
     for p in select_platforms(
-        "linux-amd64-core2",
         "linux-amd64-haswell",
         "linux-aarch64",
-        "windows-amd64-core2",
         "windows-amd64-haswell",
-        "freebsd-amd64-core2",
         "freebsd-amd64-haswell",
         "macos-aarch64",
     )
@@ -71,11 +70,9 @@ OS_ENV: dict[str, dict[str, str]] = {}
 
 OS_STEP_ENV: dict[str, dict[str, str]] = {}
 
-# GOAMD64 ties the binary to the instruction-set baseline for each CPU family.
-# core2 -> v1 (SSE2 baseline); haswell -> v3 (AVX2).
+# GOAMD64=v3 (AVX2/haswell) is set for all amd64 platforms.
 # aarch64 platforms have no entry and receive no GOAMD64 override.
 CPU_ENV: dict[str, dict[str, str]] = {
-    "core2": {"GOAMD64": "v1"},
     "haswell": {"GOAMD64": "v3"},
 }
 
@@ -183,9 +180,9 @@ def _per_platform_step(p: Platform) -> dict:
 def generate_pipeline() -> Pipeline:
     """Assemble the full pipeline and return it.
 
-    Resulting graph (9 steps total, all running in parallel):
+    Resulting graph (6 steps total, all running in parallel):
         lint (1)
-        build-{slug} x8   (each running build + unit +
+        build-{slug} x5   (each running build + unit +
                             integration + e2e in sequence)
     """
     git_ref = get_git_ref()
@@ -194,7 +191,7 @@ def generate_pipeline() -> Pipeline:
     lint = _lint_step()
     set_artifact_plugin_options(
         lint,
-        {"download": {"variant": "linux-core2-release", "git-ref": git_ref}},
+        {"download": {"variant": "linux-haswell-release", "git-ref": git_ref}},
     )
     pipeline.add_step(CommandStep.from_dict(lint))
 

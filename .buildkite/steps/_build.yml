@@ -5,10 +5,15 @@ key: build-{slug}
 # ${BUILDKITE_STEP_KEY#build-}. Renaming would silently break that derivation.
 
 commands:
-  - find .
+  - echo \"+++ Start Services\"
+  - bash scripts/tests/setup/start-services.sh
+  - echo \"+++ Build\"
   - bash scripts/cicd/20.build.sh
+  - echo \"+++ Tests - unit\"
   - bash scripts/cicd/30.test-unit.sh
+  - echo \"+++ Tests - integraion\"
   - bash scripts/cicd/40.test-integration.sh
+  - echo \"+++ Tests - e2e\"
   - bash scripts/cicd/50.test-e2e.sh
 
 plugins:

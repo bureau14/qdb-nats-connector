@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -37,22 +36,6 @@ type ConnectorConfig struct {
 
 	// Parser specifies which message parser to use (supported: "yaml", "noop")
 	Parser string
-}
-
-// Test environment configuration
-const (
-	defaultNATSEndpoint = "nats://localhost:4222"
-	defaultQDBCluster   = "qdb://127.0.0.1:2836"
-)
-
-// getEnvOrDefault returns env var or default.
-// Internal helper for test configuration.
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-
-	return defaultValue
 }
 
 // =============================================================================
@@ -183,7 +166,7 @@ func CreateTableFromSchema(handle qdb.HandleType, schema *TableSchema) error {
 	// Instead we'll let any invalid handle fail during table operations
 
 	// Get the timeseries entry for this table name
-	table := handle.Timeseries(schema.Name)
+	table := handle.Table(schema.Name)
 
 	// Convert schema.Columns to []qdb.TsColumnInfo
 	columns := make([]qdb.TsColumnInfo, len(schema.Columns))
@@ -207,7 +190,7 @@ func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error
 	// Instead we'll let any invalid handle fail during operations
 
 	// Get the timeseries table
-	table := handle.Timeseries(tableName)
+	table := handle.Table(tableName)
 
 	// Get table schema (columns info)
 	columnsInfo, err := table.ColumnsInfo()
@@ -278,7 +261,7 @@ func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error
 			var value string
 
 			// Read column data based on type
-			switch col.ColumnType {
+			switch col.ColumnType { //nolint:exhaustive // default branch handles other column types
 			case qdb.TsColumnTypes[0]: // blob type
 				blobData, err := bulk.GetBlob()
 				if err != nil {

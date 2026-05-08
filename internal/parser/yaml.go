@@ -306,6 +306,8 @@ func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
 // In: state *ParseState - parsed fields
 // Out: qdb.WriterTable - single-row table
 // Ex: createWriterTable(state) → table
+//
+//nolint:dupl // per-column-type branches intentionally repeated for buffer-bound performance
 func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, error) {
 	// CRITICAL MEMORY PINNING REQUIREMENTS:
 	// =====================================
@@ -383,7 +385,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 		// Column names have null terminators, but field names don't
 		// Strip the null terminator for field lookup
 		fieldName := col.ColumnName
-		if len(fieldName) > 0 && fieldName[len(fieldName)-1] == 0 {
+		if fieldName != "" && fieldName[len(fieldName)-1] == 0 {
 			fieldName = fieldName[:len(fieldName)-1]
 		}
 		value, exists := state.Fields[fieldName]
@@ -560,7 +562,7 @@ func (p *YAMLParser) newParseState() *ParseState {
 // Out: YAMLConfig - parsed config
 // Ex: loadYAMLConfig("parser.yaml") → config
 func loadYAMLConfig(configPath string) (YAMLConfig, error) {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // configPath is a trusted operator-provided config file path
 	if err != nil {
 		return YAMLConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("failed to read config file: %v", err))
@@ -1008,7 +1010,7 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 		// Security validation: prevent injection attacks
 		// Note: We validate before the null terminator is added conceptually,
 		// but since we add it inline above, we need to exclude it from validation
-		if len(tableName) > 0 && tableName[len(tableName)-1] == 0 {
+		if tableName != "" && tableName[len(tableName)-1] == 0 {
 			err := validateTableName(tableName[:len(tableName)-1])
 			if err != nil {
 				return err

@@ -92,6 +92,28 @@ func (p *Publisher) Start(ctx context.Context) error {
 	return nil
 }
 
+// GetMetrics returns the current publishing metrics
+func (p *Publisher) GetMetrics() (messagesPublished, batchesProcessed int64) {
+	return atomic.LoadInt64(&p.messagesPublished), atomic.LoadInt64(&p.batchesProcessed)
+}
+
+// GetBackpressureMetrics is deprecated - returns zeros for compatibility
+func (p *Publisher) GetBackpressureMetrics() (circuitTrips, backpressureEvents int64) {
+	// No backpressure in this tool - always return 0
+	return 0, 0
+}
+
+// GetCompletionChannel returns a channel that closes when all workers complete
+func (p *Publisher) GetCompletionChannel() <-chan struct{} {
+	return p.completionChan
+}
+
+// OnWorkerCompleted should be called when a worker completes after tombstone
+func (p *Publisher) OnWorkerCompleted() {
+	completed := atomic.AddInt64(&p.workersCompleted, 1)
+	slog.Debug("Worker completed", "completed_count", completed, "total_workers", p.workers)
+}
+
 // publishBatch publishes each message in the batch to the specified topic
 // No backpressure - designed to find system limits through failure
 func (p *Publisher) publishBatch(ctx context.Context, batchData batch.Batch, topic string) error {
@@ -155,26 +177,4 @@ func (p *Publisher) logMetrics(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// GetMetrics returns the current publishing metrics
-func (p *Publisher) GetMetrics() (messagesPublished, batchesProcessed int64) {
-	return atomic.LoadInt64(&p.messagesPublished), atomic.LoadInt64(&p.batchesProcessed)
-}
-
-// GetBackpressureMetrics is deprecated - returns zeros for compatibility
-func (p *Publisher) GetBackpressureMetrics() (circuitTrips, backpressureEvents int64) {
-	// No backpressure in this tool - always return 0
-	return 0, 0
-}
-
-// GetCompletionChannel returns a channel that closes when all workers complete
-func (p *Publisher) GetCompletionChannel() <-chan struct{} {
-	return p.completionChan
-}
-
-// OnWorkerCompleted should be called when a worker completes after tombstone
-func (p *Publisher) OnWorkerCompleted() {
-	completed := atomic.AddInt64(&p.workersCompleted, 1)
-	slog.Debug("Worker completed", "completed_count", completed, "total_workers", p.workers)
 }

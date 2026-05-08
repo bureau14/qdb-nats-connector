@@ -124,7 +124,14 @@ func (b *Batcher) Start(ctx context.Context) error {
 	return nil
 }
 
+// GetMetrics returns current batching metrics
+func (b *Batcher) GetMetrics() Metrics {
+	return b.metrics.GetMetrics()
+}
+
 // sendBatch sends the current batch and resets the message buffer
+//
+//nolint:dupl // mirrors AdaptiveBatcher.sendAdaptiveBatch; differences in metrics ownership prevent extraction
 func (b *Batcher) sendBatch() {
 	if len(b.messages) == 0 {
 		return
@@ -213,11 +220,6 @@ func (b *Batcher) getTimerChannel() <-chan time.Time {
 	}
 
 	return b.timer.C
-}
-
-// GetMetrics returns current batching metrics
-func (b *Batcher) GetMetrics() Metrics {
-	return b.metrics.GetMetrics()
 }
 
 // cleanup closes the output channel and stops the timer

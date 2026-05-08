@@ -24,7 +24,7 @@ import (
 // Example:
 //
 //	p := NewParser("yaml", opts) // → YAML parser with building blocks
-func NewParser(parserType string, opts ParserOptions) (Parser, error) {
+func NewParser(parserType string, opts ParserOptions) (Parser, error) { //nolint:ireturn // factory returns Parser interface by design
 	switch parserType {
 	case "yaml":
 		// YAML parser requires configuration file per ADR-005 - contains
@@ -54,6 +54,6 @@ func NewParser(parserType string, opts ParserOptions) (Parser, error) {
 // In: opts ParserOptions - full config
 // Out: Parser - configured instance
 // Ex: NewParserWithOptions(opts) → parser
-func NewParserWithOptions(opts ParserOptions) (Parser, error) {
+func NewParserWithOptions(opts ParserOptions) (Parser, error) { //nolint:ireturn // factory returns Parser interface by design
 	return NewParser(opts.ParserType, opts)
 }

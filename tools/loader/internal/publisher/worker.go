@@ -53,6 +53,19 @@ func (w *Worker) Run(ctx context.Context, batches <-chan batch.Batch, topic stri
 	}
 }
 
+// GetMetrics returns the current worker metrics
+func (w *Worker) GetMetrics() (messagesHandled, batchesHandled int64, avgProcessTime time.Duration) {
+	messages := atomic.LoadInt64(&w.messagesHandled)
+	batches := atomic.LoadInt64(&w.batchesHandled)
+
+	var avgTime time.Duration
+	if batches > 0 {
+		avgTime = time.Duration(w.totalProcessTime.Nanoseconds() / batches)
+	}
+
+	return messages, batches, avgTime
+}
+
 // processBatch handles a single batch and tracks metrics
 func (w *Worker) processBatch(ctx context.Context, batchData batch.Batch, topic string) {
 	startTime := time.Now()
@@ -82,17 +95,4 @@ func (w *Worker) processBatch(ctx context.Context, batchData batch.Batch, topic 
 			"messages_handled", w.messagesHandled,
 			"avg_process_time_ms", w.totalProcessTime.Milliseconds()/w.batchesHandled)
 	}
-}
-
-// GetMetrics returns the current worker metrics
-func (w *Worker) GetMetrics() (messagesHandled, batchesHandled int64, avgProcessTime time.Duration) {
-	messages := atomic.LoadInt64(&w.messagesHandled)
-	batches := atomic.LoadInt64(&w.batchesHandled)
-
-	var avgTime time.Duration
-	if batches > 0 {
-		avgTime = time.Duration(w.totalProcessTime.Nanoseconds() / batches)
-	}
-
-	return messages, batches, avgTime
 }

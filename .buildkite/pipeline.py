@@ -182,8 +182,15 @@ def generate_pipeline() -> Pipeline:
 
     Resulting graph (6 steps total, all running in parallel):
         lint (1)
-        build-{slug} x5   (each running build + unit +
-                            integration + e2e in sequence)
+        build-{slug} x5   (each running build + unit + integration + e2e
+                           in sequence, then uploading the archive and
+                           promoting the LATEST_SUCCESSFUL pointer)
+
+    Each per-platform step's qdb-artifacts plugin entry receives the same
+    ``variant`` + ``git-ref`` defaults injected into its ``download``,
+    ``upload``, and ``promote`` blocks; ``files`` for upload stays
+    declared in the step template ``.buildkite/steps/_build.yml`` so the
+    file pattern lives next to the step it belongs to.
     """
     git_ref = get_git_ref()
     pipeline = Pipeline()
@@ -197,9 +204,14 @@ def generate_pipeline() -> Pipeline:
 
     for p in PLATFORMS:
         step = _per_platform_step(p)
+        variant = p.slug("release")
         set_artifact_plugin_options(
             step,
-            {"download": {"variant": p.slug("release"), "git-ref": git_ref}},
+            {
+                "download": {"variant": variant, "git-ref": git_ref},
+                "upload": {"variant": variant, "git-ref": git_ref},
+                "promote": {"variant": variant, "git-ref": git_ref},
+            },
         )
         pipeline.add_step(CommandStep.from_dict(step))
 

@@ -2,7 +2,8 @@
 # Buildkite build step for qdb-nats-connector.
 # Invoked by .buildkite/steps/_build.yml.
 # Compiles all three connector binaries via ${GO} build directly (no make),
-# and packages bin/qdb-nats-connector into artifacts/qdb-nats-connector-{slug}.tar.zst
+# and packages bin/qdb-nats-connector into
+# artifacts/qdb-${VERSION}-${OS}-${ARCH}-nats-connector.tar.zst
 # for upload.  The Go toolchain is wired by cicd_setup_go_toolchain (00.common.sh),
 # which derives GO from GOROOT injected by pipeline.py::_go_env_for_agent().
 #
@@ -54,6 +55,40 @@ VERSION="$(cat VERSION)"
 GIT_SHA="$(git rev-parse HEAD)"
 BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 KERNEL_VERSION="$(uname -r)"
+
+# Derive ${OS} and ${ARCH} for the release archive name.  Mirrors
+# ~/git/qdb-api-rest/scripts/common.sh:111-160 verbatim so the archive
+# naming matches the qdb-api-rest convention: qdb-${VERSION}-${OS}-${ARCH}-...
+case "$(uname)" in
+    Darwin | Linux | FreeBSD )
+        ARCH="$(uname -m)"
+        if [[ "${ARCH}" == "x86_64" || "${ARCH}" == "amd64" ]]; then
+            ARCH="amd64"
+        else
+            ARCH="aarch64"
+        fi
+        ;;
+    MINGW* )
+        # Windows agents are always amd64; uname -m is unreliable under MSYS2.
+        ARCH="amd64"
+        ;;
+    * )
+        echo "ERROR: unable to probe ARCH for $(uname)" >&2
+        exit 1
+        ;;
+esac
+
+case "$(uname)" in
+    MINGW* )    OS="windows" ;;
+    Darwin )    OS="darwin" ;;
+    Linux )     OS="linux" ;;
+    FreeBSD )   OS="freebsd" ;;
+    * )
+        echo "ERROR: unable to probe OS for $(uname)" >&2
+        exit 1
+        ;;
+esac
+
 BUILD_MODE="release"
 GOFLAGS="-trimpath"
 GCFLAGS=""
@@ -93,16 +128,7 @@ fi
 
 mkdir -p "${BASE_DIR}/artifacts"
 
-# SLUG identifies the platform in the archive name; it comes from the
-# step env (BUILDKITE_STEP_SLUG) or is derived from BUILDKITE_STEP_KEY
-# by stripping the "build-" prefix.  Both are set by the pipeline template.
-SLUG="${BUILDKITE_STEP_SLUG:-${BUILDKITE_STEP_KEY#build-}}"
-if [[ -z "${SLUG}" ]]; then
-    echo "ERROR: could not determine SLUG (neither BUILDKITE_STEP_SLUG nor BUILDKITE_STEP_KEY is set)" >&2
-    exit 1
-fi
-
-ARCHIVE="${BASE_DIR}/artifacts/qdb-nats-connector-${SLUG}.tar.zst"
+ARCHIVE="${BASE_DIR}/artifacts/qdb-${VERSION}-${OS}-${ARCH}-nats-connector.tar.zst"
 
 # --use-compress-program=zstd works on both GNU tar (Linux) and BSD tar
 # (FreeBSD, macOS) as long as zstd is on PATH; avoids format-flag divergence.

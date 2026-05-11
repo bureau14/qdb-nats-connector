@@ -28,6 +28,8 @@ plugins:
             - "*-c-api.tar.zst!*"
             - "*-server.tar.zst!*"
             - "*-utils.tar.zst!*"
+      upload:
+        files: "artifacts/**/*.tar.zst"
       promote: {}
 
 timeout_in_minutes: 60

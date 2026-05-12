@@ -78,24 +78,60 @@ if [[ "$(uname)" == MINGW* ]]; then
     echo "--- Group E: environment variables (filtered) ---"
     env | grep -iE 'GCC|CGO|MINGW|GOAMD|GOROOT|GOPATH|GOOS|GOARCH|^PATH=|^CC=' | sort || true
 
-    echo "--- Group F: minimal cgo sanity test ---"
+    echo "--- Group F: minimal cgo sanity test (with explicit stdout/stderr capture) ---"
     _diag_tmp="$(mktemp -d)"
     cat > "${_diag_tmp}/hello.c" <<'__DIAG_EOF__'
 #include <stdio.h>
 int main(void) { puts("ok"); return 0; }
 __DIAG_EOF__
-    if gcc -o "${_diag_tmp}/hello.exe" "${_diag_tmp}/hello.c" 2>&1; then
-        echo "diag: gcc compile + link: OK"
-        if "${_diag_tmp}/hello.exe" 2>&1; then
-            echo "diag: minimal C binary execution: OK"
-        else
-            echo "diag: minimal C binary execution: FAILED with $?"
-        fi
-    else
-        echo "diag: gcc compile + link: FAILED"
+    # Redirect gcc's stdout and stderr to separate files so we can show them
+    # explicitly via `cat` -- this bypasses any pipe buffering that may swallow
+    # gcc's output when invoked through buildkite-agent's process tree.
+    gcc -v -o "${_diag_tmp}/hello.exe" "${_diag_tmp}/hello.c" \
+        > "${_diag_tmp}/gcc-stdout.log" 2> "${_diag_tmp}/gcc-stderr.log"
+    _diag_gcc_exit=$?
+    echo "diag: gcc exit code: ${_diag_gcc_exit}"
+    echo "diag: gcc stdout (full):"
+    cat "${_diag_tmp}/gcc-stdout.log" 2>&1 || echo "(stdout log missing)"
+    echo "diag: gcc stderr (full):"
+    cat "${_diag_tmp}/gcc-stderr.log" 2>&1 || echo "(stderr log missing)"
+    echo "diag: produced files:"
+    ls -la "${_diag_tmp}/" 2>&1
+    if [[ "${_diag_gcc_exit}" -eq 0 && -f "${_diag_tmp}/hello.exe" ]]; then
+        echo "diag: minimal C binary execution attempt:"
+        "${_diag_tmp}/hello.exe" 2>&1
+        echo "diag: execution exit: $?"
     fi
     rm -rf "${_diag_tmp}"
-    unset _diag_tmp
+    unset _diag_tmp _diag_gcc_exit
+
+    echo "--- Group G: process and environment context (CI vs SSH delta) ---"
+    echo "+ whoami"; whoami 2>&1 || true
+    echo "+ pwd"; pwd 2>&1 || true
+    echo "+ TEMP=${TEMP:-unset}  TMP=${TMP:-unset}  USERPROFILE=${USERPROFILE:-unset}  LOCALAPPDATA=${LOCALAPPDATA:-unset}"
+    echo "+ HOMEDRIVE=${HOMEDRIVE:-unset}  HOMEPATH=${HOMEPATH:-unset}"
+    echo "+ parent process (bash \$PPID=$$):"
+    powershell.exe -NoProfile -Command 'Get-WmiObject Win32_Process -Filter "ProcessId=$pid" | Select Name,ParentProcessId,CommandLine | Format-List; $p=(Get-WmiObject Win32_Process -Filter "ProcessId=$pid").ParentProcessId; while ($p -gt 0) { $pp=Get-WmiObject Win32_Process -Filter "ProcessId=$p"; if (!$pp) { break }; Write-Output "  parent: PID=$($pp.ProcessId) Name=$($pp.Name)"; $p=$pp.ParentProcessId }' 2>&1 | head -30 || true
+
+    echo "--- Group H: gcc compile invoked via cmd /c wrapper (test stdio handle inheritance) ---"
+    _diag_tmp2="$(mktemp -d)"
+    cat > "${_diag_tmp2}/hello.c" <<'__DIAG_EOF__'
+#include <stdio.h>
+int main(void) { puts("ok"); return 0; }
+__DIAG_EOF__
+    # cmd /c wraps gcc's invocation through a new process boundary. If gcc
+    # works under cmd but not under direct bash, the issue is stdio handle
+    # inheritance from bash to gcc.
+    _diag_tmp2_win="$(cygpath -w "${_diag_tmp2}" 2>/dev/null || echo "${_diag_tmp2}")"
+    cmd.exe /c "C:\\mingw64\\bin\\gcc.exe -v -o \"${_diag_tmp2_win}\\hello-cmd.exe\" \"${_diag_tmp2_win}\\hello.c\" > \"${_diag_tmp2_win}\\cmd-stdout.log\" 2> \"${_diag_tmp2_win}\\cmd-stderr.log\""
+    _diag_cmd_exit=$?
+    echo "diag (cmd-wrapped): gcc exit code: ${_diag_cmd_exit}"
+    echo "diag (cmd-wrapped): gcc stderr (full):"
+    cat "${_diag_tmp2}/cmd-stderr.log" 2>&1 || echo "(stderr log missing)"
+    echo "diag (cmd-wrapped): produced files:"
+    ls -la "${_diag_tmp2}/" 2>&1
+    rm -rf "${_diag_tmp2}"
+    unset _diag_tmp2 _diag_tmp2_win _diag_cmd_exit
 
     echo "=== Windows diagnostic dump end ==="
 fi

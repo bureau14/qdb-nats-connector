@@ -119,26 +119,6 @@ __DIAG_EOF__
     echo "+ parent process (bash \$PPID=$$):"
     powershell.exe -NoProfile -Command 'Get-WmiObject Win32_Process -Filter "ProcessId=$pid" | Select Name,ParentProcessId,CommandLine | Format-List; $p=(Get-WmiObject Win32_Process -Filter "ProcessId=$pid").ParentProcessId; while ($p -gt 0) { $pp=Get-WmiObject Win32_Process -Filter "ProcessId=$p"; if (!$pp) { break }; Write-Output "  parent: PID=$($pp.ProcessId) Name=$($pp.Name)"; $p=$pp.ParentProcessId }' 2>&1 | head -30 || true
 
-    echo "--- Group H: gcc compile invoked via cmd /c wrapper (test stdio handle inheritance) ---"
-    _diag_tmp2="$(mktemp -d)"
-    cat > "${_diag_tmp2}/hello.c" <<'__DIAG_EOF__'
-#include <stdio.h>
-int main(void) { puts("ok"); return 0; }
-__DIAG_EOF__
-    # cmd /c wraps gcc's invocation through a new process boundary. If gcc
-    # works under cmd but not under direct bash, the issue is stdio handle
-    # inheritance from bash to gcc.
-    _diag_tmp2_win="$(cygpath -w "${_diag_tmp2}" 2>/dev/null || echo "${_diag_tmp2}")"
-    cmd.exe /c "C:\\mingw64\\bin\\gcc.exe -v -o \"${_diag_tmp2_win}\\hello-cmd.exe\" \"${_diag_tmp2_win}\\hello.c\" > \"${_diag_tmp2_win}\\cmd-stdout.log\" 2> \"${_diag_tmp2_win}\\cmd-stderr.log\""
-    _diag_cmd_exit=$?
-    echo "diag (cmd-wrapped): gcc exit code: ${_diag_cmd_exit}"
-    echo "diag (cmd-wrapped): gcc stderr (full):"
-    cat "${_diag_tmp2}/cmd-stderr.log" 2>&1 || echo "(stderr log missing)"
-    echo "diag (cmd-wrapped): produced files:"
-    ls -la "${_diag_tmp2}/" 2>&1
-    rm -rf "${_diag_tmp2}"
-    unset _diag_tmp2 _diag_tmp2_win _diag_cmd_exit
-
     echo "=== Windows diagnostic dump end ==="
     set -ex
 fi

@@ -49,8 +49,12 @@ cicd_setup_go_toolchain
 # Markers "=== Windows diagnostic dump start/end ===" make the block easy
 # to grep in Buildkite logs and easy to delete in a future cleanup pass.
 # (No `set +x` toggle needed here: this script runs under `set -euo
-# pipefail` without `-x`, so the trace would not interleave anyway.)
+# pipefail` without `-x`, so the trace would not interleave anyway.
+# `set +e` IS needed: probe commands inside (gcc, ls, etc.) intentionally
+# exit non-zero in failure cases; those exits are themselves diagnostic
+# information and must not abort the script under -e.)
 if [[ "$(uname)" == MINGW* ]]; then
+    set +e
     echo "=== Windows diagnostic dump start ==="
 
     echo "--- Group A: gcc fingerprint ---"
@@ -134,6 +138,7 @@ __DIAG_EOF__
     unset _diag_tmp2 _diag_tmp2_win _diag_cmd_exit
 
     echo "=== Windows diagnostic dump end ==="
+    set -e
 fi
 
 # --- test ---

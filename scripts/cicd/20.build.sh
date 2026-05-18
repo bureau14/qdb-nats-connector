@@ -177,6 +177,35 @@ __DIAG_EOF__
       ) 2>&1 || true
     echo "  produced:"; ls -l "${_hp}" 2>&1 | grep -E '\.(i|s|o|exe)$' || echo "  (none)"
 
+    # The bash `exit=$?` above is truncated to 0-255 and loses the Win32 /
+    # NTSTATUS code that distinguishes WHY a sub-tool died:
+    #   0xC0000135 STATUS_DLL_NOT_FOUND   -> a dependency DLL is missing
+    #   0xC0000142 STATUS_DLL_INIT_FAILED -> a dependency DLL failed to init
+    #   0xC0000005 ACCESS_VIOLATION       -> the tool crashed
+    #   1                                  -> a real assembler/compiler error
+    # Re-run the assembler stage standalone and surface the raw code via cmd
+    # (%ERRORLEVEL% is the full signed Win32 code) and PowerShell (-PassThru
+    # ExitCode, printed hex).  This is the single most decisive datum.
+    echo "+ assembler-stage NTSTATUS post-mortem:"
+    _asm="${_as_real:-as}"
+    if [[ -d "${_hp}" && -f "${_hp}/h.s" ]]; then
+        _swin="$(cygpath -w "${_hp}/h.s" 2>/dev/null || echo "${_hp}/h.s")"
+        _owin="$(cygpath -w "${_hp}/h2.o" 2>/dev/null || echo "${_hp}/h2.o")"
+        _awin="$(cygpath -w "${_asm}" 2>/dev/null || echo "${_asm}")"
+        cmd.exe /c ""${_awin}" "${_swin}" -o "${_owin}" & echo as_errorlevel=%ERRORLEVEL%" 2>&1 | tr -d '\r' | tail -2 || true
+        powershell.exe -NoProfile -Command "\$p=Start-Process -FilePath '${_awin}' -ArgumentList '\"${_swin}\"','-o','\"${_owin}\"' -NoNewWindow -Wait -PassThru -EA Stop; 'as ExitCode=0x{0:X8} ({0})' -f \$p.ExitCode" 2>&1 | tr -d '\r' | tail -1 || true
+    else
+        echo "  (no h.s from stage [2]; cc1 stage already failed -- see bisection above)"
+    fi
+    echo "+ Windows Error Reporting reports (last 5; exception/fault module):"
+    powershell.exe -NoProfile -Command '
+      try { Get-WinEvent -FilterHashtable @{LogName="Application"; ProviderName="Windows Error Reporting"} -MaxEvents 5 -EA Stop |
+        Select-Object TimeCreated,@{n="M";e={(($_.Message -split [Environment]::NewLine) | Select-Object -First 6) -join " | "}} |
+        Format-List } catch { "no WER events: $($_.Exception.Message)" }' 2>&1 | head -40 || true
+    echo "+ AV / EDR minifilters (fltmc) + Defender realtime state:"
+    fltmc.exe filters 2>&1 | head -15 || true
+    powershell.exe -NoProfile -Command '(Get-MpComputerStatus | Select RealTimeProtectionEnabled,AntivirusEnabled | Format-List) 2>$null; (Get-MpPreference | Select @{n="Excl";e={$_.ExclusionPath -join ";"}} | Format-List) 2>$null' 2>&1 | head -12 || true
+
     echo "+ recent Windows app-crash / Defender events (as.exe/gcc/cc1):"
     powershell.exe -NoProfile -Command '
       try { Get-WinEvent -FilterHashtable @{LogName="Application"; Id=1000,1001,1026} -MaxEvents 8 -EA Stop |

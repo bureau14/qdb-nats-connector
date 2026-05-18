@@ -119,6 +119,65 @@ __DIAG_EOF__
     echo "+ parent process (bash \$PPID=$$):"
     powershell.exe -NoProfile -Command 'Get-WmiObject Win32_Process -Filter "ProcessId=$pid" | Select Name,ParentProcessId,CommandLine | Format-List; $p=(Get-WmiObject Win32_Process -Filter "ProcessId=$pid").ParentProcessId; while ($p -gt 0) { $pp=Get-WmiObject Win32_Process -Filter "ProcessId=$p"; if (!$pp) { break }; Write-Output "  parent: PID=$($pp.ProcessId) Name=$($pp.Name)"; $p=$pp.ParentProcessId }' 2>&1 | head -30 || true
 
+    # --- Group H: cgo build reproduction with full gcc/cc1 stderr capture ---
+    # Group F's gcc test compiles in the MSYS mktemp dir, which is NOT the temp
+    # root cmd/go uses for its $WORK build tree.  When the agent runs as the
+    # LocalSystem service, Windows' GetTempPath2 (token = SYSTEM) returns
+    # C:\Windows\SystemTemp regardless of env vars, and gcc/cc1 silently fail to
+    # open sources there ("<pkg>: gcc: exit status 1" with no output -- the
+    # empty-diagnostic Windows build failure).  whoami /user prints the token
+    # SID so a LocalSystem (S-1-5-18) run is unambiguous in the log.
+    #
+    # Two sub-probes build the same minimal cgo module with -x -work and
+    # combined stdout+stderr captured:
+    #   H1  current env -- GOTMPDIR is pinned workspace-local by
+    #       cicd_setup_go_toolchain; expected to SUCCEED (validates the fix).
+    #   H2  GOTMPDIR/TMP/TEMP forcibly unset -- cmd/go falls back to
+    #       GetTempPath2 -> C:\Windows\SystemTemp under the service; expected
+    #       to FAIL and surface `cc1.exe: fatal error: ...: No such file or
+    #       directory`, proving root cause and acting as a canary if the
+    #       platform constraint ever changes.
+    echo "--- Group H: cgo build reproduction (full gcc stderr capture) ---"
+    echo "+ whoami /user"; whoami /user 2>&1 || true
+    echo "+ ${GO} env GOTMPDIR GOCACHE GOPATH"
+    "${GO}" env GOTMPDIR GOCACHE GOPATH 2>&1 || true
+    _cgo_root="${BASE_DIR}/.bk-cgo-probe"
+    rm -rf "${_cgo_root}" 2>/dev/null
+    mkdir -p "${_cgo_root}" 2>&1 || echo "diag: mkdir ${_cgo_root} failed"
+    cat > "${_cgo_root}/main.go" <<'__CGO_PROBE_EOF__'
+package main
+
+/*
+#include <stdio.h>
+static void cgo_probe_hi(void) { printf("cgo-ok\n"); }
+*/
+import "C"
+
+func main() { C.cgo_probe_hi() }
+__CGO_PROBE_EOF__
+    printf 'module bkcgoprobe\n\ngo 1.25\n' > "${_cgo_root}/go.mod"
+    for _probe in H1-pinned-gotmpdir H2-forced-systemtemp-fallback; do
+        echo "diag: [${_probe}] building minimal cgo module (CGO_ENABLED=1, -x -work -v) ..."
+        if [[ "${_probe}" == H2-* ]]; then
+            ( cd "${_cgo_root}" && env -u GOTMPDIR -u TMP -u TEMP \
+                CGO_ENABLED=1 GOFLAGS= "${GO}" build -x -work -v -o probe.exe . ) \
+                > "${_cgo_root}/out.log" 2>&1
+        else
+            ( cd "${_cgo_root}" && CGO_ENABLED=1 GOFLAGS= "${GO}" build -x -work -v -o probe.exe . ) \
+                > "${_cgo_root}/out.log" 2>&1
+        fi
+        _cgo_exit=$?
+        echo "diag: [${_probe}] cgo probe exit: ${_cgo_exit}"
+        echo "diag: [${_probe}] WORK / gcc / cc1 / error lines:"
+        grep -nE 'WORK=|gcc|cc1|exit status|fatal error|No such file|[Pp]ermission|cannot|[Ee]rror' \
+            "${_cgo_root}/out.log" 2>&1 | head -60 || true
+        echo "diag: [${_probe}] cgo probe full log tail 80:"
+        tail -80 "${_cgo_root}/out.log" 2>&1 || true
+        rm -f "${_cgo_root}/probe.exe" 2>/dev/null
+    done
+    rm -rf "${_cgo_root}" 2>/dev/null
+    unset _cgo_root _cgo_exit _probe
+
     echo "=== Windows diagnostic dump end ==="
     set -ex
 fi

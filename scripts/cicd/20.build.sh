@@ -119,64 +119,74 @@ __DIAG_EOF__
     echo "+ parent process (bash \$PPID=$$):"
     powershell.exe -NoProfile -Command 'Get-WmiObject Win32_Process -Filter "ProcessId=$pid" | Select Name,ParentProcessId,CommandLine | Format-List; $p=(Get-WmiObject Win32_Process -Filter "ProcessId=$pid").ParentProcessId; while ($p -gt 0) { $pp=Get-WmiObject Win32_Process -Filter "ProcessId=$p"; if (!$pp) { break }; Write-Output "  parent: PID=$($pp.ProcessId) Name=$($pp.Name)"; $p=$pp.ParentProcessId }' 2>&1 | head -30 || true
 
-    # --- Group H: cgo build reproduction with full gcc/cc1 stderr capture ---
-    # Group F's gcc test compiles in the MSYS mktemp dir, which is NOT the temp
-    # root cmd/go uses for its $WORK build tree.  When the agent runs as the
-    # LocalSystem service, Windows' GetTempPath2 (token = SYSTEM) returns
-    # C:\Windows\SystemTemp regardless of env vars, and gcc/cc1 silently fail to
-    # open sources there ("<pkg>: gcc: exit status 1" with no output -- the
-    # empty-diagnostic Windows build failure).  whoami /user prints the token
-    # SID so a LocalSystem (S-1-5-18) run is unambiguous in the log.
-    #
-    # Two sub-probes build the same minimal cgo module with -x -work and
-    # combined stdout+stderr captured:
-    #   H1  current env -- GOTMPDIR is pinned workspace-local by
-    #       cicd_setup_go_toolchain; expected to SUCCEED (validates the fix).
-    #   H2  GOTMPDIR/TMP/TEMP forcibly unset -- cmd/go falls back to
-    #       GetTempPath2 -> C:\Windows\SystemTemp under the service; expected
-    #       to FAIL and surface `cc1.exe: fatal error: ...: No such file or
-    #       directory`, proving root cause and acting as a canary if the
-    #       platform constraint ever changes.
-    echo "--- Group H: cgo build reproduction (full gcc stderr capture) ---"
-    echo "+ whoami /user"; whoami /user 2>&1 || true
-    echo "+ ${GO} env GOTMPDIR GOCACHE GOPATH"
-    "${GO}" env GOTMPDIR GOCACHE GOPATH 2>&1 || true
-    _cgo_root="${BASE_DIR}/.bk-cgo-probe"
-    rm -rf "${_cgo_root}" 2>/dev/null
-    mkdir -p "${_cgo_root}" 2>&1 || echo "diag: mkdir ${_cgo_root} failed"
-    cat > "${_cgo_root}/main.go" <<'__CGO_PROBE_EOF__'
-package main
+    # --- Group H: toolchain bisection (which gcc sub-tool dies, and why) ---
+    # Builds 34 and 35 prove a *plain* `gcc hello.c` (Group F, no cgo, no Go)
+    # exits 1 with no error after the driver echoes the `as.exe -v` line --
+    # i.e. cc1 runs and prints its banner, then the assembler stage produces
+    # zero output and the driver fails.  So the mingw toolchain on the agent
+    # is broken independently of cgo/Go/temp-dir.  This group resolves the
+    # exact sub-tool binaries gcc will exec, runs each directly with stderr
+    # captured, then bisects the pipeline stage by stage (-E -> -S -> as ->
+    # -c -> link) on a trivial file so the failing stage and its real error
+    # (missing binary, DLL load failure, crash) are unambiguous.
+    echo "--- Group H: toolchain bisection ---"
+    echo "+ whoami.exe /user /groups (Windows token; MSYS 'whoami' shadows it)"
+    whoami.exe /user /groups 2>&1 | head -8 || true
 
-/*
-#include <stdio.h>
-static void cgo_probe_hi(void) { printf("cgo-ok\n"); }
-*/
-import "C"
-
-func main() { C.cgo_probe_hi() }
-__CGO_PROBE_EOF__
-    printf 'module bkcgoprobe\n\ngo 1.25\n' > "${_cgo_root}/go.mod"
-    for _probe in H1-pinned-gotmpdir H2-forced-systemtemp-fallback; do
-        echo "diag: [${_probe}] building minimal cgo module (CGO_ENABLED=1, -x -work -v) ..."
-        if [[ "${_probe}" == H2-* ]]; then
-            ( cd "${_cgo_root}" && env -u GOTMPDIR -u TMP -u TEMP \
-                CGO_ENABLED=1 GOFLAGS= "${GO}" build -x -work -v -o probe.exe . ) \
-                > "${_cgo_root}/out.log" 2>&1
+    echo "+ resolved sub-tool paths (gcc -print-prog-name):"
+    for _t in cc1 as collect2 ld; do
+        _p="$(gcc -print-prog-name=${_t} 2>&1)"
+        echo "  ${_t} -> ${_p}"
+        # gcc returns the bare name when it cannot resolve a real path.
+        if [[ "${_p}" != "${_t}" && -e "${_p}" ]]; then
+            ls -l "${_p}" 2>&1 || true
         else
-            ( cd "${_cgo_root}" && CGO_ENABLED=1 GOFLAGS= "${GO}" build -x -work -v -o probe.exe . ) \
-                > "${_cgo_root}/out.log" 2>&1
+            echo "  (not a resolvable path; PATH lookup of ${_t}:)"; which "${_t}" 2>&1 || true
+            command -v "${_t}.exe" >/dev/null 2>&1 && ls -l "$(command -v ${_t}.exe)" 2>&1 || true
         fi
-        _cgo_exit=$?
-        echo "diag: [${_probe}] cgo probe exit: ${_cgo_exit}"
-        echo "diag: [${_probe}] WORK / gcc / cc1 / error lines:"
-        grep -nE 'WORK=|gcc|cc1|exit status|fatal error|No such file|[Pp]ermission|cannot|[Ee]rror' \
-            "${_cgo_root}/out.log" 2>&1 | head -60 || true
-        echo "diag: [${_probe}] cgo probe full log tail 80:"
-        tail -80 "${_cgo_root}/out.log" 2>&1 || true
-        rm -f "${_cgo_root}/probe.exe" 2>/dev/null
     done
-    rm -rf "${_cgo_root}" 2>/dev/null
-    unset _cgo_root _cgo_exit _probe
+
+    echo "+ direct sub-tool --version (exit code each; silent+nonzero => broken/DLL-load failure):"
+    for _c in "as --version" "ld --version" "gcc -print-prog-name=collect2"; do
+        echo "  \$ ${_c}"
+        eval "${_c}" > "${TMPDIR:-/tmp}/h_tool.out" 2> "${TMPDIR:-/tmp}/h_tool.err"
+        echo "    exit=$?  stdout1=$(head -1 "${TMPDIR:-/tmp}/h_tool.out" 2>/dev/null)  stderr1=$(head -1 "${TMPDIR:-/tmp}/h_tool.err" 2>/dev/null)"
+    done
+    _as_real="$(gcc -print-prog-name=as 2>/dev/null)"
+    if [[ -n "${_as_real}" && -e "${_as_real}" ]]; then
+        echo "+ '${_as_real}' --version (the exact assembler gcc execs):"
+        "${_as_real}" --version > "${TMPDIR:-/tmp}/as.out" 2> "${TMPDIR:-/tmp}/as.err"
+        echo "  exit=$?"; echo "  stdout:"; cat "${TMPDIR:-/tmp}/as.out" 2>&1 | head -3
+        echo "  stderr:"; cat "${TMPDIR:-/tmp}/as.err" 2>&1 | head -10
+        echo "+ DLL imports of that as.exe (objdump -p; missing dep => silent exit):"
+        objdump -p "${_as_real}" 2>&1 | grep -i "DLL Name" | sort -u || true
+        command -v ldd >/dev/null 2>&1 && { echo "+ ldd as.exe:"; ldd "${_as_real}" 2>&1 | head -30; }
+    fi
+
+    echo "+ staged compile bisection on a trivial file:"
+    _hp="${TMPDIR:-/tmp}/htc"
+    rm -rf "${_hp}"; mkdir -p "${_hp}"
+    printf 'int main(void){return 0;}\n' > "${_hp}/h.c"
+    ( cd "${_hp}" \
+      && { echo "  [1] gcc -E (preprocess)"; gcc -E h.c            > h.i   2> e1; echo "      exit=$? $(tr -d '\r' <e1 | tail -1)"; } \
+      && { echo "  [2] gcc -S (cc1 -> .s)"; gcc -S h.c             -o h.s  2> e2; echo "      exit=$? $(tr -d '\r' <e2 | tail -1)"; } \
+      && { echo "  [3] as h.s (assemble)"; "${_as_real:-as}" h.s   -o h.o  2> e3; echo "      exit=$? $(tr -d '\r' <e3 | tail -1)"; } \
+      && { echo "  [4] gcc -c (drive cc1+as)"; gcc -c h.c          -o hc.o 2> e4; echo "      exit=$? $(tr -d '\r' <e4 | tail -1)"; } \
+      && { echo "  [5] gcc -pipe -c (no temp file)"; gcc -pipe -c h.c -o hp.o 2> e5; echo "      exit=$? $(tr -d '\r' <e5 | tail -1)"; } \
+      && { echo "  [6] gcc link (collect2/ld)"; gcc h.c            -o h.exe 2> e6; echo "      exit=$? $(tr -d '\r' <e6 | tail -1)"; } \
+      ) 2>&1 || true
+    echo "  produced:"; ls -l "${_hp}" 2>&1 | grep -E '\.(i|s|o|exe)$' || echo "  (none)"
+
+    echo "+ recent Windows app-crash / Defender events (as.exe/gcc/cc1):"
+    powershell.exe -NoProfile -Command '
+      try { Get-WinEvent -FilterHashtable @{LogName="Application"; Id=1000,1001,1026} -MaxEvents 8 -EA Stop |
+        Select-Object TimeCreated,Id,@{n="M";e={($_.Message -split [Environment]::NewLine)[0]}} |
+        Format-Table -Auto -Wrap } catch { "no Application crash events: $($_.Exception.Message)" }
+      try { Get-WinEvent -FilterHashtable @{LogName="Microsoft-Windows-Windows Defender/Operational"; Id=1116,1117} -MaxEvents 5 -EA Stop |
+        Select-Object TimeCreated,Id,@{n="M";e={($_.Message -split [Environment]::NewLine)[0]}} |
+        Format-Table -Auto -Wrap } catch { "no Defender block events" }' 2>&1 | head -30 || true
+    rm -rf "${_hp}" 2>/dev/null
+    unset _t _p _c _as_real _hp
 
     echo "=== Windows diagnostic dump end ==="
     set -ex

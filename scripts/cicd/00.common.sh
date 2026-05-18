@@ -114,6 +114,26 @@ cicd_setup_go_toolchain() {
     PATH="${GOROOT}/bin:${PATH}"
     export PATH
 
+    # Windows: pin the build/tooling temp dir to a workspace-local path.
+    # The Buildkite agent runs as the LocalSystem service, so Windows'
+    # GetTempPath2 (SYSTEM token) hands cmd/go a $WORK tree under
+    # C:\Windows\SystemTemp regardless of env vars -- and gcc/cc1.exe
+    # silently fail to open cgo sources there ("<pkg>: gcc: exit status 1"
+    # with no output; the empty-diagnostic Windows build failure).
+    # GOTMPDIR is authoritative for cmd/go's $WORK; TMP/TEMP redirect gcc's
+    # own intermediates.  `cygpath -m` yields a forward-slash Windows path
+    # (e.g. C:/.../.gotmp) that native go.exe and gcc both accept, avoiding
+    # MSYS-path and backslash-quoting pitfalls.
+    if [[ "$(uname)" == MINGW* ]]; then
+        local _gotmp="${BASE_DIR}/.gotmp"
+        mkdir -p "${_gotmp}"
+        if command -v cygpath > /dev/null 2>&1; then
+            _gotmp="$(cygpath -m "${_gotmp}")"
+        fi
+        export GOTMPDIR="${_gotmp}" TMP="${_gotmp}" TEMP="${_gotmp}"
+        echo "cicd_setup_go_toolchain: GOTMPDIR=${GOTMPDIR} (workspace-local; avoids C:\\Windows\\SystemTemp)"
+    fi
+
     echo "cicd_setup_go_toolchain: GOROOT=${GOROOT}"
     echo "cicd_setup_go_toolchain: GOPATH=${GOPATH:-}"
     echo "cicd_setup_go_toolchain: GO=${GO}"

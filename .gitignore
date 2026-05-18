@@ -26,6 +26,10 @@ go.work.sum
 
 bin/
 
+# Workspace-local Go build temp (Windows CI: keeps cmd/go $WORK off
+# C:\Windows\SystemTemp where gcc/cc1 fail under the LocalSystem agent)
+.gotmp/
+
 # Where we extract our qdb archives
 qdb/
 

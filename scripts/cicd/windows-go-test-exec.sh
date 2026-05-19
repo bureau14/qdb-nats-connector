@@ -17,14 +17,18 @@ fi
 exe="$1"
 shift
 
-if command -v cygpath >/dev/null 2>&1; then
-    qdb_bin_win="$(cygpath -w "${QDB_API_DIR}/bin")"
-    qdb_lib_win="$(cygpath -w "${QDB_LIB_DIR}")"
+if cygpath_bin="$(command -v cygpath 2>/dev/null)"; then
+    qdb_bin_win="$(${cygpath_bin} -w "${QDB_API_DIR}/bin")"
+    qdb_lib_win="$(${cygpath_bin} -w "${QDB_LIB_DIR}")"
     mingw_bin_win="C:\\mingw64\\bin"
-    path_win="$(cygpath -wp "${PATH}")"
+    path_win="$(${cygpath_bin} -wp "${PATH}")"
+    exe="$(${cygpath_bin} -u "${exe}")"
 
+    # Important: do all cygpath calls before exporting a native semicolon PATH.
+    # Once PATH is in native Windows form, MSYS bash can no longer find Unix
+    # tools by command lookup, but the Windows test process will receive the
+    # loader-friendly native PATH it needs.
     export PATH="${qdb_bin_win};${qdb_lib_win};${mingw_bin_win};${path_win}"
-    exe="$(cygpath -u "${exe}")"
 else
     export PATH="${QDB_API_DIR}/bin:${QDB_LIB_DIR}:/c/mingw64/bin:${PATH}"
 fi

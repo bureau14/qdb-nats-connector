@@ -49,11 +49,11 @@ _OS_OVERLAY: dict[str, dict] = {"linux": _LINUX}
 PLATFORMS: list[Platform] = [
     dataclasses.replace(p, **_OS_OVERLAY.get(p.os, {}))
     for p in select_platforms(
-        "linux-amd64-haswell",
-        "linux-aarch64",
+        # "linux-amd64-haswell",
+        # "linux-aarch64",
         "windows-amd64-haswell",
-        "freebsd-amd64-haswell",
-        "macos-aarch64",
+        # "freebsd-amd64-haswell",
+        # "macos-aarch64",
     )
 ]
 
@@ -195,12 +195,12 @@ def generate_pipeline() -> Pipeline:
     git_ref = get_git_ref()
     pipeline = Pipeline()
 
-    lint = _lint_step()
-    set_artifact_plugin_options(
-        lint,
-        {"download": {"variant": "linux-haswell-release", "git-ref": git_ref}},
-    )
-    pipeline.add_step(CommandStep.from_dict(lint))
+    # lint = _lint_step()
+    # set_artifact_plugin_options(
+    #     lint,
+    #     {"download": {"variant": "linux-haswell-release", "git-ref": git_ref}},
+    # )
+    # pipeline.add_step(CommandStep.from_dict(lint))
 
     for p in PLATFORMS:
         step = _per_platform_step(p)

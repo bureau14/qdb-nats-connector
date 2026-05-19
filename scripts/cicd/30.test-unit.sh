@@ -131,6 +131,96 @@ if [[ "$(uname)" == MINGW* ]]; then
     GO_EXTRA_FLAGS=(-x -v)
 fi
 
-echo "Running unit tests (no -tags=integration)"
-# -buildvcs=false: same rhel7 uid-929/no-passwd VCS-stamping failure as 20.build.sh.
-"${GO}" test "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -short -race ./...
+run_windows_cgo_race_tests_from_stable_dir() {
+    local test_dir
+    test_dir="${TMPDIR:-/tmp}/qdb-cgo-test-exes"
+
+    echo "Running Windows cgo/race tests from stable executable directory: ${test_dir}"
+    rm -rf "${test_dir}"
+    mkdir -p "${test_dir}"
+
+    local packages=(
+        "./connector/hooks:hooks.test.exe"
+        "./connector/resilience:resilience.test.exe"
+        "./internal/parser:parser.test.exe"
+        "./test/integration:integration.test.exe"
+    )
+
+    local entry pkg exe
+    for entry in "${packages[@]}"; do
+        pkg="${entry%%:*}"
+        exe="${entry##*:}"
+        echo "+ ${GO} test ${GO_EXTRA_FLAGS[*]} -buildvcs=false -short -race -c -o ${test_dir}/${exe} ${pkg}"
+        "${GO}" test "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -short -race -c -o "${test_dir}/${exe}" "${pkg}"
+    done
+
+    echo "Copying native DLLs beside stable Windows test executables"
+    (
+        shopt -s nullglob
+        dlls=(qdb/bin/*.dll qdb/lib/*.dll /c/mingw64/bin/*.dll)
+        if (( ${#dlls[@]} == 0 )); then
+            echo "WARNING: no qdb or MinGW DLLs matched qdb/bin/*.dll, qdb/lib/*.dll, or /c/mingw64/bin/*.dll" >&2
+            exit 0
+        fi
+        cp -v "${dlls[@]}" "${test_dir}/"
+    )
+
+    (
+        cd "${test_dir}"
+        echo "+ ./hooks.test.exe -test.v -test.short"
+        ./hooks.test.exe -test.v -test.short
+        echo "+ ./resilience.test.exe -test.v -test.short"
+        ./resilience.test.exe -test.v -test.short
+        echo "+ ./parser.test.exe -test.v -test.short"
+        ./parser.test.exe -test.v -test.short
+        echo "+ ./integration.test.exe -test.v -test.short"
+        ./integration.test.exe -test.v -test.short
+    )
+}
+
+run_windows_remaining_unit_tests() {
+    local excluded_packages=(
+        "github.com/bureau14/qdb-nats-connector/connector/hooks"
+        "github.com/bureau14/qdb-nats-connector/connector/resilience"
+        "github.com/bureau14/qdb-nats-connector/internal/parser"
+        "github.com/bureau14/qdb-nats-connector/test/integration"
+    )
+
+    local remaining_packages=()
+    local listed_pkg excluded_pkg skip
+    while IFS= read -r listed_pkg; do
+        skip=0
+        for excluded_pkg in "${excluded_packages[@]}"; do
+            if [[ "${listed_pkg}" == "${excluded_pkg}" ]]; then
+                skip=1
+                break
+            fi
+        done
+        if [[ "${skip}" -eq 0 ]]; then
+            remaining_packages+=("${listed_pkg}")
+        fi
+    done < <("${GO}" list ./...)
+
+    if (( ${#remaining_packages[@]} == 0 )); then
+        echo "No remaining non-workaround packages to test"
+        return 0
+    fi
+
+    echo "Running remaining Windows unit tests (excluding cgo/race packages handled from stable dir)"
+    # -buildvcs=false: same rhel7 uid-929/no-passwd VCS-stamping failure as 20.build.sh.
+    "${GO}" test "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -short -race "${remaining_packages[@]}"
+}
+
+if [[ "$(uname)" == MINGW* ]]; then
+    # Windows loader checks the generated test executable's directory before PATH.
+    # Go's normal `go test` runs cgo/race test exes from ephemeral $WORK dirs, so
+    # qdb_api.dll / MinGW runtime DLLs are not beside the executable under the
+    # Buildkite service context. Build the known cgo/race packages into a stable
+    # directory, copy native DLLs next to them, then run the rest normally.
+    run_windows_cgo_race_tests_from_stable_dir
+    run_windows_remaining_unit_tests
+else
+    echo "Running unit tests (no -tags=integration)"
+    # -buildvcs=false: same rhel7 uid-929/no-passwd VCS-stamping failure as 20.build.sh.
+    "${GO}" test "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -short -race ./...
+fi

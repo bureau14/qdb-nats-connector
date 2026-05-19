@@ -292,15 +292,15 @@ mkdir -p "${BASE_DIR}/bin"
 # in the subprocess go-build spawns.  The commit SHA is already injected via
 # -X main.commit=${GIT_SHA}, so auto-stamping is redundant here.
 GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
-    "${GO}" build "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    "${GO}" build "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
     -o "${BASE_DIR}/bin/qdb-nats-connector${SUFFIX}" ./cmd/qdb-nats-connector
 
 GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
-    "${GO}" build "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    "${GO}" build "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
     -o "${BASE_DIR}/bin/qdb-data-gen${SUFFIX}" ./tools/generator
 
 GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
-    "${GO}" build "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    "${GO}" build "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
     -o "${BASE_DIR}/bin/qdb-data-loader${SUFFIX}" ./tools/loader
 
 CONNECTOR_BIN="${BASE_DIR}/bin/qdb-nats-connector${SUFFIX}"

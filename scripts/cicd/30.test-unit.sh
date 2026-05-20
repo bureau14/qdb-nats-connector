@@ -122,10 +122,6 @@ __DIAG_EOF__
 fi
 
 # --- test ---
-
-# GO_EXTRA_FLAGS adds -x -v on Windows to capture full gcc/cgo subprocess
-# output during cgo'd test-binary linking (companion to the diagnostic
-# dump above; remove together when pruning).
 GO_EXTRA_FLAGS=()
 
 echo "Running unit tests (no -tags=integration)"

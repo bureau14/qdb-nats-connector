@@ -2,9 +2,9 @@
 
 Loads step templates from `steps/*.yml`, substitutes `{placeholder}`
 vars, overlays env, the Docker plugin, and qdb-artifacts options
-(variant + git-ref) per platform. Produces a 9-step graph: one
-lint step in parallel with eight per-platform combined steps,
-each combined step running build, unit, integration, and e2e
+(variant + git-ref) per platform. Produces a 7-step graph: one lint
+step plus one docker step in parallel with five per-platform combined
+steps; each combined step runs build, unit, integration, and e2e
 scripts in sequence.
 
 Usage:
@@ -149,6 +149,30 @@ def _lint_step() -> dict:
     return step
 
 
+def _docker_step() -> dict:
+    """Build the standalone docker-image step.
+
+    Loads the `_docker.yml` template, layers the global env on top of any
+    template-declared env using the canonical merge idiom, and returns
+    the step dict.  Unlike `_lint_step` and `_per_platform_step` this
+    function does NOT call `apply_docker(...)` -- the step runs on the
+    bare host of the default-debian-amd64 agent so the host's docker
+    daemon is available for `docker build` / `docker run` invocations
+    inside `scripts/cicd/60.docker.sh`.
+
+    Unlike the lint and per-platform steps this function does NOT inject
+    `qdb-artifacts` plugin options either -- the Dockerfile downloads
+    `libqdb_api` directly from `download.quasar.ai` (temporary
+    scaffolding; will be superseded once QuasarDB 3.14.3 ships an
+    official public artifact for the connector).
+    """
+    step = load_template(STEPS_DIR / "_docker.yml")
+    env = merge_env(GLOBAL_ENV, STEP_ENV.get("docker", {}))
+    env.update(step.get("env") or {})
+    step["env"] = env
+    return step
+
+
 def _per_platform_step(p: Platform) -> dict:
     """Generate the combined per-platform step (build + unit +
     integration + e2e) for one platform.
@@ -180,11 +204,16 @@ def _per_platform_step(p: Platform) -> dict:
 def generate_pipeline() -> Pipeline:
     """Assemble the full pipeline and return it.
 
-    Resulting graph (6 steps total, all running in parallel):
+    Resulting graph (7 steps total, all running in parallel):
         lint (1)
+        docker (1)
         build-{slug} x5   (each running build + unit + integration + e2e
                            in sequence, then uploading the archive and
                            promoting the LATEST_SUCCESSFUL pointer)
+
+    The docker step is a standalone bare-host build of the
+    bureau14/qdb-nats-connector image; it runs in parallel with lint
+    and the per-platform combined steps and has no depends_on.
 
     Each per-platform step's qdb-artifacts plugin entry receives the same
     ``variant`` + ``git-ref`` defaults injected into its ``download``,
@@ -201,6 +230,12 @@ def generate_pipeline() -> Pipeline:
         {"download": {"variant": "linux-haswell-release", "git-ref": git_ref}},
     )
     pipeline.add_step(CommandStep.from_dict(lint))
+
+    # Standalone docker step: builds the bureau14/qdb-nats-connector image
+    # from the repo-root Dockerfile and runs a `--version` smoke test.
+    # No depends_on, no qdb-artifacts (Dockerfile is self-contained),
+    # no docker plugin wrapper (runs on the bare host).
+    pipeline.add_step(CommandStep.from_dict(_docker_step()))
 
     for p in PLATFORMS:
         step = _per_platform_step(p)

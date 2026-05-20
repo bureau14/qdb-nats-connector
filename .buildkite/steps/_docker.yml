@@ -1,0 +1,22 @@
+# Standalone docker-image step. Runs on the bare default-debian-amd64
+# agent (no docker plugin wrapper) so the host's docker daemon is
+# available to scripts/cicd/60.docker.sh. No qdb-artifacts plugin --
+# the Dockerfile downloads libqdb_api directly from download.quasar.ai.
+
+label: ":docker: build & smoke-test image"
+key: docker
+
+env:
+  AWS_DEFAULT_REGION: "eu-west-1"
+
+commands:
+  - bash scripts/cicd/60.docker.sh
+
+timeout_in_minutes: 60
+
+retry:
+  automatic:
+    limit: 3
+
+agents:
+  queue: "default-debian-amd64"

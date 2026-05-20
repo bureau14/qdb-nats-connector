@@ -135,12 +135,7 @@ echo "Running unit tests (no -tags=integration)"
 # -buildvcs=false: same rhel7 uid-929/no-passwd VCS-stamping failure as 20.build.sh.
 if [[ "$(uname)" == MINGW* ]]; then
     echo "Running Windows unit tests with native PATH exec wrapper"
-    # The wrapper intentionally does not copy DLLs. It converts PATH to native
-    # Windows form before each generated *.test.exe starts, so the Windows
-    # loader can resolve repo-local qdb DLLs and MinGW runtimes under the
-    # Buildkite/WinSW service context.
-    "${GO}" test "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -short -race \
-        -exec "bash ${SCRIPT_DIR}/windows-go-test-exec.sh" ./...
-else
-    "${GO}" test "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -short -race ./...
+    GO_EXTRA_FLAGS+=(-exec "bash ${SCRIPT_DIR}/windows-go-test-exec.sh")
 fi
+
+"${GO}" test "${GO_EXTRA_FLAGS[@]}" -buildvcs=false -short -race ./...

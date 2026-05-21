@@ -1,6 +1,8 @@
 // Package generators provides concrete implementations of field generators.
 // This package contains the min calculator generator which computes minimum values
 // from specified source fields with optional multiplication.
+//
+//nolint:dupl // structurally mirrors max.go; merging would obscure semantics
 package generators
 
 import (
@@ -13,6 +15,8 @@ import (
 
 // minGenerator calculates the minimum value from multiple source fields.
 // It stores source field names, an optional multiplier, and context for receiving generated values.
+//
+//nolint:dupl // structurally mirrors max generator; merging would obscure semantics
 type minGenerator struct {
 	sources  []string
 	multiply float64

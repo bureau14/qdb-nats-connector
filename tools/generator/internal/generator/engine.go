@@ -105,6 +105,106 @@ func (e *Engine) GetGenerators() map[string]*GeneratorInstance {
 	return e.generators
 }
 
+// GenerateRecordsParallel generates records using multiple workers for improved performance.
+// Each worker generates a portion of the total count and results are written in order.
+// This maintains deterministic output while leveraging parallelism for faster generation.
+func (e *Engine) GenerateRecordsParallel(ctx context.Context, count, workers int, writer io.Writer) error {
+	if workers <= 0 {
+		workers = 1
+	}
+
+	// Calculate records per worker
+	recordsPerWorker := count / workers
+	remainder := count % workers
+
+	// Channel for collecting results in order
+	type result struct {
+		index   int
+		records []interface{}
+		err     error
+	}
+	resultChan := make(chan result, workers)
+
+	// Launch workers
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		workerCount := recordsPerWorker
+		if i < remainder {
+			workerCount++
+		}
+
+		go func(workerID, numRecords int) {
+			defer wg.Done()
+
+			records := make([]interface{}, 0, numRecords)
+			for range numRecords {
+				select {
+				case <-ctx.Done():
+					resultChan <- result{index: workerID, err: ctx.Err()}
+
+					return
+				default:
+				}
+
+				record, err := e.generateSingleRecord(ctx)
+				if err != nil {
+					resultChan <- result{index: workerID, err: fmt.Errorf("worker %d failed: %w", workerID, err)}
+
+					return
+				}
+				records = append(records, record)
+			}
+
+			resultChan <- result{index: workerID, records: records}
+		}(i, workerCount)
+	}
+
+	// Wait for all workers to complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect and write results in order
+	results := make(map[int][]interface{})
+	for res := range resultChan {
+		if res.err != nil {
+			return res.err
+		}
+		results[res.index] = res.records
+	}
+
+	// Write results in order
+	encoder := json.NewEncoder(writer)
+	for i := range workers {
+		records, ok := results[i]
+		if !ok {
+			continue
+		}
+
+		for _, record := range records {
+			// Check if record is a string (e.g., from base64 transformation)
+			switch v := record.(type) {
+			case string:
+				// Write raw string directly (for base64 output)
+				_, err := fmt.Fprintln(writer, v)
+				if err != nil {
+					return fmt.Errorf("failed to write record: %w", err)
+				}
+			default:
+				// JSON encode structured data
+				err := encoder.Encode(record)
+				if err != nil {
+					return fmt.Errorf("failed to encode record: %w", err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // generateSingleRecord creates a single record by calling all field generators
 func (e *Engine) generateSingleRecord(ctx context.Context) (interface{}, error) {
 	record := make(map[string]interface{})
@@ -174,104 +274,6 @@ func (e *Engine) generateSingleRecord(ctx context.Context) (interface{}, error) 
 
 	// No transformations, return record as before
 	return record, nil
-}
-
-// GenerateRecordsParallel generates records using multiple workers for improved performance.
-// Each worker generates a portion of the total count and results are written in order.
-// This maintains deterministic output while leveraging parallelism for faster generation.
-func (e *Engine) GenerateRecordsParallel(ctx context.Context, count, workers int, writer io.Writer) error {
-	if workers <= 0 {
-		workers = 1
-	}
-	
-	// Calculate records per worker
-	recordsPerWorker := count / workers
-	remainder := count % workers
-	
-	// Channel for collecting results in order
-	type result struct {
-		index   int
-		records []interface{}
-		err     error
-	}
-	resultChan := make(chan result, workers)
-	
-	// Launch workers
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		workerCount := recordsPerWorker
-		if i < remainder {
-			workerCount++
-		}
-		
-		go func(workerID, numRecords int) {
-			defer wg.Done()
-			
-			records := make([]interface{}, 0, numRecords)
-			for j := 0; j < numRecords; j++ {
-				select {
-				case <-ctx.Done():
-					resultChan <- result{index: workerID, err: ctx.Err()}
-					return
-				default:
-				}
-				
-				record, err := e.generateSingleRecord(ctx)
-				if err != nil {
-					resultChan <- result{index: workerID, err: fmt.Errorf("worker %d failed: %w", workerID, err)}
-					return
-				}
-				records = append(records, record)
-			}
-			
-			resultChan <- result{index: workerID, records: records}
-		}(i, workerCount)
-	}
-	
-	// Wait for all workers to complete
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-	
-	// Collect and write results in order
-	results := make(map[int][]interface{})
-	for res := range resultChan {
-		if res.err != nil {
-			return res.err
-		}
-		results[res.index] = res.records
-	}
-	
-	// Write results in order
-	encoder := json.NewEncoder(writer)
-	for i := 0; i < workers; i++ {
-		records, ok := results[i]
-		if !ok {
-			continue
-		}
-		
-		for _, record := range records {
-			// Check if record is a string (e.g., from base64 transformation)
-			switch v := record.(type) {
-			case string:
-				// Write raw string directly (for base64 output)
-				_, err := fmt.Fprintln(writer, v)
-				if err != nil {
-					return fmt.Errorf("failed to write record: %w", err)
-				}
-			default:
-				// JSON encode structured data
-				err := encoder.Encode(record)
-				if err != nil {
-					return fmt.Errorf("failed to encode record: %w", err)
-				}
-			}
-		}
-	}
-	
-	return nil
 }
 
 // setNestedValue sets a value at a nested path within a map structure.

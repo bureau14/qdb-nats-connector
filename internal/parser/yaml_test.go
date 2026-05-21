@@ -24,7 +24,7 @@ import (
 
 // stripNullTerminator removes trailing null byte from string if present
 func stripNullTerminator(s string) string {
-	if len(s) > 0 && s[len(s)-1] == 0 {
+	if s != "" && s[len(s)-1] == 0 {
 		return s[:len(s)-1]
 	}
 
@@ -1019,6 +1019,8 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 
 // TestYAMLParserColumnSynchronizationValidation tests the new column synchronization validation
 // added to prevent segfault issues during parser initialization
+//
+//nolint:dupl // sub-tests intentionally mirror each other to validate distinct mismatch scenarios
 func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 	t.Run("valid synchronization passes", func(t *testing.T) {
 		// Test that properly synchronized columns pass validation
@@ -1351,6 +1353,8 @@ func TestYAMLParser_MissingExtractTableStep(t *testing.T) {
 }
 
 // TestYAMLParser_EmptyTableName tests error case for empty table name
+//
+//nolint:dupl // mirrors TestYAMLParser_MissingSourceField but exercises a different failure mode
 func TestYAMLParser_EmptyTableName(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
@@ -1394,6 +1398,8 @@ func TestYAMLParser_EmptyTableName(t *testing.T) {
 }
 
 // TestYAMLParser_MissingSourceField tests error case for missing source field
+//
+//nolint:dupl // mirrors TestYAMLParser_EmptyTableName but exercises a different failure mode
 func TestYAMLParser_MissingSourceField(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{

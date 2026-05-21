@@ -1,3 +1,5 @@
+//go:build integration
+
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
 // Package integration provides integration test helpers.
 package integration
@@ -135,9 +137,9 @@ transformations:
 
 	// Write config to temp file
 	configFile := fmt.Sprintf("/tmp/test_compute_field_segfault_%d.yaml", time.Now().Unix())
-	err = os.WriteFile(configFile, []byte(yamlConfig), 0o644)
+	err = os.WriteFile(configFile, []byte(yamlConfig), 0o600)
 	require.NoError(t, err, "Failed to write YAML config")
-	defer os.Remove(configFile)
+	defer func() { _ = os.Remove(configFile) }()
 
 	p, err := parser.NewYAMLParser(configFile)
 	require.NoError(t, err, "Failed to create YAML parser")

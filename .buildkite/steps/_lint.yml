@@ -1,0 +1,31 @@
+label: ":golangci-lint: lint"
+key: lint
+
+env:
+  AWS_DEFAULT_REGION: "eu-west-1"
+
+# qdb-artifacts runs first (pre-command hook order) to populate qdb/ with
+# CGO headers before 10.lint.sh starts.  The docker overlay (bureau14/builder:rhel7)
+# is injected by pipeline.py::_lint_step via apply_docker so that the CGO env
+# and Go toolchain env propagate naturally into the container.
+plugins:
+  - bureau14/qdb-artifacts#master:
+      download:
+        clean: true
+        projects:
+        - project_id: "quasardb-build"
+          output-dir: "qdb"
+          extract: true
+          files:
+            - "*-c-api.tar.zst!*"
+            - "*-server.tar.zst!*"
+            - "*-utils.tar.zst!*"
+      promote: {}
+
+commands:
+  - bash scripts/cicd/10.lint.sh
+
+timeout_in_minutes: 15
+
+agents:
+  queue: "default-debian-amd64"

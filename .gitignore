@@ -40,6 +40,7 @@ users.cfg
 # Examples specific
 examples/*.log
 examples/*.pid
+examples/*.jsonl
 
 # Datatbase log file
 *.out.txt
@@ -79,3 +80,6 @@ claude_desktop_config.json
 # Claude code local rules
 .claude/settings.local.json
 **/testdata/**
+
+# Python virtual environments (e.g. .buildkite/.venv used for pipeline.py)
+.venv/

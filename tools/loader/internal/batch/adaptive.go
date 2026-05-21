@@ -84,6 +84,11 @@ func (ab *AdaptiveBatcher) Start(ctx context.Context) error {
 	return nil
 }
 
+// GetMetrics returns current adaptive batching metrics
+func (ab *AdaptiveBatcher) GetMetrics() Metrics {
+	return ab.metrics.GetMetrics()
+}
+
 // runBatchingLoop runs the main batching logic with adaptive size
 func (ab *AdaptiveBatcher) runBatchingLoop(ctx context.Context) {
 	for {
@@ -159,6 +164,8 @@ func (ab *AdaptiveBatcher) runAdaptiveLoop(ctx context.Context) {
 }
 
 // sendAdaptiveBatch sends the current batch and updates metrics
+//
+//nolint:dupl // mirrors Batcher.sendBatch; differences in metrics ownership prevent extraction
 func (ab *AdaptiveBatcher) sendAdaptiveBatch() {
 	if len(ab.messages) == 0 {
 		return
@@ -277,11 +284,6 @@ func (ab *AdaptiveBatcher) adjustBatchSize() {
 			"messages_processed", metrics.MessagesProcessed,
 			"batches_created", metrics.BatchesCreated)
 	}
-}
-
-// GetMetrics returns current adaptive batching metrics
-func (ab *AdaptiveBatcher) GetMetrics() Metrics {
-	return ab.metrics.GetMetrics()
 }
 
 // Helper functions for min/max

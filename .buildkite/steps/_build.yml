@@ -31,6 +31,11 @@ plugins:
       upload:
         files: "artifacts/**/*.tar.zst"
       promote: {}
+  - bureau14/qdb-test-report#master:
+      title: "Test report {slug}"
+      job:
+        variant: {slug}
+        junit_input_path: "test-reports/*.xml"
 
 timeout_in_minutes: 60
 

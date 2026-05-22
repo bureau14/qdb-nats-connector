@@ -49,4 +49,5 @@ if [[ "$(uname)" == MINGW* ]]; then
     GO_EXTRA_FLAGS+=(-exec "bash ${SCRIPT_DIR}/windows-go-test-exec.sh")
 fi
 
-"${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -short -race ./...
+# Convert test output to JUnit XML so buildkite can understand it
+"${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -short -v ./... | ${GO_JUNIT_REPORT} -out "${TEST_REPORT_DIR}/unit-junit-report.xml" -iocopy

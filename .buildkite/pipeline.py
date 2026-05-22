@@ -237,9 +237,11 @@ def generate_pipeline() -> Pipeline:
     # no docker plugin wrapper (runs on the bare host).
     pipeline.add_step(CommandStep.from_dict(_docker_step()))
 
+    variants = []
     for p in PLATFORMS:
         step = _per_platform_step(p)
         variant = p.slug("release")
+        variants.append(variant)
         set_artifact_plugin_options(
             step,
             {
@@ -249,6 +251,10 @@ def generate_pipeline() -> Pipeline:
             },
         )
         pipeline.add_step(CommandStep.from_dict(step))
+
+    step = load_template(STEPS_DIR / "_test_report.yml")
+    step["depends_on"] = [f"build-{variant}" for variant in variants]
+    pipeline.add_step(CommandStep.from_dict(step))
 
     return pipeline
 

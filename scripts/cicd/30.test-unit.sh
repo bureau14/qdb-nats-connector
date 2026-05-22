@@ -50,4 +50,4 @@ if [[ "$(uname)" == MINGW* ]]; then
 fi
 
 # Convert test output to JUnit XML so buildkite can understand it
-"${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -short -v ./... | ${GO_JUNIT_REPORT} -out "${TEST_REPORT_DIR}/unit-junit-report.xml" -iocopy
+"${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -short -v -race ./... | ${GO_JUNIT_REPORT} -out "${TEST_REPORT_DIR}/unit-junit-report.xml" -iocopy

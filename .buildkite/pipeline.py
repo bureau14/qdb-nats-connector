@@ -241,7 +241,7 @@ def generate_pipeline() -> Pipeline:
     for p in PLATFORMS:
         step = _per_platform_step(p)
         variant = p.slug("release")
-        variants.append(variant)
+        variants.append(p.slug())
         set_artifact_plugin_options(
             step,
             {

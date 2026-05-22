@@ -77,9 +77,9 @@ CPU_ENV: dict[str, dict[str, str]] = {
 }
 
 # Go version slug used to form the per-OS agent env var names.
-# The slug is the major+minor with no dot: 1.24 -> "124".
+# The slug is the major+minor with no dot: 1.26 -> "126".
 # Changing this constant is the single point of control for the Go version.
-GO_VERSION_SLUG = "124"  # Go 1.24; pinned per plan decision 1.
+GO_VERSION_SLUG = "126"  # Go 1.26
 
 
 def _go_env_for_agent() -> dict[str, str]:

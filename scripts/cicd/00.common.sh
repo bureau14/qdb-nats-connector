@@ -20,6 +20,8 @@ else
 fi
 BASE_DIR="$(dirname "$(dirname "${_CICD_SCRIPT_DIR}")")"
 export BASE_DIR
+export TEST_REPORT_DIR="${BASE_DIR}/test-reports"
+mkdir -p "${TEST_REPORT_DIR}"
 
 # cicd_setup_qdb_env -- source .envrc to populate CGO environment variables,
 # then log the OS-specific subset of those variables for CI diagnostics.
@@ -114,10 +116,23 @@ cicd_setup_go_toolchain() {
     PATH="${GOROOT}/bin:${PATH}"
     export PATH
 
+    # We need the output of `go test` to be in JUnit format for Buildkite's test reporting, but `go test` doesn't support that natively.
+    # We use the go-junit-report tool to convert the output of `go test` into JUnit XML format.
+    # Validate that go-junit-report is installed, if not install it
+    if ! command -v go-junit-report > /dev/null 2>&1; then
+        echo "go-junit-report not found, installing"
+        ${GO} install github.com/jstemmer/go-junit-report/v2@latest
+    else
+        echo "go-junit-report is already installed; skipping installation."
+    fi
+    export GO_JUNIT_REPORT="${GOPATH}/bin/go-junit-report"
+    $GO_JUNIT_REPORT --version
+
     echo "cicd_setup_go_toolchain: GOROOT=${GOROOT}"
     echo "cicd_setup_go_toolchain: GOPATH=${GOPATH:-}"
     echo "cicd_setup_go_toolchain: GO=${GO}"
     echo "cicd_setup_go_toolchain: $("${GO}" version)"
+    echo "cicd_setup_go_toolchain: GO_JUNIT_REPORT=${GO_JUNIT_REPORT}"
 }
 
 export -f cicd_setup_go_toolchain

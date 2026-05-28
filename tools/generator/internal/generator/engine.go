@@ -21,6 +21,12 @@ import (
 type Engine struct {
 	template   *internal.Template
 	generators map[string]*GeneratorInstance
+
+	// mu serializes access to the shared, stateful generator instances.
+	// Sequential generators (sequence, timestamp) mutate internal counters on
+	// every call; without this lock concurrent workers race and their counters
+	// drift out of lockstep, breaking cross-field alignment (e.g. building/floor).
+	mu sync.Mutex
 }
 
 // NewEngine creates a new generation engine from a template file.
@@ -106,8 +112,10 @@ func (e *Engine) GetGenerators() map[string]*GeneratorInstance {
 }
 
 // GenerateRecordsParallel generates records using multiple workers for improved performance.
-// Each worker generates a portion of the total count and results are written in order.
-// This maintains deterministic output while leveraging parallelism for faster generation.
+// Each worker generates a portion of the total count and results are written in worker order.
+// Field generation is serialized via e.mu so stateful generators (sequence, timestamp)
+// stay in lockstep and remain race-free; per-record transformations run in parallel.
+// Record order across workers is not deterministic, but the produced set of records is.
 func (e *Engine) GenerateRecordsParallel(ctx context.Context, count, workers int, writer io.Writer) error {
 	if workers <= 0 {
 		workers = 1
@@ -147,7 +155,16 @@ func (e *Engine) GenerateRecordsParallel(ctx context.Context, count, workers int
 				default:
 				}
 
-				record, err := e.generateSingleRecord(ctx)
+				e.mu.Lock()
+				rawRecord, err := e.generateRawRecord(ctx)
+				e.mu.Unlock()
+				if err != nil {
+					resultChan <- result{index: workerID, err: fmt.Errorf("worker %d failed: %w", workerID, err)}
+
+					return
+				}
+
+				record, err := e.applyTransformations(ctx, rawRecord)
 				if err != nil {
 					resultChan <- result{index: workerID, err: fmt.Errorf("worker %d failed: %w", workerID, err)}
 
@@ -205,40 +222,35 @@ func (e *Engine) GenerateRecordsParallel(ctx context.Context, count, workers int
 	return nil
 }
 
-// generateSingleRecord creates a single record by calling all field generators
+// generateSingleRecord creates a single record by generating its fields and
+// applying post-transformations. Used by the serial generation path.
 func (e *Engine) generateSingleRecord(ctx context.Context) (interface{}, error) {
+	record, err := e.generateRawRecord(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return e.applyTransformations(ctx, record)
+}
+
+// generateRawRecord produces the structured field map for one record.
+// It mutates the shared, stateful generator instances, so callers running
+// concurrently must hold e.mu. Transformations are applied separately.
+func (e *Engine) generateRawRecord(ctx context.Context) (map[string]interface{}, error) {
 	record := make(map[string]interface{})
 
 	// Process fields in order to respect dependencies
 	for _, fieldDef := range e.template.Fields {
-		generator := e.generators[fieldDef.Name]
-
-		var value interface{}
-		var err error
-
-		// Check if generator supports context-aware generation
-		if genWithCtx, ok := generator.GetGenerator().(internal.FieldGeneratorWithContext); ok {
-			value, err = genWithCtx.GenerateWithContext(ctx, record)
-		} else {
-			value, err = generator.Generate(ctx)
-		}
-
+		value, err := e.generateFieldValue(ctx, fieldDef, record)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate field %s: %w", fieldDef.Name, err)
 		}
 
-		// Skip internal fields in final output
-		if !fieldDef.Internal {
-			// Handle nested paths (e.g., "device.info.id")
-			if strings.Contains(fieldDef.Name, ".") {
-				setNestedValue(record, fieldDef.Name, value)
-			} else {
-				// Existing flat fields work exactly as before
-				record[fieldDef.Name] = value
-			}
-		} else {
-			// Store internal fields in record for dependencies but don't output them
+		// Store internal fields for dependencies; handle nested output paths.
+		if fieldDef.Internal || !strings.Contains(fieldDef.Name, ".") {
 			record[fieldDef.Name] = value
+		} else {
+			setNestedValue(record, fieldDef.Name, value)
 		}
 	}
 
@@ -253,27 +265,44 @@ func (e *Engine) generateSingleRecord(ctx context.Context) (interface{}, error) 
 		}
 	}
 
-	// Apply post-transformations if defined
-	if len(e.template.PostTransformations) > 0 {
-		result := interface{}(record)
+	return record, nil
+}
 
-		for _, transformDef := range e.template.PostTransformations {
-			t, err := transformer.GetTransformer(transformDef.Type, transformDef.Config)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create transformer %s: %w", transformDef.Type, err)
-			}
+// generateFieldValue draws a single field value, using context-aware generation
+// when the generator can read previously generated fields in the record.
+func (e *Engine) generateFieldValue(ctx context.Context, fieldDef internal.FieldDefinition, record map[string]interface{}) (interface{}, error) {
+	generator := e.generators[fieldDef.Name]
 
-			result, err = t.Transform(ctx, result)
-			if err != nil {
-				return nil, fmt.Errorf("transformation %s failed: %w", transformDef.Type, err)
-			}
-		}
-
-		return result, nil
+	if genWithCtx, ok := generator.GetGenerator().(internal.FieldGeneratorWithContext); ok {
+		return genWithCtx.GenerateWithContext(ctx, record)
 	}
 
-	// No transformations, return record as before
-	return record, nil
+	return generator.Generate(ctx)
+}
+
+// applyTransformations runs the template's post-transformations over a record.
+// It allocates a fresh transformer per step and only touches the caller-owned
+// record, so it is safe to run concurrently across workers.
+func (e *Engine) applyTransformations(ctx context.Context, record map[string]interface{}) (interface{}, error) {
+	if len(e.template.PostTransformations) == 0 {
+		return record, nil
+	}
+
+	result := interface{}(record)
+
+	for _, transformDef := range e.template.PostTransformations {
+		t, err := transformer.GetTransformer(transformDef.Type, transformDef.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create transformer %s: %w", transformDef.Type, err)
+		}
+
+		result, err = t.Transform(ctx, result)
+		if err != nil {
+			return nil, fmt.Errorf("transformation %s failed: %w", transformDef.Type, err)
+		}
+	}
+
+	return result, nil
 }
 
 // setNestedValue sets a value at a nested path within a map structure.

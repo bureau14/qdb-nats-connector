@@ -21,11 +21,14 @@ NUM_MESSAGES="${NUM_MESSAGES:-1000}"
 PID_FILE="$SCRIPT_DIR/finance-ohlc-connector.pid"
 LOG_FILE="$SCRIPT_DIR/finance-ohlc-connector.log"
 CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
-EXPORT_DIR="$SCRIPT_DIR/exports"
-TESTDATA_DIR="${TESTDATA_DIR:-$SCRIPT_DIR/testdata}"
+DATASETS_DIR="${DATASETS_DIR:-$SCRIPT_DIR/datasets}"
 
-# Define INPUT_FILE with row-count naming for consistent access across functions
-INPUT_FILE="$TESTDATA_DIR/${EXAMPLE}-${NUM_MESSAGES}-input.data"
+# Per-(example, message-count) dataset directory: the single source of truth.
+# Its contents (input.data, expected/, metadata.json) ARE the archive contents.
+DATASET_DIR="$DATASETS_DIR/${EXAMPLE}-${NUM_MESSAGES}"
+INPUT_FILE="$DATASET_DIR/input.data"
+EXPECTED_DIR="$DATASET_DIR/expected"
+ACTUAL_DIR="$DATASET_DIR/actual"
 
 # Worker configuration
 WORKERS=${WORKERS:-$(get_default_workers)}
@@ -68,7 +71,7 @@ usage() {
     echo
     echo "Environment variables:"
     echo "  NUM_MESSAGES   - Number of messages to generate (default: 1000)"
-    echo "  TESTDATA_DIR   - Directory for test data (default: ./testdata)"
+    echo "  DATASETS_DIR   - Directory for dataset archives and extracted data (default: ./datasets)"
     echo "  WORKERS        - Number of worker threads (default: CPU-based)"
     echo "  DEBUG          - Enable debug logging (1 = enabled)"
     exit 1
@@ -80,9 +83,9 @@ action_generate() {
         die "Invalid NUM_MESSAGES value: '$NUM_MESSAGES'. Must be a positive integer."
     fi
 
-    # Ensure testdata directory exists
-    mkdir -p "$TESTDATA_DIR"
-    
+    # Ensure the dataset directory exists (input.data is written inside it)
+    mkdir -p "$DATASET_DIR"
+
     log_info "Generating $NUM_MESSAGES OHLC messages with $WORKERS workers..."
     ../bin/qdb-data-gen finance-ohlc-generator.yaml --count "$NUM_MESSAGES" --workers "$WORKERS" > "$INPUT_FILE"
     
@@ -161,7 +164,7 @@ action_load() {
         data_to_load="$DATA_FILE"
         log_debug "Using DATA_FILE: $DATA_FILE"
     else
-        die "Input data not found. Run '$0 generate' or 'make generate-golden EXAMPLE=$EXAMPLE SIZE=<size>' first"
+        die "Input data not found. Run '$0 generate' or 'make generate-golden EXAMPLE=$EXAMPLE NUM_MESSAGES=$NUM_MESSAGES' first"
     fi
     
     # Check if stream exists
@@ -235,7 +238,7 @@ action_wait() {
     [[ -f "$LOG_FILE" ]] || die "Log file $LOG_FILE not found. Did you run '$0 run' first?"
 
     # Wait for expected row count with timeout
-    if wait_for_row_count "$LOG_FILE" "$NUM_MESSAGES" 300 5 "$PID_FILE"; then
+    if wait_for_qdb_rows "$LOG_FILE" "$NUM_MESSAGES" 300 5 "$PID_FILE" "${DYNAMIC_TABLES[@]}"; then
         log_info "Processing completed successfully!"
     else
         die "Processing did not complete within timeout"
@@ -281,24 +284,19 @@ action_stop() {
     log_info "Connector stopped and PID file cleaned up"
 }
 
-# Export data from QuasarDB to CSV files
+# Export QuasarDB tables to CSV in the dataset's actual/ directory.
+# Files use generic <table>.csv names (the dataset path already encodes
+# example + message count). actual/ is recreated first so re-runs are clean.
 action_export() {
     log_info "Exporting data from QuasarDB to CSV files..."
 
-    # Create export directory
-    mkdir -p "$EXPORT_DIR"
+    # Fresh actual/ directory for this run's output
+    rm -rf "$ACTUAL_DIR"
+    mkdir -p "$ACTUAL_DIR"
 
-    # Check for existing exports to prevent accidental overwrites
+    # Export each table to CSV using a generic table-only filename
     for table_name in "${DYNAMIC_TABLES[@]}"; do
-        local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
-        if [[ -f "$csv_file" ]]; then
-            die "Export file already exists: $csv_file. Clean exports/ directory before running: rm -rf $EXPORT_DIR"
-        fi
-    done
-
-    # Export each table to CSV
-    for table_name in "${DYNAMIC_TABLES[@]}"; do
-        local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
+        local csv_file="$ACTUAL_DIR/${table_name}.csv"
         log_info "Exporting table $table_name to $csv_file"
 
         if ! qdb_export --ts "$table_name" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
@@ -310,32 +308,33 @@ action_export() {
         log_debug "Exported $row_count rows from $table_name"
     done
 
-    log_info "Export completed to directory: $EXPORT_DIR"
+    log_info "Export completed to directory: $ACTUAL_DIR"
 }
 
-# Compare exported data with golden data
+# Compare this run's exported CSVs (actual/) against the committed golden CSVs
+# (expected/) using numdiff for numeric-tolerance comparison. Both sides use
+# generic <table>.csv names. A missing or differing table is a hard failure.
 action_validate() {
     log_info "Validating exported data against golden data..."
 
     require_command numdiff
 
-    [[ -d "$EXPORT_DIR" ]] || die "Export directory $EXPORT_DIR not found. Run '$0 export' first"
+    [[ -d "$ACTUAL_DIR" ]] || die "Actual output directory $ACTUAL_DIR not found. Run '$0 export' first"
 
-    # Check if golden data has been extracted
-    local golden_marker="$TESTDATA_DIR/$EXAMPLE-$NUM_MESSAGES/.extracted"
-    [[ -f "$golden_marker" ]] || die "Golden data not extracted. Run 'make extract EXAMPLE=$EXAMPLE SIZE=<size>' first"
+    # Golden data must have been extracted into the dataset directory
+    local golden_marker="$DATASET_DIR/.extracted"
+    [[ -f "$golden_marker" ]] || die "Golden data not extracted. Run 'make extract EXAMPLE=$EXAMPLE NUM_MESSAGES=$NUM_MESSAGES' first"
 
-    local golden_dir="$TESTDATA_DIR/$EXAMPLE-$NUM_MESSAGES/expected"
-    [[ -d "$golden_dir" ]] || die "Golden data directory $golden_dir not found"
+    [[ -d "$EXPECTED_DIR" ]] || die "Golden data directory $EXPECTED_DIR not found"
 
     local validation_errors=0
 
     for table_name in "${DYNAMIC_TABLES[@]}"; do
-        local exported_csv="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
-        local golden_csv="$golden_dir/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
+        local actual_csv="$ACTUAL_DIR/${table_name}.csv"
+        local golden_csv="$EXPECTED_DIR/${table_name}.csv"
 
-        if [[ ! -f "$exported_csv" ]]; then
-            log_error "Exported CSV not found: $exported_csv"
+        if [[ ! -f "$actual_csv" ]]; then
+            log_error "Exported CSV not found: $actual_csv"
             validation_errors=$((validation_errors + 1))
             continue
         fi
@@ -346,19 +345,19 @@ action_validate() {
             continue
         fi
 
-        log_debug "Comparing $exported_csv with $golden_csv"
+        log_debug "Comparing $actual_csv with $golden_csv"
 
         # Use numdiff for numeric tolerance comparison
-        if numdiff --tolerance=0.001 --brief "$exported_csv" "$golden_csv" >/dev/null 2>&1; then
-            log_info "✓ $table_name validation passed"
+        if numdiff --absolute-tolerance=0.001 --brief "$actual_csv" "$golden_csv" >/dev/null 2>&1; then
+            log_info "[OK] $table_name validation passed"
         else
-            log_error "✗ $table_name validation failed"
+            log_error "[FAIL] $table_name validation failed"
             validation_errors=$((validation_errors + 1))
 
             # Show first 10 differences
             log_debug "First 10 differences for $table_name:"
-            numdiff --tolerance=0.001 "$exported_csv" "$golden_csv" 2>&1 | head -10 || true
-            log_debug "Run for full diff: numdiff --tolerance=0.001 $exported_csv $golden_csv"
+            numdiff --absolute-tolerance=0.001 "$actual_csv" "$golden_csv" 2>&1 | head -10 || true
+            log_debug "Run for full diff: numdiff --absolute-tolerance=0.001 $actual_csv $golden_csv"
         fi
     done
 
@@ -369,34 +368,24 @@ action_validate() {
     fi
 }
 
-# Organize files for golden data packaging
+# Finalize the golden dataset directory after a generate-golden run: promote this
+# run's exported CSVs (actual/) into expected/ and write a per-dataset
+# metadata.json. The dataset directory (input.data + expected/ + metadata.json) is
+# exactly what package-golden archives.
 action_prepare_golden() {
     log_info "Preparing golden data package..."
 
-    [[ -d "$EXPORT_DIR" ]] || die "Export directory $EXPORT_DIR not found. Run '$0 export' first"
-    
+    [[ -d "$ACTUAL_DIR" ]] || die "Actual output directory $ACTUAL_DIR not found. Run '$0 export' first"
     [[ -f "$INPUT_FILE" ]] || die "Input data file $INPUT_FILE not found. Run '$0 generate' first"
 
-    local golden_dir="$TESTDATA_DIR/golden"
-    mkdir -p "$golden_dir"
+    # Promote this run's output into the golden expected/ directory
+    rm -rf "$EXPECTED_DIR"
+    mkdir -p "$EXPECTED_DIR"
+    cp "$ACTUAL_DIR"/*.csv "$EXPECTED_DIR"/
+    log_debug "Promoted actual/ CSVs into $EXPECTED_DIR"
 
-    # Copy input data with proper naming
-    cp "$INPUT_FILE" "$golden_dir/${EXAMPLE}-${NUM_MESSAGES}-input.data"
-    log_debug "Copied input data to golden directory"
-
-    # Copy exported CSV files to golden directory (they already have row-count prefixes)
-    for table_name in "${DYNAMIC_TABLES[@]}"; do
-        local csv_file="$EXPORT_DIR/${EXAMPLE}-${NUM_MESSAGES}-${table_name}.csv"
-        if [[ -f "$csv_file" ]]; then
-            cp "$csv_file" "$golden_dir/"
-            log_debug "Copied $csv_file to golden directory"
-        else
-            log_error "CSV file not found: $csv_file"
-        fi
-    done
-
-    # Create metadata.json
-    local metadata_file="$golden_dir/metadata.json"
+    # Create per-dataset metadata.json
+    local metadata_file="$DATASET_DIR/metadata.json"
     local git_hash
     git_hash=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
 
@@ -411,7 +400,7 @@ action_prepare_golden() {
 }
 EOF
 
-    log_info "Golden data package prepared in: $golden_dir"
+    log_info "Golden dataset prepared in: $DATASET_DIR"
     log_info "Metadata written to: $metadata_file"
 }
 

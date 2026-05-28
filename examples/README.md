@@ -5,16 +5,19 @@ This directory contains example configurations and test scenarios demonstrating 
 ## Available Examples
 
 ### 1. Finance OHLC Market Data (`finance-ohlc`)
+
 - **Use Case**: Real-time financial market data ingestion
 - **Features**: Dynamic table routing based on exchange/symbol, compressed data handling
 - **Tables**: `finance.NASDAQ.AAPL`, `finance.NASDAQ.GOOGL`, etc.
 
 ### 2. Industrial Sensor Monitoring (`industrial-sensor`)
+
 - **Use Case**: IoT sensor data collection with error handling
 - **Features**: Safe number parsing for faulty sensors, building/floor based routing
 - **Tables**: `industrial.B1.1`, `industrial.B1.2`, `industrial.B2.B`, etc.
 
 ### 3. Network Metrics Collection (`network-metrics`)
+
 - **Use Case**: Network device monitoring and performance tracking
 - **Features**: High-precision timestamps, deeply nested JSON parsing
 - **Table**: `network_metrics` (single table, no routing)
@@ -49,14 +52,14 @@ All examples support the same set of modular actions:
 The examples framework includes comprehensive golden data testing:
 
 ```bash
-# Run quick tests (10k records)
+# Run quick tests (10000 messages)
 make test-quick
 
-# Run full tests (1M records)
+# Run full tests (1000000 messages)
 make test-full
 
 # Generate golden data
-make generate-golden-finance-ohlc-10k
+make generate-golden EXAMPLE=finance-ohlc NUM_MESSAGES=10000
 ```
 
 See [GOLDEN_DATA_GENERATION.md](GOLDEN_DATA_GENERATION.md) for detailed documentation.
@@ -69,7 +72,7 @@ All examples support these environment variables:
 - `QDB_URI` - QuasarDB connection URI (default: qdb://127.0.0.1:2836)
 - `NATS_URL` - NATS server URL (default: nats://localhost:4222)
 - `DEBUG` - Enable debug logging (set to 1)
-- `TESTDATA_DIR` - Directory for test data
+- `DATASETS_DIR` - Directory for dataset archives and extracted data
 
 ## Prerequisites
 
@@ -90,7 +93,10 @@ examples/
 ├── industrial-sensor.yaml      # Parser configuration
 ├── network-metrics.sh          # Network example script
 ├── network-metrics.yaml        # Parser configuration
-└── testdata/                   # Test data directory
-    ├── golden/                 # Golden data files
-    └── *.tar.gz               # Downloaded test packages
+└── datasets/                  # Dataset archives and extracted data (gitignored)
+    ├── finance-ohlc-10000/    # Per-(example, count) dataset directory
+    │   ├── input.data         # Input data
+    │   ├── expected/          # Golden CSVs (generic table-only names)
+    │   └── metadata.json      # Per-dataset metadata
+    └── *.tar.gz               # Dated archives (one per dataset)
 ```

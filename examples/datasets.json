@@ -1,0 +1,14 @@
+{
+  "base_url": "https://qdb-cicd-builddeps-20260226074339625300000001.s3.amazonaws.com/datasets/qdb-nats-connector",
+  "archives": [
+    { "name": "finance-ohlc",      "num_messages": 10000,   "date": "2026-05-28" },
+    { "name": "finance-ohlc",      "num_messages": 100000,  "date": "2026-05-28" },
+    { "name": "finance-ohlc",      "num_messages": 1000000, "date": "2026-05-28" },
+    { "name": "industrial-sensor", "num_messages": 10000,   "date": "2026-05-28" },
+    { "name": "industrial-sensor", "num_messages": 100000,  "date": "2026-05-28" },
+    { "name": "industrial-sensor", "num_messages": 1000000, "date": "2026-05-28" },
+    { "name": "network-metrics",   "num_messages": 10000,   "date": "2026-05-28" },
+    { "name": "network-metrics",   "num_messages": 100000,  "date": "2026-05-28" },
+    { "name": "network-metrics",   "num_messages": 1000000, "date": "2026-05-28" }
+  ]
+}

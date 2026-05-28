@@ -229,6 +229,26 @@ validate_environment() {
     log_info "Environment validation successful - NATS and QuasarDB are running"
 }
 
+# Refuse to proceed if any qdb-nats-connector process is already running.
+# Detection is process-based (pgrep -f on the connector binary path) so it catches
+# leaked or orphaned connectors regardless of PID-file state, including ones that have
+# been reparented to init. Hard error (die) listing the offending processes; no bypass.
+assert_no_connector_running() {
+    local pattern='bin/qdb-nats-connector'
+
+    command -v pgrep >/dev/null 2>&1 || \
+        die "pgrep not found; it is required for the connector preflight check"
+
+    local matches
+    matches=$(pgrep -lf "$pattern" 2>/dev/null || true)
+
+    if [[ -n "$matches" ]]; then
+        log_error "Refusing to start: a qdb-nats-connector process is already running:"
+        printf '%s\n' "$matches" >&2
+        die "Stop the running connector(s) above first (e.g. 'kill <PID>'), then re-run."
+    fi
+}
+
 # Silent Cleanup Functions
 
 # Drop QuasarDB table if it exists, silently ignoring errors
@@ -241,117 +261,68 @@ drop_table_if_exists() {
 
 # Row Count Detection
 
-# Parse connector logs for row count messages
-# The QuasarDB Go API logs: L().Info("wrote rows", "count", totalRows, "duration", elapsed)
-# This appears as structured logs, so we look for "wrote rows" and extract count
-parse_processed_rows() {
-    local log_file="$1"
-    
-    if [[ ! -f "$log_file" ]]; then
-        log_error "Log file $log_file does not exist"
-        return 1
-    fi
-    
-    local total_rows=0
-    
-    # Parse structured log format looking for "wrote rows" with count
-    # Expected format: [timestamp] level=info msg="wrote rows" count=123 duration=...
-    # Also handle slog JSON format: {"time":"...","level":"INFO","msg":"wrote rows","count":123}
-    while IFS= read -r line; do
-        # Handle key=value format (default slog text format)
-        if [[ "$line" =~ wrote\ rows.*count=([0-9]+) ]]; then
-            local count="${BASH_REMATCH[1]}"
-            total_rows=$((total_rows + count))
-            log_debug "Found wrote rows: count=$count, total=$total_rows"
-        # Handle JSON format
-        elif [[ "$line" =~ \"msg\":\"wrote\ rows\".*\"count\":([0-9]+) ]]; then
-            local count="${BASH_REMATCH[1]}"
-            total_rows=$((total_rows + count))
-            log_debug "Found wrote rows (JSON): count=$count, total=$total_rows"
-        fi
-    done < "$log_file"
-    
-    echo "$total_rows"
+# Sum SELECT COUNT(*) across one or more QDB tables. Echoes the total to stdout;
+# a query that fails or returns nothing contributes 0. Missing tables (e.g. early
+# in a test before create) are treated as empty -- the loop keeps polling.
+count_qdb_rows() {
+    local total=0 t count
+    for t in "$@"; do
+        # qdbsh COUNT output:
+        #   COUNT(col1)   COUNT(col2)   ...
+        #   ----------------------------------
+        #            2,000       1,712   ...
+        # Grab the first numeric cell under the divider; strip thousands commas.
+        count=$(qdbsh -c "SELECT COUNT(*) FROM \"$t\"" 2>/dev/null \
+            | awk '/^-{3,}$/{getline; print $1; exit}' | tr -d ',')
+        total=$((total + ${count:-0}))
+    done
+    echo "$total"
 }
 
-# Wait for expected row count with timeout
-wait_for_row_count() {
-    local log_file="$1"
-    local expected_rows="$2"
-    local timeout_seconds="${3:-300}"  # Default 5 minutes
-    local check_interval="${4:-5}"     # Default 5 seconds
-    local pid_file="${5:-}"           # Optional PID file to check
-    
-    log_info "Waiting for $expected_rows rows to be processed (timeout: ${timeout_seconds}s)"
-    
-    local elapsed=0
-    local last_reported_count=0
-    
-    while [[ $elapsed -lt $timeout_seconds ]]; do
-        # Check if log file exists and for ERROR logs
-        if [[ -f "$log_file" ]]; then
-            # Check for ERROR level logs
-            if grep -q '"level":"ERROR"' "$log_file" 2>/dev/null; then
-                log_error "ERROR detected in connector log:"
-                grep '"level":"ERROR"' "$log_file" | tail -1
-                return 1
-            fi
-            
-            local current_count
-            current_count=$(parse_processed_rows "$log_file")
-            
-            # DEBUG: Log every check iteration
-            log_debug "[DEBUG] Elapsed: ${elapsed}s, Current count: $current_count, Expected: $expected_rows"
-            
-            # Report progress if count changed
-            if [[ $current_count -ne $last_reported_count ]]; then
-                log_info "Progress: $current_count / $expected_rows rows processed"
-                last_reported_count=$current_count
-                
-                # DEBUG: Show recent log entries when progress is made
-                log_debug "[DEBUG] Recent log entries showing progress:"
-                tail -3 "$log_file" | while IFS= read -r line; do
-                    log_debug "[DEBUG] Log: $line"
-                done
-            fi
-            
-            # Check if we've reached the expected count
-            if [[ $current_count -ge $expected_rows ]]; then
-                log_info "Successfully processed $current_count rows (expected: $expected_rows)"
-                return 0
-            fi
-        else
-            log_debug "[DEBUG] Log file $log_file does not exist yet"
+# Wait until SUM(COUNT(*)) across the listed tables reaches expected_rows.
+# Queries QDB directly, so it observes actual write-visibility instead of the
+# connector's buffered "wrote rows" log lines -- which return before data is
+# query-visible and previously raced the subsequent export step.
+# Fails fast on connector crash: ERROR-level log entry or PID gone.
+# Args: log_file expected timeout interval pid_file <table>...
+wait_for_qdb_rows() {
+    local log_file="$1" expected="$2" timeout="$3" interval="$4" pid_file="$5"
+    shift 5
+    local -a tables=("$@")
+
+    log_info "Waiting for $expected rows across ${#tables[@]} table(s) (timeout: ${timeout}s)"
+
+    local elapsed=0 last=0 current pid
+    while [[ $elapsed -lt $timeout ]]; do
+        if [[ -f "$log_file" ]] && grep -q '"level":"ERROR"' "$log_file" 2>/dev/null; then
+            log_error "ERROR detected in connector log:"
+            grep '"level":"ERROR"' "$log_file" | tail -1
+            return 1
         fi
-        
-        # Check if process is still running (if PID file provided)
-        if [[ -n "$pid_file" ]] && [[ -f "$pid_file" ]]; then
-            local pid
-            pid=$(cat "$pid_file" 2>/dev/null || echo "")
+        if [[ -n "$pid_file" && -f "$pid_file" ]]; then
+            pid=$(cat "$pid_file" 2>/dev/null || true)
             if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
                 log_error "Connector process (PID: $pid) has exited unexpectedly"
-                if [[ -f "$log_file" ]]; then
-                    log_error "Last log entries:"
-                    tail -10 "$log_file"
-                fi
+                [[ -f "$log_file" ]] && { log_error "Last log entries:"; tail -10 "$log_file"; }
                 return 1
             fi
-            log_debug "[DEBUG] Connector process $pid is still running"
         fi
-        
-        sleep "$check_interval"
-        elapsed=$((elapsed + check_interval))
+
+        current=$(count_qdb_rows "${tables[@]}")
+        if [[ $current -ne $last ]]; then
+            log_info "Progress: $current / $expected rows in QDB"
+            last=$current
+        fi
+        if [[ $current -ge $expected ]]; then
+            log_info "Reached $current rows in QDB (expected: $expected)"
+            return 0
+        fi
+
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
     done
-    
-    # Timeout reached
-    local final_count
-    if [[ -f "$log_file" ]]; then
-        final_count=$(parse_processed_rows "$log_file")
-    else
-        final_count=0
-    fi
-    
-    log_error "Timeout reached after ${timeout_seconds}s. Processed $final_count rows, expected $expected_rows"
+
+    log_error "Timeout after ${timeout}s. QDB has $last rows, expected $expected"
     return 1
 }
 

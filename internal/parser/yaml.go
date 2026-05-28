@@ -321,11 +321,11 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 	// 3. PinToC() method - Pins Go memory for safe access from C++ code
 	//
 	// STRING CREATION RULES:
-	// ✓ SAFE: Direct concatenation using + operator (creates contiguous memory)
-	// ✓ SAFE: fmt.Sprintf() and similar formatting functions
-	// ✓ SAFE: String literals and simple conversions
-	// ✗ UNSAFE: strings.Builder (may use internal optimizations with non-contiguous memory)
-	// ✗ UNSAFE: Any string construction that doesn't guarantee single memory region
+	// [OK] SAFE: Direct concatenation using + operator (creates contiguous memory)
+	// [OK] SAFE: fmt.Sprintf() and similar formatting functions
+	// [OK] SAFE: String literals and simple conversions
+	// [FAIL] UNSAFE: strings.Builder (may use internal optimizations with non-contiguous memory)
+	// [FAIL] UNSAFE: Any string construction that doesn't guarantee single memory region
 	//
 	// FAILURE MODE:
 	// Using incompatible strings causes SEGMENTATION FAULTS when QuasarDB attempts to pin
@@ -336,6 +336,24 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 	// - Segfaults in qdb_batch_push_columns indicate string memory issues
 	// - Check all string construction methods in the data pipeline
 	// - Use direct concatenation (+) instead of strings.Builder for safety
+
+	// SENTINEL-FILL INVARIANT:
+	// =======================
+	// Every output column MUST receive a SetData call, so the resulting single-row
+	// table has column_len == index_len == 1 for every column. When the source field
+	// is missing from state.Fields or its value's type assertion fails (e.g. because
+	// safe_parse_number on_error="null" set state.Fields[target] = nil), the column
+	// is filled with the QDB-defined per-type null sentinel:
+	//   - Double: math.NaN() (matches QDB_IS_NULL_DOUBLE(pt) -> isnan(pt.value))
+	//   - Int64: qdb.Int64Undefined() (matches QDB_IS_NULL_INT64, value 0x8000000000000000)
+	//   - Timestamp: qdb.MinTimespec() (matches QDB_IS_NULL_TIMESTAMP)
+	//   - String: "" (matches QDB_IS_NULL_STRING(pt) -> pt.content_length == 0)
+	//   - Blob: []byte{} (matches QDB_IS_NULL_BLOB(pt) -> pt.content_length == 0)
+	// This invariant is the precondition for qdb.MergeSingleTableWriters producing
+	// aligned (index_len, column_len) pairs across multi-row merges; without it the
+	// merge appends a length-0 column slice to other tables' length-1 column slices,
+	// producing a merged table whose column_len < rowCount and whose stored
+	// (timestamp, value) pairs are misaligned.
 
 	// Set index - uses parsed index or current time as fallback
 	var ts time.Time
@@ -380,7 +398,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 
 	table.SetIndex(state.indexBuf)
 
-	// Map fields to columns using pre-allocated buffers - thread-safe and efficient
+	// Map fields to columns using pre-allocated buffers. Every output column receives
+	// a SetData call -- the sentinel-fill invariant documented above guarantees the
+	// merged-table column lengths stay aligned with the merged index length.
 	for i, col := range p.columns {
 		// Column names have null terminators, but field names don't
 		// Strip the null terminator for field lookup
@@ -388,124 +408,137 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 		if fieldName != "" && fieldName[len(fieldName)-1] == 0 {
 			fieldName = fieldName[:len(fieldName)-1]
 		}
-		value, exists := state.Fields[fieldName]
-		if !exists {
-			continue
-		}
+		// Lookup may return the zero interface value when the field was never set
+		// (e.g. extract_field on_error="skip" suppressed it). The typed assertions
+		// below treat zero-interface and wrong-type uniformly: both fall through to
+		// the per-type null sentinel so the column always gets written.
+		value := state.Fields[fieldName]
 
 		switch p.columnTypes[i] {
 		case qdb.TsColumnDouble:
-			if v, ok := value.(float64); ok {
-				// Check buffer bounds before accessing
-				if i >= len(state.doubleVals) {
-					slog.Error("Buffer overflow detected in double column!",
-						"column_index", i,
-						"buffer_len", len(state.doubleVals),
-						"column_name", fieldName)
+			// Check buffer bounds before accessing
+			if i >= len(state.doubleVals) {
+				slog.Error("Buffer overflow detected in double column!",
+					"column_index", i,
+					"buffer_len", len(state.doubleVals),
+					"column_name", fieldName)
 
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.doubleVals)))
-				}
-				// Use direct value storage for performance
-				state.doubleVals[i] = v
-				data := qdb.NewColumnDataDouble([]float64{state.doubleVals[i]})
-				err := table.SetData(i, &data)
-				if err != nil {
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
-				}
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.doubleVals)))
+			}
+			v, ok := value.(float64)
+			if !ok {
+				v = math.NaN()
+			}
+			// Use direct value storage for performance
+			state.doubleVals[i] = v
+			data := qdb.NewColumnDataDouble([]float64{state.doubleVals[i]})
+			err := table.SetData(i, &data)
+			if err != nil {
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 			}
 		case qdb.TsColumnBlob:
-			if v, ok := value.([]byte); ok {
-				// Check buffer bounds before accessing
-				if i >= len(state.blobVals) {
-					slog.Error("Buffer overflow detected in blob column!",
-						"column_index", i,
-						"buffer_len", len(state.blobVals),
-						"column_name", fieldName)
+			// Check buffer bounds before accessing
+			if i >= len(state.blobVals) {
+				slog.Error("Buffer overflow detected in blob column!",
+					"column_index", i,
+					"buffer_len", len(state.blobVals),
+					"column_name", fieldName)
 
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.blobVals)))
-				}
-				// Use direct value storage for performance
-				state.blobVals[i] = v
-				data := qdb.NewColumnDataBlob([][]byte{state.blobVals[i]})
-				err := table.SetData(i, &data)
-				if err != nil {
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
-				}
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.blobVals)))
+			}
+			v, ok := value.([]byte)
+			if !ok {
+				v = []byte{}
+			}
+			// Use direct value storage for performance
+			state.blobVals[i] = v
+			data := qdb.NewColumnDataBlob([][]byte{state.blobVals[i]})
+			err := table.SetData(i, &data)
+			if err != nil {
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 			}
 		case qdb.TsColumnInt64:
-			if v, ok := value.(int64); ok {
-				// Check buffer bounds before accessing
-				if i >= len(state.int64Vals) {
-					slog.Error("Buffer overflow detected in int64 column!",
-						"column_index", i,
-						"buffer_len", len(state.int64Vals),
-						"column_name", fieldName)
+			// Check buffer bounds before accessing
+			if i >= len(state.int64Vals) {
+				slog.Error("Buffer overflow detected in int64 column!",
+					"column_index", i,
+					"buffer_len", len(state.int64Vals),
+					"column_name", fieldName)
 
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.int64Vals)))
-				}
-				// Use direct value storage for performance
-				state.int64Vals[i] = v
-				data := qdb.NewColumnDataInt64([]int64{state.int64Vals[i]})
-				err := table.SetData(i, &data)
-				if err != nil {
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
-				}
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.int64Vals)))
+			}
+			v, ok := value.(int64)
+			if !ok {
+				v = qdb.Int64Undefined()
+			}
+			// Use direct value storage for performance
+			state.int64Vals[i] = v
+			data := qdb.NewColumnDataInt64([]int64{state.int64Vals[i]})
+			err := table.SetData(i, &data)
+			if err != nil {
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 			}
 		case qdb.TsColumnString:
-			if v, ok := value.(string); ok {
-				// MEMORY PINNING CRITICAL POINT:
-				// This string will be pinned by QuasarDB using runtime.Pinner.
-				// It MUST be backed by contiguous memory or SEGFAULT will occur.
-				// Check buffer bounds before accessing
-				if i >= len(state.stringVals) {
-					slog.Error("Buffer overflow detected in string column!",
-						"column_index", i,
-						"buffer_len", len(state.stringVals),
-						"column_name", fieldName)
+			// MEMORY PINNING CRITICAL POINT:
+			// This string will be pinned by QuasarDB using runtime.Pinner.
+			// It MUST be backed by contiguous memory or SEGFAULT will occur.
+			// Check buffer bounds before accessing
+			if i >= len(state.stringVals) {
+				slog.Error("Buffer overflow detected in string column!",
+					"column_index", i,
+					"buffer_len", len(state.stringVals),
+					"column_name", fieldName)
 
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.stringVals)))
-				}
-				// CRITICAL: Create a fresh string allocation to prevent segfaults
-				// The string value 'v' may come from shared memory (e.g., from YAML config
-				// or from compute_field operations). We must create a fresh string that
-				// will remain valid when pinned by QuasarDB.
-				// Using fmt.Sprintf forces a new string allocation on the heap.
-				state.stringVals[i] = v
-				data := qdb.NewColumnDataString([]string{state.stringVals[i]})
-				err := table.SetData(i, &data)
-				if err != nil {
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
-				}
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.stringVals)))
+			}
+			v, ok := value.(string)
+			if !ok {
+				// Empty string is QDB's null sentinel for string columns
+				// (QDB_IS_NULL_STRING(pt) -> pt.content_length == 0).
+				// String literals are contiguous memory; pinning-safe.
+				v = ""
+			}
+			// CRITICAL: Fresh string allocations prevent segfaults
+			// The string value 'v' may come from shared memory (e.g., from YAML config
+			// or from compute_field operations). We must create a fresh string that
+			// will remain valid when pinned by QuasarDB.
+			state.stringVals[i] = v
+			data := qdb.NewColumnDataString([]string{state.stringVals[i]})
+			err := table.SetData(i, &data)
+			if err != nil {
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 			}
 		case qdb.TsColumnTimestamp:
-			if v, ok := value.(time.Time); ok {
-				// Check buffer bounds before accessing
-				if i >= len(state.timestampVals) {
-					slog.Error("Buffer overflow detected in timestamp column!",
-						"column_index", i,
-						"buffer_len", len(state.timestampVals),
-						"column_name", fieldName)
+			// Check buffer bounds before accessing
+			if i >= len(state.timestampVals) {
+				slog.Error("Buffer overflow detected in timestamp column!",
+					"column_index", i,
+					"buffer_len", len(state.timestampVals),
+					"column_name", fieldName)
 
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-						fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.timestampVals)))
-				}
-				// Use direct value storage for performance
-				state.timestampVals[i] = v
-				data := qdb.NewColumnDataTimestamp([]time.Time{state.timestampVals[i]})
-				err := table.SetData(i, &data)
-				if err != nil {
-					return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
-				}
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.timestampVals)))
+			}
+			v, ok := value.(time.Time)
+			if !ok {
+				v = qdb.MinTimespec()
+			}
+			// Use direct value storage for performance
+			state.timestampVals[i] = v
+			data := qdb.NewColumnDataTimestamp([]time.Time{state.timestampVals[i]})
+			err := table.SetData(i, &data)
+			if err != nil {
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 			}
 		case qdb.TsColumnUninitialized:
-			// Skip uninitialized columns - should not occur with validation
+			// Schema validation rejects uninitialized columns before reaching here.
 			continue
 		case qdb.TsColumnSymbol:
-			// Symbol columns not currently supported in YAML parser
+			// Symbol columns not currently supported in YAML parser.
 			continue
 		}
 	}

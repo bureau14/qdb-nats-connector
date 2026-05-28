@@ -79,7 +79,7 @@ claude_desktop_config.json
 
 # Claude code local rules
 .claude/settings.local.json
-**/testdata/**
+**/datasets/**
 
 # Python virtual environments (e.g. .buildkite/.venv used for pipeline.py)
 .venv/

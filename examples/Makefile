@@ -19,7 +19,7 @@ DATASETS_DIR := datasets
 # Dynamically discover example scripts, excluding utility scripts. This enables
 # zero-maintenance addition of new examples - just drop a new .sh file and it's
 # automatically included in test matrices.
-EXAMPLES := $(filter-out common utils test-loader debug-industrial-sensor, $(basename $(wildcard *.sh)))
+EXAMPLES := $(filter-out common utils debug-industrial-sensor, $(basename $(wildcard *.sh)))
 EXAMPLE ?= finance-ohlc
 NUM_MESSAGES ?= 10000
 

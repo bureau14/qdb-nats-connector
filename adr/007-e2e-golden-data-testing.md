@@ -54,7 +54,7 @@ Implement a **golden data testing approach** using pre-generated input/output da
 |     +-------------------------+                        |
 |     | qdb_export > CSV        |                        |
 |     |         v               |                        |
-|     | numdiff expected actual |                        |
+|     | awk expected vs actual  |                        |
 |     +-------------------------+                        |
 |                                                        |
 +--------------------------------------------------------+
@@ -134,12 +134,12 @@ We explicitly reject adding a data canonicalization layer because:
 
 #### Floating-Point Comparison Strategy
 
-The only legitimate concern is floating-point precision differences. We address this with `numdiff`:
+The only legitimate concern is floating-point precision differences. We address this with a small `awk` comparator (`compare_csv` in `examples/common.sh`):
 
-- **Tool choice**: `numdiff` is a standard Unix utility designed for numeric comparisons with tolerance
-- **Default tolerance**: 1e-9 relative error handles typical IEEE 754 rounding differences
+- **Tool choice**: `awk` is mandated by POSIX and present on every target platform (Linux, macOS, FreeBSD, Windows/mingw64), so the harness has no comparison tool to install
+- **Comparison**: each row is split on commas; fields that parse as numbers on both sides match within an absolute tolerance (0.001 by default, overridable via `CSV_ABS_TOLERANCE`); all other fields (timestamps, quoted strings, empty/null) must match exactly
 - **No data modification**: We compare actual outputs rather than modifying test data
-- **Transparency**: Developers can see exactly what precision issues exist
+- **Transparency**: On a mismatch the comparator prints the first differing rows/columns with the offending values
 
 #### Makefile-Based Orchestration
 
@@ -226,7 +226,7 @@ Archives contain both input data and expected outputs in a structured format, wi
 
 ### Positive
 
-- **Simplicity**: Standard Unix tools only (`make`, `curl`, `numdiff`, `qdb_export`) - no custom validation code
+- **Simplicity**: Only ubiquitous tools (`make`, `curl`, `awk`, `qdb_export`); the numeric CSV comparison is a small built-in awk helper with no third-party dependency to install
 - **Transparency**: CSV files are human-readable for debugging
 - **Speed**: Downloads are cached, extractions tracked with `.extracted` markers, `qdb_export` handles millions of rows/sec
 - **Fast re-runs**: Extracted files persist between runs until explicit cleanup
@@ -253,7 +253,7 @@ Archives contain both input data and expected outputs in a structured format, wi
 
 ### Complex Validation Framework
 Build Go/Python tools for deep data validation.
-- **Rejected**: Adds unnecessary complexity when `numdiff` suffices for our needs
+- **Rejected**: Adds unnecessary complexity when a small awk comparator suffices for our needs
 
 ### Custom Canonicalization Script
 Create scripts to normalize CSV output (sort rows, round floats, format timestamps).

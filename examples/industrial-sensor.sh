@@ -409,12 +409,13 @@ action_export() {
 }
 
 # Compare this run's exported CSVs (actual/) against the committed golden CSVs
-# (expected/) using numdiff for numeric-tolerance comparison. Both sides use
-# generic <table>.csv names. A missing or differing table is a hard failure.
+# (expected/) using the awk-based compare_csv helper for field-wise numeric-
+# tolerance comparison. Both sides use generic <table>.csv names. A missing or
+# differing table is a hard failure.
 action_validate() {
     log_info "Validating exported data against golden data..."
 
-    require_command numdiff
+    require_command awk
 
     [[ -d "$ACTUAL_DIR" ]] || die "Actual output directory $ACTUAL_DIR not found. Run '$0 export' first"
 
@@ -444,17 +445,8 @@ action_validate() {
 
         log_debug "Comparing $actual_csv with $golden_csv"
 
-        # Use numdiff for numeric tolerance comparison
-        if numdiff --absolute-tolerance=0.001 --brief "$actual_csv" "$golden_csv" >/dev/null 2>&1; then
-            log_info "[OK] $table_name validation passed"
-        else
-            log_error "[FAIL] $table_name validation failed"
+        if ! compare_csv "$actual_csv" "$golden_csv" "$table_name"; then
             validation_errors=$((validation_errors + 1))
-
-            # Show first 10 differences
-            log_debug "First 10 differences for $table_name:"
-            numdiff --absolute-tolerance=0.001 "$actual_csv" "$golden_csv" 2>&1 | head -10 || true
-            log_debug "Run for full diff: numdiff --absolute-tolerance=0.001 $actual_csv $golden_csv"
         fi
     done
 

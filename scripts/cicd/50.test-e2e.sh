@@ -17,8 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 
 # E2E is gated to Linux for the PoC (finance-ohlc only). Windows/FreeBSD/macOS
-# agents skip it until their tooling (nats CLI, numdiff) and the bash/make
-# examples flow are validated cross-platform.
+# agents skip it until their tooling (nats CLI) and the bash/make examples
+# flow are validated cross-platform.
 if [[ "$(uname)" != "Linux" ]]; then
     echo "==[ test-e2e: skipped on $(uname) (Linux-only proof-of-concept) ]=="
     exit 0

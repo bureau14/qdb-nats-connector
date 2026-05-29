@@ -111,6 +111,79 @@ require_command() {
     log_debug "Required command '$cmd' is available"
 }
 
+# CSV Comparison
+
+# Compare two CSV files row-by-row with per-field numeric tolerance, replacing
+# the former numdiff dependency. A field that parses as a number on BOTH sides
+# matches when their absolute difference is <= CSV_ABS_TOLERANCE (default
+# 0.001); every other field (ISO timestamps, quoted strings, empty/null) must
+# match byte-for-byte. Row order and per-row field counts must align -- the
+# QuasarDB export order is deterministic. Both files are streamed in O(1)
+# memory: awk walks the actual file and pulls each positionally-matching golden
+# row via `getline`. On a full match logs [OK] and returns 0; on any difference
+# logs [FAIL], prints up to the first 10 differences to stderr, and returns 1.
+#
+# NOTE: awk arithmetic is IEEE-754 double precision, so integer fields beyond
+# 2^53 (~9.0e15) would not compare exactly. The example datasets stay far below
+# that (max ~1e9), so this is not a concern here.
+#
+# Usage: compare_csv <actual_csv> <golden_csv> <label>
+compare_csv() {
+    local actual="$1"
+    local golden="$2"
+    local label="$3"
+    local diff_output
+
+    # Declare diff_output on its own line above: a combined `local x=$(...)`
+    # would mask awk's exit status with local's (always 0).
+    if diff_output=$(awk -v golden="$golden" -v tol="${CSV_ABS_TOLERANCE:-0.001}" '
+        function abs(x)    { return x < 0 ? -x : x }
+        function is_num(s) { return s ~ /^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/ }
+        BEGIN { FS = ","; diffs = 0; shown = 0; max_show = 10 }
+        {
+            # Pull the positionally-corresponding row from the golden file.
+            if ((getline gline < golden) <= 0) {
+                if (shown < max_show) { printf("row %d: present in actual, missing in golden\n", NR); shown++ }
+                diffs++
+                next
+            }
+            if ($0 == gline) next                       # identical row: fast path
+            gn = split(gline, g, ",")
+            if (NF != gn) {
+                if (shown < max_show) { printf("row %d: field count differs (actual=%d, golden=%d)\n", NR, NF, gn); shown++ }
+                diffs++
+                next
+            }
+            for (i = 1; i <= NF; i++) {
+                if ($i == g[i]) continue
+                if (is_num($i) && is_num(g[i])) {
+                    if (abs(($i + 0) - (g[i] + 0)) <= tol) continue
+                    if (shown < max_show) { printf("row %d col %d: |%s - %s| > %s\n", NR, i, $i, g[i], tol); shown++ }
+                } else {
+                    if (shown < max_show) { printf("row %d col %d: [%s] != [%s]\n", NR, i, $i, g[i]); shown++ }
+                }
+                diffs++
+            }
+        }
+        END {
+            if ((getline gline < golden) > 0) {
+                if (shown < max_show) { printf("row %d: golden has more rows than actual\n", NR + 1); shown++ }
+                diffs++
+            }
+            close(golden)
+            exit (diffs > 0) ? 1 : 0
+        }
+    ' "$actual"); then
+        log_info "[OK] $label validation passed"
+        return 0
+    fi
+
+    log_error "[FAIL] $label validation failed"
+    log_debug "First 10 differences for $label:"
+    printf '%s\n' "$diff_output" >&2
+    return 1
+}
+
 # Error trap function for debugging unexpected exits
 setup_error_trap() {
     error_trap() {

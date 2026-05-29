@@ -103,23 +103,23 @@ action_create() {
     validate_environment
 
     # Require necessary commands
-    require_command nats
+    require_command "$NATS_CLI"
 
     # Silent cleanup: Delete existing NATS stream if it exists
-    nats stream delete "$STREAM_NAME" --force 2>/dev/null || true
+    "$NATS_CLI" stream delete "$STREAM_NAME" --force 2>/dev/null || true
 
     # Create NATS stream
     log_info "Creating NATS JetStream stream: $STREAM_NAME"
-    nats stream add "$STREAM_NAME" --subjects "finance.>" --retention limits --defaults || \
+    "$NATS_CLI" stream add "$STREAM_NAME" --subjects "finance.>" --retention limits --defaults || \
         die "Failed to create NATS stream $STREAM_NAME"
     log_info "Stream $STREAM_NAME created successfully"
 
     # Create consumer for the connector
     log_info "Creating NATS consumer: finance-connector"
-    if nats consumer info "$STREAM_NAME" finance-connector >/dev/null 2>&1; then
+    if "$NATS_CLI" consumer info "$STREAM_NAME" finance-connector >/dev/null 2>&1; then
         log_info "Consumer finance-connector already exists, skipping consumer creation"
     else
-        nats consumer add "$STREAM_NAME" finance-connector --pull --deliver all --ack explicit --defaults || \
+        "$NATS_CLI" consumer add "$STREAM_NAME" finance-connector --pull --deliver all --ack explicit --defaults || \
             die "Failed to create NATS consumer finance-connector"
         log_info "Consumer finance-connector created successfully"
     fi
@@ -137,7 +137,7 @@ action_create() {
     # Create each dynamic table
     for table_name in "${DYNAMIC_TABLES[@]}"; do
         log_debug "Creating table: $table_name"
-        qdbsh -c "CREATE TABLE \"$table_name\"$table_schema" || \
+        "$QDBSH" -c "CREATE TABLE \"$table_name\"$table_schema" || \
             die "Failed to create table $table_name"
     done
 
@@ -153,7 +153,7 @@ action_load() {
     
     # Validate environment first
     validate_environment
-    require_command nats
+    require_command "$NATS_CLI"
     
     # Determine which data file to use
     local data_to_load=""
@@ -168,7 +168,7 @@ action_load() {
     fi
     
     # Check if stream exists
-    if ! nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
+    if ! "$NATS_CLI" stream info "$STREAM_NAME" >/dev/null 2>&1; then
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
     
@@ -179,7 +179,7 @@ action_load() {
                         --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     log_info "Data loaded successfully"
     
-    nats stream info "$STREAM_NAME"
+    "$NATS_CLI" stream info "$STREAM_NAME"
 }
 
 # Start connector in background with PID management
@@ -211,7 +211,7 @@ action_run() {
     log_info "Logs will be written to: $LOG_FILE"
 
     # Start connector in background and capture PID
-    direnv exec . "$CONNECTOR_BINARY" \
+    run_with_direnv "$CONNECTOR_BINARY" \
         --nats "$NATS_URL" \
         --qdb "$QDB_URI" \
         --stream "$STREAM_NAME" \
@@ -299,7 +299,7 @@ action_export() {
         local csv_file="$ACTUAL_DIR/${table_name}.csv"
         log_info "Exporting table $table_name to $csv_file"
 
-        if ! qdb_export --ts "$table_name" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
+        if ! "$QDB_EXPORT" --ts "$table_name" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
             die "Failed to export table $table_name"
         fi
 

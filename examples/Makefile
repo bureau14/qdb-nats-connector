@@ -32,6 +32,11 @@ DATE := $(shell date +%Y-%m-%d)
 # directory it populates is gitignored.
 DATASETS_INDEX := datasets.json
 
+# Optionally wrap `go build` in `direnv exec .` so the repo .envrc CGO env loads
+# on developer machines. In CI direnv is absent and the env is provided by
+# scripts/cicd/00.common.sh::cicd_setup_qdb_env, so DIRENV expands to empty there.
+DIRENV := $(shell command -v direnv >/dev/null 2>&1 && echo direnv exec .)
+
 
 # Parameter validation ensures early failure with clear error messages rather than
 # cryptic failures deep in script execution. This saves debugging time by catching
@@ -132,8 +137,8 @@ test-validation:
 # build-tools ensures the Go data generation and loading utilities are compiled.
 build-tools:
 	@$(call LOG_INFO,Building qdb-data-gen and qdb-data-loader)
-	@cd .. && direnv exec . go build -o bin/qdb-data-gen ./tools/generator
-	@cd .. && direnv exec . go build -o bin/qdb-data-loader ./tools/loader
+	@cd .. && $(DIRENV) go build -o bin/qdb-data-gen ./tools/generator
+	@cd .. && $(DIRENV) go build -o bin/qdb-data-loader ./tools/loader
 	@$(call LOG_SUCCESS,Tools built successfully)
 
 

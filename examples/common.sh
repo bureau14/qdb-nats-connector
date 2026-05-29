@@ -29,7 +29,20 @@ setup_environment() {
     export QDB_URI="${QDB_URI:-qdb://127.0.0.1:2836}"
     export NATS_URL="${NATS_URL:-nats://localhost:4222}"
     
+    # Tool locations, referenced by explicit path (PATH is intentionally NOT
+    # mutated). The qdb CLI tools live in <repo>/qdb/bin (assumed always
+    # present); the NATS binaries are provisioned into <repo>/nats/bin by
+    # scripts/cicd/start-nats.sh. All are overridable from the environment.
+    local repo_root
+    repo_root="$(cd "$script_dir/.." && pwd)"
+    export QDB_BIN_DIR="${QDB_BIN_DIR:-$repo_root/qdb/bin}"
+    export NATS_BIN_DIR="${NATS_BIN_DIR:-$repo_root/nats/bin}"
+    export QDBSH="${QDBSH:-$QDB_BIN_DIR/qdbsh}"
+    export QDB_EXPORT="${QDB_EXPORT:-$QDB_BIN_DIR/qdb_export}"
+    export NATS_CLI="${NATS_CLI:-$NATS_BIN_DIR/nats}"
+
     log_debug "Environment setup: QDB_URI=$QDB_URI, NATS_URL=$NATS_URL"
+    log_debug "Tools: QDBSH=$QDBSH, QDB_EXPORT=$QDB_EXPORT, NATS_CLI=$NATS_CLI"
 }
 
 # Logging Functions
@@ -61,6 +74,25 @@ get_cpu_count() {
 # Calculate default worker count (use all CPUs)
 get_default_workers() {
     get_cpu_count
+}
+
+# Command Execution
+
+# Run a command, wrapping it in `direnv exec .` when direnv is available so the
+# repo .envrc CGO env (LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / CGO_*) loads on
+# developer machines. In CI direnv is absent and the identical env is exported
+# by scripts/cicd/00.common.sh::cicd_setup_qdb_env before the examples run, so
+# the command runs directly. The no-direnv branch uses `exec`, replacing the
+# current (sub)shell, so a backgrounded caller's $! is the target process
+# itself -- preserving correct PID-file tracking and signal delivery (and the
+# connector path stays in the command line for the pgrep leak guard). Call this
+# only as a backgrounded or terminal command (see finance-ohlc.sh action_run).
+run_with_direnv() {
+    if command -v direnv >/dev/null 2>&1; then
+        direnv exec . "$@"
+    else
+        exec "$@"
+    fi
 }
 
 # Error Handling
@@ -255,7 +287,7 @@ assert_no_connector_running() {
 drop_table_if_exists() {
     local table_name="$1"
     set +e  # Temporarily disable error checking
-    qdbsh -c "DROP TABLE \"${table_name}\"" 2>/dev/null
+    "$QDBSH" -c "DROP TABLE \"${table_name}\"" 2>/dev/null
     set -e  # Re-enable error checking
 }
 
@@ -272,7 +304,7 @@ count_qdb_rows() {
         #   ----------------------------------
         #            2,000       1,712   ...
         # Grab the first numeric cell under the divider; strip thousands commas.
-        count=$(qdbsh -c "SELECT COUNT(*) FROM \"$t\"" 2>/dev/null \
+        count=$("$QDBSH" -c "SELECT COUNT(*) FROM \"$t\"" 2>/dev/null \
             | awk '/^-{3,}$/{getline; print $1; exit}' | tr -d ',')
         total=$((total + ${count:-0}))
     done

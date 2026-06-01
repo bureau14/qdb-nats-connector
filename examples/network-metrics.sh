@@ -188,22 +188,22 @@ action_create() {
     fi
 
     # Require necessary commands with enhanced error messages
-    if ! require_command nats; then
+    if ! require_command "$NATS_CLI"; then
         die "NATS CLI is required but not found. Please install the NATS CLI tool.
 Visit: https://docs.nats.io/using-nats/nats-tools/nats_cli"
     fi
 
-    if ! require_command qdbsh; then
+    if ! require_command "$QDBSH"; then
         die "QuasarDB shell (qdbsh) is required but not found. Please install QuasarDB client tools."
     fi
 
     # Silent cleanup: Delete existing NATS stream if it exists
     log_debug "Cleaning up existing NATS stream if present..."
-    nats stream delete "$STREAM_NAME" --force 2>/dev/null || true
+    "$NATS_CLI" stream delete "$STREAM_NAME" --force 2>/dev/null || true
 
     # Create NATS stream with better error handling
     log_info "Creating NATS JetStream stream: $STREAM_NAME"
-    if ! nats stream add "$STREAM_NAME" --subjects "network.>" --retention limits --defaults; then
+    if ! "$NATS_CLI" stream add "$STREAM_NAME" --subjects "network.>" --retention limits --defaults; then
         die "Failed to create NATS stream '$STREAM_NAME'. Check:
   - NATS server is running and accessible at: $NATS_URL
   - JetStream is enabled on the NATS server
@@ -213,10 +213,10 @@ Visit: https://docs.nats.io/using-nats/nats-tools/nats_cli"
 
     # Create consumer for the connector with better error handling
     log_info "Creating NATS consumer: network-connector"
-    if nats consumer info "$STREAM_NAME" network-connector >/dev/null 2>&1; then
+    if "$NATS_CLI" consumer info "$STREAM_NAME" network-connector >/dev/null 2>&1; then
         log_info "Consumer network-connector already exists, skipping consumer creation"
     else
-        if ! nats consumer add "$STREAM_NAME" network-connector --pull --deliver all --ack explicit --defaults; then
+        if ! "$NATS_CLI" consumer add "$STREAM_NAME" network-connector --pull --deliver all --ack explicit --defaults; then
             die "Failed to create NATS consumer 'network-connector' on stream '$STREAM_NAME'. Check:
   - Stream '$STREAM_NAME' exists and is accessible
   - You have permission to create consumers"
@@ -231,11 +231,11 @@ Visit: https://docs.nats.io/using-nats/nats-tools/nats_cli"
     log_debug "Cleaning up existing QuasarDB table if present..."
     drop_table_if_exists "$TABLE_NAME"
 
-    local table_schema="(device_id STRING, bytes_in INT64, bytes_out INT64, packets_dropped INT64, latency_ms DOUBLE, device_path STRING)"
+    local table_schema="(\$timestamp TIMESTAMP, device_id STRING, bytes_in INT64, bytes_out INT64, packets_dropped INT64, latency_ms DOUBLE, device_path STRING)"
 
     # Create the network_metrics table
     log_debug "Creating table with schema: $TABLE_NAME $table_schema"
-    if ! qdbsh -c "CREATE TABLE \"$TABLE_NAME\"$table_schema"; then
+    if ! "$QDBSH" -c "CREATE TABLE \"$TABLE_NAME\"$table_schema"; then
         die "Failed to create QuasarDB table '$TABLE_NAME'. Check:
   - QuasarDB server is running and accessible at: $QDB_URI
   - You have permission to create tables
@@ -256,7 +256,7 @@ action_load() {
 
     # Validate environment first
     validate_environment
-    require_command nats
+    require_command "$NATS_CLI"
 
     # Determine which data file to use
     local data_to_load=""
@@ -271,7 +271,7 @@ action_load() {
     fi
 
     # Check if stream exists
-    if ! nats stream info "$STREAM_NAME" >/dev/null 2>&1; then
+    if ! "$NATS_CLI" stream info "$STREAM_NAME" >/dev/null 2>&1; then
         die "Stream $STREAM_NAME does not exist. Run '$0 create' first"
     fi
 
@@ -286,7 +286,7 @@ action_load() {
                           --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     log_info "Data loaded successfully"
 
-    nats stream info "$STREAM_NAME"
+    "$NATS_CLI" stream info "$STREAM_NAME"
 }
 
 # Start connector in background with PID management
@@ -498,7 +498,7 @@ action_export() {
     local csv_file="$ACTUAL_DIR/${TABLE_NAME}.csv"
     log_info "Exporting table $TABLE_NAME to $csv_file"
 
-    if ! qdb_export --ts "$TABLE_NAME" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
+    if ! "$QDB_EXPORT" --ts "$TABLE_NAME" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
         die "Failed to export table $TABLE_NAME"
     fi
 

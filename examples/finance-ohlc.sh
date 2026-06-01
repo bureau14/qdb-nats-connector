@@ -132,7 +132,7 @@ action_create() {
         drop_table_if_exists "$table_name"
     done
 
-    local table_schema="(stock_id STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64, trading_pair STRING)"
+    local table_schema="(\$timestamp TIMESTAMP, stock_id STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64, trading_pair STRING)"
 
     # Create each dynamic table
     for table_name in "${DYNAMIC_TABLES[@]}"; do

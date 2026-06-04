@@ -101,9 +101,14 @@ launch_server() {
     fi
     mkdir -p "${NATS_STORE_DIR}"
     echo "start-nats: launching nats-server -js on 127.0.0.1:${NATS_PORT}"
-    nohup "${NATS_SERVER_BIN}" \
+    # No nohup: on the macOS agent it aborts with "can't detach from console:
+    # Inappropriate ioctl for device" and the server never starts. A plain
+    # background job already survives this script's exit (non-interactive bash
+    # does not SIGHUP background jobs), and stop-nats.sh reaps it via the PID
+    # file. Redirect stdin from /dev/null so the server has no controlling tty.
+    "${NATS_SERVER_BIN}" \
         -a 127.0.0.1 -p "${NATS_PORT}" -js -sd "${NATS_STORE_DIR}" \
-        > "${NATS_LOG_FILE}" 2>&1 &
+        < /dev/null > "${NATS_LOG_FILE}" 2>&1 &
     echo "$!" > "${NATS_PID_FILE}"
 }
 

@@ -46,5 +46,19 @@ export GOFLAGS="${GOFLAGS:+${GOFLAGS} }-buildvcs=false"
 echo "+++ Start NATS (JetStream)"
 bash "${SCRIPT_DIR}/start-nats.sh"
 
+# examples/Makefile uses GNU make extensions (define/endef/foreach/eval/ifeq).
+# FreeBSD's default `make` is BSD make and cannot parse it ("Invalid line
+# endef"); use gmake there. Linux and macOS ship GNU make as `make`. Mirrors
+# the FreeBSD GNU-make caveat documented in 20.build.sh.
+MAKE_BIN="make"
+if [[ "$(uname)" == "FreeBSD" ]]; then
+    if ! command -v gmake > /dev/null 2>&1; then
+        echo "ERROR: examples/Makefile needs GNU make; gmake not found." >&2
+        echo "Install it on the FreeBSD agent: pkg install -y gmake" >&2
+        exit 1
+    fi
+    MAKE_BIN="gmake"
+fi
+
 echo "+++ Run e2e example: finance-ohlc (10000 messages)"
-make -C examples test EXAMPLE=finance-ohlc NUM_MESSAGES=10000
+"${MAKE_BIN}" -C examples test EXAMPLE=finance-ohlc NUM_MESSAGES=10000

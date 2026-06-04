@@ -210,8 +210,11 @@ action_run() {
     log_info "Starting connector with config: $CONFIG_FILE"
     log_info "Logs will be written to: $LOG_FILE"
 
-    # Start connector in background and capture PID
-    run_with_direnv "$CONNECTOR_BINARY" \
+    # Start connector in background and capture PID.
+    # GOTRACEBACK=all so an unrecovered crash (panic or CGO SIGSEGV at the
+    # QuasarDB boundary) dumps every goroutine's stack -- revealing which
+    # worker faulted -- alongside the signal header the runtime always prints.
+    GOTRACEBACK=all run_with_direnv "$CONNECTOR_BINARY" \
         --nats "$NATS_URL" \
         --qdb "$QDB_URI" \
         --stream "$STREAM_NAME" \

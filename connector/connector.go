@@ -290,6 +290,21 @@ func (c *Connector) fetchLoop(ctx context.Context) {
 			// Reset backoff on success
 			currentBackoff = backoffBase
 
+			// An empty batch means no messages were available (caught up) or the
+			// subscription was torn down after the stream drained. Workers treat
+			// empty batches as a no-op, so skip the dispatch and idle briefly --
+			// this keeps a fast-returning empty fetch (e.g. a closed pull
+			// subscription) from busy-spinning the loop.
+			if len(batch.Messages) == 0 {
+				select {
+				case <-time.After(backoffBase):
+				case <-ctx.Done():
+					return
+				}
+
+				continue
+			}
+
 			// Send batch to workers
 			select {
 			case c.workCh <- batch:

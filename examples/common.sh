@@ -384,6 +384,42 @@ count_qdb_rows() {
     echo "$total"
 }
 
+# Dump connector crash diagnostics to stderr.
+#
+# A Go runtime crash (panic, fatal error, or CGO SIGSEGV) prints a full
+# goroutine dump -- often hundreds of lines -- whose *cause* sits at the TOP
+# (`panic:` / `fatal error:` / `[signal SIGSEGV ...]`) and whose crashing stack
+# follows immediately after. A plain `tail` captures only the bottom (an idle
+# goroutine) and hides the reason, so this prints from the first crash marker
+# onward, plus a tail for context. The whole log is also echoed when short, so
+# the reason survives even with no recognizable marker (e.g. a CGO abort).
+dump_connector_crash() {
+    local log_file="$1"
+    [[ -f "$log_file" ]] || { log_error "No connector log at $log_file"; return; }
+
+    local lines marker
+    lines=$(wc -l <"$log_file" | tr -d ' ')
+    log_error "Connector log: $log_file ($lines lines)"
+
+    # First line of the crash report -- the reason. SIGSEGV/SIGABRT lines, Go
+    # panics, runtime fatal errors, and cgo aborts all start with one of these.
+    marker=$(grep -niE '^(panic:|fatal error:|fatal:|runtime:|\[signal |SIG[A-Z]+:|unexpected fault)' "$log_file" \
+        | head -1 | cut -d: -f1)
+
+    if [[ -n "$marker" ]]; then
+        log_error "Crash reason (from line $marker):"
+        # Cap the dumped stack so a huge all-goroutines dump stays readable;
+        # the crashing goroutine is always within the first ~60 lines.
+        sed -n "${marker},$((marker + 60))p" "$log_file" >&2
+    elif [[ "$lines" -le 200 ]]; then
+        log_error "No crash marker found; full connector log:"
+        cat "$log_file" >&2
+    else
+        log_error "No crash marker found; last 80 log lines:"
+        tail -80 "$log_file" >&2
+    fi
+}
+
 # Wait until SUM(COUNT(*)) across the listed tables reaches expected_rows.
 # Queries QDB directly, so it observes actual write-visibility instead of the
 # connector's buffered "wrote rows" log lines -- which return before data is
@@ -408,7 +444,7 @@ wait_for_qdb_rows() {
             pid=$(cat "$pid_file" 2>/dev/null || true)
             if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
                 log_error "Connector process (PID: $pid) has exited unexpectedly"
-                [[ -f "$log_file" ]] && { log_error "Last log entries:"; tail -10 "$log_file"; }
+                dump_connector_crash "$log_file"
                 return 1
             fi
         fi

@@ -144,7 +144,23 @@ func (w *Writer) Push(h HandleType) error {
 		return wrapError(C.qdb_e_invalid_argument, "writer_push", "reason", "no tables")
 	}
 
-	tblSlice := make([]C.qdb_exp_batch_push_table_t, w.Length())
+	// Allocate the native table array in C memory rather than with make(). A
+	// Go-allocated slice of these structs holds C pointers in its name/columns/
+	// where_duplicate fields; the GC scans those, validates the C addresses as
+	// Go pointers, and aborts ("found bad pointer in Go heap" / "marked free
+	// object") whenever a C address overlaps a heap arena. C memory is never
+	// scanned, eliminating that whole class. Freed via releases after the push.
+	tblCount := w.Length()
+	tblPtr := qdbAllocBuffer[C.qdb_exp_batch_push_table_t](h, tblCount)
+	releases = append(releases, func() { qdbRelease(h, tblPtr) })
+	// qdbAllocBuffer returns uninitialized memory; zero it so any field the
+	// builders do not set is not garbage (make() previously zeroed). Byte
+	// stores emit no write barrier.
+	tblBytes := unsafe.Slice((*byte)(unsafe.Pointer(tblPtr)), int(unsafe.Sizeof(*tblPtr))*tblCount)
+	for j := range tblBytes {
+		tblBytes[j] = 0
+	}
+	tblSlice := unsafe.Slice(tblPtr, tblCount)
 	i := 0
 
 	// Phase 1: Prepare - Collect all PinnableBuilders from all tables

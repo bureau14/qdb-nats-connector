@@ -661,8 +661,11 @@ func (cd *ColumnDataString) PinToC(h HandleType) (builder PinnableBuilder, relea
 	envelope := qdbAllocBuffer[C.qdb_string_t](h, len(cd.xs))
 	envelopeSlice := unsafe.Slice(envelope, len(cd.xs))
 
-	// Track copied strings for cleanup
-	copiedStrings := make([]*C.char, 0, len(cd.xs))
+	// Track copied strings for cleanup. Held as uintptr (not []*C.char) so the
+	// GC neither scans these C pointers nor emits a write barrier when they are
+	// appended: a C address can overlap a Go heap arena range, which makes the
+	// barrier's validation abort with "found bad pointer in Go heap".
+	copiedStrings := make([]uintptr, 0, len(cd.xs))
 
 	// No objects to pin - we're copying instead
 
@@ -672,20 +675,28 @@ func (cd *ColumnDataString) PinToC(h HandleType) (builder PinnableBuilder, relea
 				if str != "" {
 					// Copy string to C memory (includes null terminator)
 					cStr := qdbCopyString(h, str)
-					copiedStrings = append(copiedStrings, cStr)
-					envelopeSlice[i].data = cStr
+					copiedStrings = append(copiedStrings, uintptr(unsafe.Pointer(cStr)))
+					// envelopeSlice backs onto C-allocated, non-zeroed memory.
+					// A plain pointer store to .data emits a Go write barrier
+					// that reads the slot's prior (garbage C) bytes as a Go
+					// pointer; under GC/cgocheck2 that aborts with "found bad
+					// pointer in Go heap". Store via uintptr so no barrier is
+					// emitted -- safe because cStr is C memory the GC never owns.
+					*(*uintptr)(unsafe.Pointer(&envelopeSlice[i].data)) = uintptr(unsafe.Pointer(cStr))
 					envelopeSlice[i].length = C.qdb_size_t(len(str))
 				} else {
-					envelopeSlice[i].data = nil
+					*(*uintptr)(unsafe.Pointer(&envelopeSlice[i].data)) = 0
 					envelopeSlice[i].length = 0
 				}
 			}
 
 			return unsafe.Pointer(envelope)
 		}), func() {
-			// Release all copied strings
+			// Release all copied strings (stored as uintptr above; these are
+			// stable C pointers the GC never relocates, so the round-trip back
+			// to unsafe.Pointer is safe).
 			for _, cStr := range copiedStrings {
-				qdbReleasePointer(h, unsafe.Pointer(cStr))
+				qdbReleasePointer(h, unsafe.Pointer(cStr)) //nolint:govet // stable C pointer held as uintptr
 			}
 			// Release envelope
 			qdbRelease(h, envelope)

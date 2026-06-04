@@ -6,23 +6,14 @@
 #   - qdbd : already provisioned by scripts/tests/setup/start-services.sh
 #   - NATS : a JetStream server provisioned just-in-time by start-nats.sh
 #
-# Scope: Linux only for the initial proof-of-concept. On non-Linux agents this
-# is a no-op so the shared per-platform _build.yml chain stays green. NATS
-# cleanup is handled by stop-nats.sh via the Buildkite pre-exit hook (mirrors
+# Scope: runs on every platform (Linux, macOS, Windows, FreeBSD). NATS cleanup
+# is handled by stop-nats.sh via the Buildkite pre-exit hook (mirrors
 # stop-services.sh).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
-
-# E2E is gated to Linux for the PoC (finance-ohlc only). Windows/FreeBSD/macOS
-# agents skip it until their tooling (nats CLI) and the bash/make examples
-# flow are validated cross-platform.
-if [[ "$(uname)" != "Linux" ]]; then
-    echo "==[ test-e2e: skipped on $(uname) (Linux-only proof-of-concept) ]=="
-    exit 0
-fi
 
 # Source shared CGO and Go-toolchain env helpers.
 source "${SCRIPT_DIR}/00.common.sh"

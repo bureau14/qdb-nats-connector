@@ -20,7 +20,9 @@ SUBJECT="finance.ohlc"
 NUM_MESSAGES="${NUM_MESSAGES:-1000}"
 PID_FILE="$SCRIPT_DIR/finance-ohlc-connector.pid"
 LOG_FILE="$SCRIPT_DIR/finance-ohlc-connector.log"
-CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
+# go build appends .exe on Windows (EXE_EXT, from common.sh); match it so the
+# -f existence check below and the exec resolve the real file.
+CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector${EXE_EXT}"
 DATASETS_DIR="${DATASETS_DIR:-$SCRIPT_DIR/datasets}"
 
 # Per-(example, message-count) dataset directory: the single source of truth.

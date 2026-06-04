@@ -4,6 +4,18 @@
 
 set -euo pipefail
 
+# Executable suffix for the current platform: ".exe" on Windows (MSYS/Git-bash
+# reports MINGW/MSYS/CYGWIN from uname), empty everywhere else. Every binary the
+# examples invoke -- the connector, the qdb/nats CLIs, the data tools -- is
+# built/shipped with this suffix, so scripts append ${EXE_EXT} rather than
+# repeating the OS check. Defined at source time so scripts that source this
+# file can use it immediately (before setup_environment runs).
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) EXE_EXT=".exe" ;;
+    *)                    EXE_EXT="" ;;
+esac
+export EXE_EXT
+
 # Environment Setup
 # Source .env if exists and set defaults for QDB_URI and NATS_URL
 setup_environment() {
@@ -37,9 +49,9 @@ setup_environment() {
     repo_root="$(cd "$script_dir/.." && pwd)"
     export QDB_BIN_DIR="${QDB_BIN_DIR:-$repo_root/qdb/bin}"
     export NATS_BIN_DIR="${NATS_BIN_DIR:-$repo_root/nats/bin}"
-    export QDBSH="${QDBSH:-$QDB_BIN_DIR/qdbsh}"
-    export QDB_EXPORT="${QDB_EXPORT:-$QDB_BIN_DIR/qdb_export}"
-    export NATS_CLI="${NATS_CLI:-$NATS_BIN_DIR/nats}"
+    export QDBSH="${QDBSH:-$QDB_BIN_DIR/qdbsh$EXE_EXT}"
+    export QDB_EXPORT="${QDB_EXPORT:-$QDB_BIN_DIR/qdb_export$EXE_EXT}"
+    export NATS_CLI="${NATS_CLI:-$NATS_BIN_DIR/nats$EXE_EXT}"
 
     log_debug "Environment setup: QDB_URI=$QDB_URI, NATS_URL=$NATS_URL"
     log_debug "Tools: QDBSH=$QDBSH, QDB_EXPORT=$QDB_EXPORT, NATS_CLI=$NATS_CLI"

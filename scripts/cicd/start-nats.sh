@@ -27,6 +27,16 @@ NATS_STORE_DIR="${NATS_DIR}/jetstream"
 NATS_PID_FILE="${NATS_DIR}/nats-server.pid"
 NATS_LOG_FILE="${NATS_DIR}/nats-server.log"
 
+# Windows archives ship `.exe` binaries (nats-server.exe, nats.exe); every other
+# platform ships extensionless ones. Append the suffix to both the name searched
+# for inside the archive and the installed path so the fetch/launch logic works
+# unchanged across MSYS/Git-bash and Unix.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) EXE_EXT=".exe" ;;
+    *)                    EXE_EXT="" ;;
+esac
+NATS_SERVER_BIN="${NATS_BIN_DIR}/nats-server${EXE_EXT}"
+
 # Map `uname` to the os/arch tokens used in the S3 artifact filenames.
 # Echoes "<os> <arch>"; exits non-zero on an unsupported platform.
 detect_platform() {
@@ -91,7 +101,7 @@ launch_server() {
     fi
     mkdir -p "${NATS_STORE_DIR}"
     echo "start-nats: launching nats-server -js on 127.0.0.1:${NATS_PORT}"
-    nohup "${NATS_BIN_DIR}/nats-server" \
+    nohup "${NATS_SERVER_BIN}" \
         -a 127.0.0.1 -p "${NATS_PORT}" -js -sd "${NATS_STORE_DIR}" \
         > "${NATS_LOG_FILE}" 2>&1 &
     echo "$!" > "${NATS_PID_FILE}"
@@ -128,9 +138,9 @@ main() {
 
     mkdir -p "${NATS_BIN_DIR}"
     fetch_binary "nats-server-v${NATS_SERVER_VERSION}-${os}-${arch}.${server_ext}" \
-        "nats-server" "${NATS_BIN_DIR}/nats-server"
+        "nats-server${EXE_EXT}" "${NATS_SERVER_BIN}"
     fetch_binary "nats-${NATS_CLI_VERSION}-${os}-${arch}.zip" \
-        "nats" "${NATS_BIN_DIR}/nats"
+        "nats${EXE_EXT}" "${NATS_BIN_DIR}/nats${EXE_EXT}"
 
     launch_server
     wait_until_ready

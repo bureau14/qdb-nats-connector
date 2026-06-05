@@ -38,6 +38,17 @@ fi
 cicd_setup_qdb_env
 cicd_setup_go_toolchain
 
+# The examples Makefile invokes `go` by name (not via $GO), relying on PATH.
+# cicd_setup_go_toolchain exports $GO as an absolute path but prepends a
+# Windows-style GOROOT\bin to PATH, which the MSYS shell that mingw32-make
+# spawns cannot parse (':' is its PATH separator), so `go` is not found. On
+# Windows, prepend the unix-converted go directory so the make recipes resolve
+# it. No-op elsewhere (cygpath is MSYS-only; go is already on PATH there).
+if command -v cygpath > /dev/null 2>&1 && [[ -n "${GO:-}" ]]; then
+    PATH="$(cygpath -u "$(dirname "${GO}")"):${PATH}"
+    export PATH
+fi
+
 # The examples Makefile rebuilds qdb-data-gen / qdb-data-loader via `go build`.
 # Inside bureau14/builder:rhel7 the agent UID has no /etc/passwd entry, so VCS
 # stamping fails; disable it the same way 20.build.sh does.

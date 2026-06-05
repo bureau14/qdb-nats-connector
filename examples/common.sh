@@ -347,17 +347,24 @@ validate_environment() {
 }
 
 # Refuse to proceed if any qdb-nats-connector process is already running.
-# Detection is process-based (pgrep -f on the connector binary path) so it catches
-# leaked or orphaned connectors regardless of PID-file state, including ones that have
-# been reparented to init. Hard error (die) listing the offending processes; no bypass.
+# Detection is process-based so it catches leaked or orphaned connectors
+# regardless of PID-file state, including ones reparented to init. The inspector
+# varies by platform: pgrep on Linux/macOS/FreeBSD, tasklist on Windows (the
+# connector is a native .exe and MSYS2 ships no pgrep), ps as a last resort.
+# Hard error (die) listing the offending processes; no bypass.
 assert_no_connector_running() {
-    local pattern='bin/qdb-nats-connector'
+    local matches=""
 
-    command -v pgrep >/dev/null 2>&1 || \
-        die "pgrep not found; it is required for the connector preflight check"
-
-    local matches
-    matches=$(pgrep -lf "$pattern" 2>/dev/null || true)
+    if command -v pgrep >/dev/null 2>&1; then
+        matches=$(pgrep -lf 'bin/qdb-nats-connector' 2>/dev/null || true)
+    elif command -v tasklist >/dev/null 2>&1; then
+        matches=$(tasklist 2>/dev/null | grep -i 'qdb-nats-connector' || true)
+    elif command -v ps >/dev/null 2>&1; then
+        matches=$(ps -e 2>/dev/null | grep 'qdb-nats-connector' | grep -v grep || true)
+    else
+        log_info "No process inspector (pgrep/tasklist/ps) available; skipping connector preflight check"
+        return 0
+    fi
 
     if [[ -n "$matches" ]]; then
         log_error "Refusing to start: a qdb-nats-connector process is already running:"

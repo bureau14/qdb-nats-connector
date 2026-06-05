@@ -49,6 +49,24 @@ if command -v cygpath > /dev/null 2>&1 && [[ -n "${GO:-}" ]]; then
     export PATH
 fi
 
+# Windows: the Buildkite agent runs under a service whose spawned processes skip
+# the PATH-based DLL search (NTSTATUS 0xC00000BE), so the connector .exe cannot
+# locate libqdb_api.dll via PATH and exits before main() with no output. Windows
+# always searches the executable's own directory first, so co-locate the qdb
+# DLLs next to the connector binary. (The qdb/nats CLI tools and the loader work
+# without this because they are not CGO-linked against the qdb C API.)
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        mkdir -p "${BASE_DIR}/bin"
+        for _dlldir in "${BASE_DIR}/qdb/bin" "${BASE_DIR}/qdb/lib"; do
+            [[ -d "${_dlldir}" ]] || continue
+            find "${_dlldir}" -maxdepth 1 -name '*.dll' -exec cp -f {} "${BASE_DIR}/bin/" \;
+        done
+        echo "test-e2e: co-located qdb DLLs into ${BASE_DIR}/bin"
+        ls "${BASE_DIR}/bin/"*.dll 2>/dev/null || echo "test-e2e: WARNING no qdb DLLs found to co-locate"
+        ;;
+esac
+
 # The examples Makefile rebuilds qdb-data-gen / qdb-data-loader via `go build`.
 # Inside bureau14/builder:rhel7 the agent UID has no /etc/passwd entry, so VCS
 # stamping fails; disable it the same way 20.build.sh does.

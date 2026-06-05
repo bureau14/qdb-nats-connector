@@ -49,7 +49,9 @@ EXPECTED_DIR="$DATASET_DIR/expected"
 ACTUAL_DIR="$DATASET_DIR/actual"
 PID_FILE="$SCRIPT_DIR/network-metrics-connector.pid"
 LOG_FILE="$SCRIPT_DIR/network-metrics-connector.log"
-CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
+# go build appends .exe on Windows (EXE_EXT, from common.sh); match it so the
+# -f/-x checks below and the exec resolve the real file.
+CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector${EXE_EXT}"
 
 # Worker configuration
 WORKERS=${WORKERS:-$(get_default_workers)}
@@ -281,8 +283,8 @@ action_load() {
     
     log_info "Loading data from $data_to_load into NATS JetStream..."
     
-    # Run loader with calculated timeout
-    timeout "$load_timeout" ../bin/qdb-data-loader --file "$data_to_load" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    # Run loader with calculated timeout (portable: no timeout(1) on macOS).
+    run_with_timeout "$load_timeout" ../bin/qdb-data-loader --file "$data_to_load" --topic "$SUBJECT" --stream "$STREAM_NAME" \
                           --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     log_info "Data loaded successfully"
 
@@ -331,29 +333,16 @@ Please make it executable with: chmod +x $CONNECTOR_BINARY"
         fi
     fi
 
-    # Verify direnv is available
-    log_debug "Checking for direnv command..."
-    if ! command -v direnv >/dev/null 2>&1; then
-        die "direnv command not found. Please install direnv or run the connector directly."
-    fi
-    log_debug "direnv command found"
-
     log_info "Starting connector with config: $CONFIG_FILE"
     log_info "Logs will be written to: $LOG_FILE"
-    log_debug "Command: direnv exec . $CONNECTOR_BINARY --nats $NATS_URL --qdb $QDB_URI --stream $STREAM_NAME --consumer network-connector --workers $WORKERS --parser yaml --parser-config $CONFIG_FILE"
 
-    # Clear any existing log file to avoid confusion
-    log_debug "Clearing previous log file..."
-    if ! > "$LOG_FILE"; then
-        die "Failed to clear log file: $LOG_FILE. Check permissions."
-    fi
-
-    # Flush all output before starting the connector
-    exec 1>&1 2>&2
-
-    # Start connector in background and capture PID
-    log_debug "Starting connector process..."
-    if ! direnv exec . "$CONNECTOR_BINARY" \
+    # Start connector in background and capture PID. run_with_direnv wraps the
+    # binary in `direnv exec .` on dev machines (loads the repo .envrc CGO env)
+    # and execs it directly in CI, where direnv is absent and the same env is
+    # exported by scripts/cicd/00.common.sh. GOTRACEBACK=all dumps every
+    # goroutine on an unrecovered crash (panic or CGO SIGSEGV at the QuasarDB
+    # boundary). Mirrors finance-ohlc.sh action_run.
+    GOTRACEBACK=all run_with_direnv "$CONNECTOR_BINARY" \
         --nats "$NATS_URL" \
         --qdb "$QDB_URI" \
         --stream "$STREAM_NAME" \
@@ -361,12 +350,7 @@ Please make it executable with: chmod +x $CONNECTOR_BINARY"
         --workers "$WORKERS" \
         --parser yaml \
         --parser-config "$CONFIG_FILE" \
-        > "$LOG_FILE" 2>&1 & then
-        echo "[ERROR] Failed to start connector with direnv" >&2
-        echo "[ERROR] Command: direnv exec . $CONNECTOR_BINARY --nats $NATS_URL --qdb $QDB_URI --stream $STREAM_NAME --consumer network-connector --workers $WORKERS --parser yaml --parser-config $CONFIG_FILE" >&2
-        echo "[ERROR] Check that direnv is properly configured and the binary path is correct" >&2
-        exit 1
-    fi
+        > "$LOG_FILE" 2>&1 &
 
     local connector_pid=$!
     log_debug "Started connector process with PID: $connector_pid"

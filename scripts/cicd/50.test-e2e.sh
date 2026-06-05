@@ -134,7 +134,7 @@ dump_e2e_failure_logs() {
 # Examples run end-to-end against the shared qdbd + NATS server. Each uses its
 # own NATS stream and QuasarDB tables and stops its connector before the next,
 # so they run sequentially without interfering.
-E2E_EXAMPLES="finance-ohlc industrial-sensor"
+E2E_EXAMPLES="finance-ohlc industrial-sensor network-metrics"
 for _example in ${E2E_EXAMPLES}; do
     echo "+++ Run e2e example: ${_example} (10000 messages)"
     if ! "${MAKE_BIN}" -C examples test EXAMPLE="${_example}" NUM_MESSAGES=10000; then

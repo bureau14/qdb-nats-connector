@@ -60,5 +60,32 @@ if [[ "$(uname)" == "FreeBSD" ]]; then
     MAKE_BIN="gmake"
 fi
 
+# On e2e failure, dump the connector and qdbd logs. The example's wait step
+# aborts on the first connector ERROR but only echoes that one line, and the
+# qdbd-side logs are never surfaced in CI -- so a server-side refusal/crash
+# (seen on FreeBSD: "writer_write ... Connection refused") is undiagnosable
+# from the build output alone. These files are not Buildkite artifacts.
+dump_e2e_failure_logs() {
+    local setup_dir="${BASE_DIR}/scripts/tests/setup"
+    echo "+++ e2e failed -- connector log"
+    local connector_log="${BASE_DIR}/examples/finance-ohlc-connector.log"
+    [[ -f "${connector_log}" ]] && tail -100 "${connector_log}" || echo "(no connector log at ${connector_log})"
+
+    echo "+++ e2e failed -- qdbd insecure stderr"
+    local qdbd_err="${setup_dir}/qdbd_log_insecure.err.txt"
+    [[ -f "${qdbd_err}" ]] && tail -120 "${qdbd_err}" || echo "(no qdbd stderr at ${qdbd_err})"
+
+    echo "+++ e2e failed -- qdbd insecure structured log"
+    local qdbd_log_dir="${setup_dir}/insecure/log"
+    if [[ -d "${qdbd_log_dir}" ]]; then
+        find "${qdbd_log_dir}" -type f -name '*.log' -exec tail -120 {} +
+    else
+        echo "(no qdbd log dir at ${qdbd_log_dir})"
+    fi
+}
+
 echo "+++ Run e2e example: finance-ohlc (10000 messages)"
-"${MAKE_BIN}" -C examples test EXAMPLE=finance-ohlc NUM_MESSAGES=10000
+if ! "${MAKE_BIN}" -C examples test EXAMPLE=finance-ohlc NUM_MESSAGES=10000; then
+    dump_e2e_failure_logs
+    exit 1
+fi

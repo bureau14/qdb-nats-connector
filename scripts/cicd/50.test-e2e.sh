@@ -47,18 +47,29 @@ echo "+++ Start NATS (JetStream)"
 bash "${SCRIPT_DIR}/start-nats.sh"
 
 # examples/Makefile uses GNU make extensions (define/endef/foreach/eval/ifeq).
-# FreeBSD's default `make` is BSD make and cannot parse it ("Invalid line
-# endef"); use gmake there. Linux and macOS ship GNU make as `make`. Mirrors
-# the FreeBSD GNU-make caveat documented in 20.build.sh.
-MAKE_BIN="make"
-if [[ "$(uname)" == "FreeBSD" ]]; then
-    if ! command -v gmake > /dev/null 2>&1; then
-        echo "ERROR: examples/Makefile needs GNU make; gmake not found." >&2
-        echo "Install it on the FreeBSD agent: pkg install -y gmake" >&2
-        exit 1
+# The GNU make binary's name varies by platform: `make` on Linux/macOS; `gmake`
+# on FreeBSD (whose default `make` is BSD make and aborts with "Invalid line
+# endef"); and on Windows MSYS2 agents `make` is often absent while the MinGW
+# toolchain ships `mingw32-make`. Pick the first candidate that exists. Mirrors
+# the FreeBSD/Windows GNU-make caveat documented in 20.build.sh.
+case "$(uname -s)" in
+    FreeBSD)              MAKE_CANDIDATES="gmake make" ;;
+    MINGW*|MSYS*|CYGWIN*) MAKE_CANDIDATES="make mingw32-make gmake" ;;
+    *)                    MAKE_CANDIDATES="make gmake" ;;
+esac
+MAKE_BIN=""
+for _m in ${MAKE_CANDIDATES}; do
+    if command -v "${_m}" > /dev/null 2>&1; then
+        MAKE_BIN="${_m}"
+        break
     fi
-    MAKE_BIN="gmake"
+done
+if [[ -z "${MAKE_BIN}" ]]; then
+    echo "ERROR: examples/Makefile needs GNU make; none of [${MAKE_CANDIDATES}] found on $(uname -s)." >&2
+    echo "Install GNU make on this agent (FreeBSD: pkg install -y gmake; MSYS2: pacman -S make)." >&2
+    exit 1
 fi
+echo "test-e2e: using '${MAKE_BIN}' as GNU make"
 
 # On e2e failure, dump the connector and qdbd logs. The example's wait step
 # aborts on the first connector ERROR but only echoes that one line, and the

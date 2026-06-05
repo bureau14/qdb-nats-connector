@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Finance OHLC market data example - Modular actions for golden data testing
 set -euo pipefail
 

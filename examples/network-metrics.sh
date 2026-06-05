@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Network device metrics monitoring example - Modular actions for golden data testing
 set -euo pipefail
 

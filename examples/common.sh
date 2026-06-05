@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Common infrastructure for golden data testing framework
 # Provides shared utilities for environment, logging, error handling, process management, and validation
 

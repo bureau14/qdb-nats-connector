@@ -105,17 +105,24 @@ echo "test-e2e: using '${MAKE_BIN}' as GNU make"
 # qdbd-side logs are never surfaced in CI -- so a server-side refusal/crash
 # (seen on FreeBSD: "writer_write ... Connection refused") is undiagnosable
 # from the build output alone. These files are not Buildkite artifacts.
+# dump_e2e_failure_logs <example>: on e2e failure, dump that example's
+# connector log and the qdbd logs. The example's wait step aborts on the first
+# connector ERROR but only echoes that one line, and the qdbd-side logs are
+# never surfaced in CI -- so a server-side refusal/crash (seen on FreeBSD:
+# "writer_write ... Connection refused") is undiagnosable from the build output
+# alone. These files are not Buildkite artifacts.
 dump_e2e_failure_logs() {
+    local example="$1"
     local setup_dir="${BASE_DIR}/scripts/tests/setup"
-    echo "+++ e2e failed -- connector log"
-    local connector_log="${BASE_DIR}/examples/finance-ohlc-connector.log"
+    echo "+++ e2e failed (${example}) -- connector log"
+    local connector_log="${BASE_DIR}/examples/${example}-connector.log"
     [[ -f "${connector_log}" ]] && tail -100 "${connector_log}" || echo "(no connector log at ${connector_log})"
 
-    echo "+++ e2e failed -- qdbd insecure stderr"
+    echo "+++ e2e failed (${example}) -- qdbd insecure stderr"
     local qdbd_err="${setup_dir}/qdbd_log_insecure.err.txt"
     [[ -f "${qdbd_err}" ]] && tail -120 "${qdbd_err}" || echo "(no qdbd stderr at ${qdbd_err})"
 
-    echo "+++ e2e failed -- qdbd insecure structured log"
+    echo "+++ e2e failed (${example}) -- qdbd insecure structured log"
     local qdbd_log_dir="${setup_dir}/insecure/log"
     if [[ -d "${qdbd_log_dir}" ]]; then
         find "${qdbd_log_dir}" -type f -name '*.log' -exec tail -120 {} +
@@ -124,8 +131,14 @@ dump_e2e_failure_logs() {
     fi
 }
 
-echo "+++ Run e2e example: finance-ohlc (10000 messages)"
-if ! "${MAKE_BIN}" -C examples test EXAMPLE=finance-ohlc NUM_MESSAGES=10000; then
-    dump_e2e_failure_logs
-    exit 1
-fi
+# Examples run end-to-end against the shared qdbd + NATS server. Each uses its
+# own NATS stream and QuasarDB tables and stops its connector before the next,
+# so they run sequentially without interfering.
+E2E_EXAMPLES="finance-ohlc industrial-sensor"
+for _example in ${E2E_EXAMPLES}; do
+    echo "+++ Run e2e example: ${_example} (10000 messages)"
+    if ! "${MAKE_BIN}" -C examples test EXAMPLE="${_example}" NUM_MESSAGES=10000; then
+        dump_e2e_failure_logs "${_example}"
+        exit 1
+    fi
+done

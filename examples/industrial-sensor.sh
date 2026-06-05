@@ -20,7 +20,9 @@ SUBJECT="industrial.temperature"
 NUM_MESSAGES="${NUM_MESSAGES:-1000}"
 PID_FILE="$SCRIPT_DIR/industrial-sensor-connector.pid"
 LOG_FILE="$SCRIPT_DIR/industrial-sensor-connector.log"
-CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector"
+# go build appends .exe on Windows (EXE_EXT, from common.sh); match it so the
+# -f existence check below and the exec resolve the real file.
+CONNECTOR_BINARY="$SCRIPT_DIR/../bin/qdb-nats-connector${EXE_EXT}"
 DATASETS_DIR="${DATASETS_DIR:-$SCRIPT_DIR/datasets}"
 
 # Per-(example, message-count) dataset directory: the single source of truth.
@@ -292,11 +294,13 @@ action_run() {
     log_info "Starting connector with config: $CONFIG_FILE"
     log_info "Logs will be written to: $LOG_FILE"
 
-    # DEBUG: Show the full command being executed
-    log_info "[DEBUG] Full command: direnv exec . $CONNECTOR_BINARY --nats $NATS_URL --qdb $QDB_URI --stream $STREAM_NAME --consumer industrial-connector --workers $WORKERS --parser yaml --parser-config $CONFIG_FILE"
-
-    # Start connector in background and capture PID
-    direnv exec . "$CONNECTOR_BINARY" \
+    # Start connector in background and capture PID. run_with_direnv wraps the
+    # binary in `direnv exec .` on dev machines (loads the repo .envrc CGO env)
+    # and execs it directly in CI, where direnv is absent and the same env is
+    # exported by scripts/cicd/00.common.sh. GOTRACEBACK=all dumps every
+    # goroutine on an unrecovered crash (panic or CGO SIGSEGV at the QuasarDB
+    # boundary). Mirrors finance-ohlc.sh action_run.
+    GOTRACEBACK=all run_with_direnv "$CONNECTOR_BINARY" \
         --nats "$NATS_URL" \
         --qdb "$QDB_URI" \
         --stream "$STREAM_NAME" \

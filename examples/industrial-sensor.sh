@@ -247,8 +247,8 @@ action_load() {
     
     log_info "Loading data from $data_to_load into NATS JetStream..."
     
-    # Run loader with calculated timeout
-    timeout "$load_timeout" ../bin/qdb-data-loader --file "$data_to_load" --topic "$SUBJECT" --stream "$STREAM_NAME" \
+    # Run loader with calculated timeout (portable: no timeout(1) on macOS).
+    run_with_timeout "$load_timeout" ../bin/qdb-data-loader --file "$data_to_load" --topic "$SUBJECT" --stream "$STREAM_NAME" \
                         --nats-url "$NATS_URL" --batch-size 500 --workers "$WORKERS"
     local loader_exit_code=$?
     

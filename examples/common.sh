@@ -107,6 +107,25 @@ run_with_direnv() {
     fi
 }
 
+# Run a command under a wall-clock timeout when a timeout(1) implementation is
+# available -- GNU coreutils `timeout` (Linux/FreeBSD/MSYS2) or `gtimeout`
+# (macOS with coreutils). macOS ships neither by default, so fall back to
+# running without a limit (the timeout is a safety net, not essential -- the
+# finance-ohlc example loads with no timeout at all). Preserves the command's
+# exit status, including coreutils' 124-on-timeout convention.
+# Usage: run_with_timeout <seconds> <command...>
+run_with_timeout() {
+    local seconds="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 # Error Handling
 die() {
     local message="$1"

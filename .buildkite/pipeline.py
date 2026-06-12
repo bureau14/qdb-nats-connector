@@ -182,6 +182,10 @@ def _docker_step() -> dict:
     `libqdb_api` directly from `download.quasar.ai` (temporary
     scaffolding; will be superseded once QuasarDB 3.14.3 ships an
     official public artifact for the connector).
+
+    On master builds the step's script pushes the `:latest` tag to
+    Docker Hub; the branch gate and the SSM credential fetch both live
+    in `scripts/cicd/60.docker.sh`, not here.
     """
     step = load_template(STEPS_DIR / "_docker.yml")
     env = merge_env(GLOBAL_ENV, STEP_ENV.get("docker", {}))

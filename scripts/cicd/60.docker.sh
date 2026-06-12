@@ -8,8 +8,9 @@
 # <image>:<version> --version` as a smoke test that the binary launches
 # and libqdb_api.so loads via the baked rpath.
 #
-# The image is NOT pushed to any registry (temporary scaffolding -- will
-# be superseded once QuasarDB 3.14.3 ships an official artifact).
+# On master builds, the :latest tag is pushed to Docker Hub using the
+# read-write credential pair from SSM; branch and local runs build and
+# smoke-test only. The :${VERSION} tag is never pushed.
 
 set -euxo pipefail
 
@@ -48,3 +49,45 @@ docker build \
 docker run --rm "${IMAGE}:${VERSION}" --version
 
 echo "Built and validated: ${IMAGE}:${VERSION} (also tagged :latest)"
+
+# --- push (master builds only) ---
+
+# Only the moving :latest pointer is published. Credentials are the
+# read-write Docker Hub pair from SSM, written into a throwaway
+# DOCKER_CONFIG so the agent's persistent docker config (which holds the
+# fleet-wide read-only pull credential) is never touched.
+
+if [[ "${BUILDKITE_BRANCH:-}" == "master" ]]
+then
+    SSM_PREFIX="${BUILDKITE_SSM_PREFIX:-/services/buildkite}"
+    SSM_REGION="${AWS_DEFAULT_REGION:-eu-west-1}"
+
+    DOCKER_CONFIG="$(mktemp -d)"
+    export DOCKER_CONFIG
+    trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+
+    # set +x: the token must never reach the build log.
+    set +x
+    echo "Authenticating docker push from ${SSM_PREFIX}/config/dockerhub/push-username"
+    PUSH_USERNAME="$(aws ssm get-parameter \
+        --name "${SSM_PREFIX}/config/dockerhub/push-username" \
+        --region "${SSM_REGION}" \
+        --with-decryption \
+        --query 'Parameter.Value' \
+        --output text)"
+    aws ssm get-parameter \
+        --name "${SSM_PREFIX}/credentials/dockerhub/push-token" \
+        --region "${SSM_REGION}" \
+        --with-decryption \
+        --query 'Parameter.Value' \
+        --output text \
+        | docker login --username "${PUSH_USERNAME}" --password-stdin
+    set -x
+
+    docker push "${IMAGE}:latest"
+    docker logout
+
+    echo "Pushed: ${IMAGE}:latest"
+else
+    echo "Skipping docker push: branch '${BUILDKITE_BRANCH:-}' is not master"
+fi

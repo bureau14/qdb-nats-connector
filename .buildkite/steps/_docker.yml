@@ -5,7 +5,7 @@
 # On master builds the script also pushes the :latest tag to Docker Hub
 # (credentials fetched from SSM inside the script).
 
-label: ":docker: build & smoke-test image"
+label: ":docker: build, smoke-test and push"
 key: docker
 
 env:

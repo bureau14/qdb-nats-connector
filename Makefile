@@ -29,17 +29,17 @@ LDFLAGS_VERSION := -X main.version=$(VERSION) \
 # Mode-specific flags
 ifeq ($(BUILD_MODE),release)
 	# Production build: optimized with debug symbols for debugging crashes
-	GOFLAGS := -trimpath
+	GOFLAGS := -trimpath -mod=vendor
 	LDFLAGS := $(LDFLAGS_VERSION)
 	GCFLAGS :=
 else ifeq ($(BUILD_MODE),release-min)
 	# Minimal release: stripped binaries (only if debuginfo captured separately)
-	GOFLAGS := -trimpath
+	GOFLAGS := -trimpath -mod=vendor
 	LDFLAGS := -s -w $(LDFLAGS_VERSION)
 	GCFLAGS :=
 else ifeq ($(BUILD_MODE),debug)
 	# Debug build: unoptimized for debugging with dlv/gdb
-	GOFLAGS :=
+	GOFLAGS := -mod=vendor
 	LDFLAGS := $(LDFLAGS_VERSION)
 	GCFLAGS := all=-N -l
 else
@@ -96,7 +96,7 @@ build-single: $(BIN_DIR)
 
 # Run tests with race detector and CGO checks
 test:
-	GOEXPERIMENT=cgocheck2 $(GO) test -race ./...
+	GOEXPERIMENT=cgocheck2 $(GO) test -mod=vendor -race ./...
 
 # Run golangci-lint
 lint:

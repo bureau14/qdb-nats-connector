@@ -70,7 +70,9 @@ esac
 # The examples Makefile rebuilds qdb-data-gen / qdb-data-loader via `go build`.
 # Inside bureau14/builder:rhel7 the agent UID has no /etc/passwd entry, so VCS
 # stamping fails; disable it the same way 20.build.sh does.
-export GOFLAGS="${GOFLAGS:+${GOFLAGS} }-buildvcs=false"
+# -mod=vendor: the examples Makefile's go builds must resolve strictly from
+# vendor/ too -- fail loudly instead of silently fetching from the proxy.
+export GOFLAGS="${GOFLAGS:+${GOFLAGS} }-buildvcs=false -mod=vendor"
 
 echo "+++ Start NATS (JetStream)"
 bash "${SCRIPT_DIR}/start-nats.sh"

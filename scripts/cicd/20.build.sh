@@ -276,7 +276,9 @@ case "$(uname)" in
 esac
 
 BUILD_MODE="release"
-GOFLAGS="-trimpath"
+# -mod=vendor: build strictly from the committed vendor/ tree; fail loudly
+# instead of silently fetching from the proxy if vendor/ is missing or stale.
+GOFLAGS="-trimpath -mod=vendor"
 GCFLAGS=""
 LDFLAGS="-X main.version=${VERSION} \
          -X main.commit=${GIT_SHA} \

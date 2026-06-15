@@ -1,8 +1,20 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Common infrastructure for golden data testing framework
 # Provides shared utilities for environment, logging, error handling, process management, and validation
 
 set -euo pipefail
+
+# Executable suffix for the current platform: ".exe" on Windows (MSYS/Git-bash
+# reports MINGW/MSYS/CYGWIN from uname), empty everywhere else. Every binary the
+# examples invoke -- the connector, the qdb/nats CLIs, the data tools -- is
+# built/shipped with this suffix, so scripts append ${EXE_EXT} rather than
+# repeating the OS check. Defined at source time so scripts that source this
+# file can use it immediately (before setup_environment runs).
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) EXE_EXT=".exe" ;;
+    *)                    EXE_EXT="" ;;
+esac
+export EXE_EXT
 
 # Environment Setup
 # Source .env if exists and set defaults for QDB_URI and NATS_URL
@@ -29,7 +41,20 @@ setup_environment() {
     export QDB_URI="${QDB_URI:-qdb://127.0.0.1:2836}"
     export NATS_URL="${NATS_URL:-nats://localhost:4222}"
     
+    # Tool locations, referenced by explicit path (PATH is intentionally NOT
+    # mutated). The qdb CLI tools live in <repo>/qdb/bin (assumed always
+    # present); the NATS binaries are provisioned into <repo>/nats/bin by
+    # scripts/cicd/start-nats.sh. All are overridable from the environment.
+    local repo_root
+    repo_root="$(cd "$script_dir/.." && pwd)"
+    export QDB_BIN_DIR="${QDB_BIN_DIR:-$repo_root/qdb/bin}"
+    export NATS_BIN_DIR="${NATS_BIN_DIR:-$repo_root/nats/bin}"
+    export QDBSH="${QDBSH:-$QDB_BIN_DIR/qdbsh$EXE_EXT}"
+    export QDB_EXPORT="${QDB_EXPORT:-$QDB_BIN_DIR/qdb_export$EXE_EXT}"
+    export NATS_CLI="${NATS_CLI:-$NATS_BIN_DIR/nats$EXE_EXT}"
+
     log_debug "Environment setup: QDB_URI=$QDB_URI, NATS_URL=$NATS_URL"
+    log_debug "Tools: QDBSH=$QDBSH, QDB_EXPORT=$QDB_EXPORT, NATS_CLI=$NATS_CLI"
 }
 
 # Logging Functions
@@ -63,6 +88,44 @@ get_default_workers() {
     get_cpu_count
 }
 
+# Command Execution
+
+# Run a command, wrapping it in `direnv exec .` when direnv is available so the
+# repo .envrc CGO env (LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / CGO_*) loads on
+# developer machines. In CI direnv is absent and the identical env is exported
+# by scripts/cicd/00.common.sh::cicd_setup_qdb_env before the examples run, so
+# the command runs directly. The no-direnv branch uses `exec`, replacing the
+# current (sub)shell, so a backgrounded caller's $! is the target process
+# itself -- preserving correct PID-file tracking and signal delivery (and the
+# connector path stays in the command line for the pgrep leak guard). Call this
+# only as a backgrounded or terminal command (see finance-ohlc.sh action_run).
+run_with_direnv() {
+    if command -v direnv >/dev/null 2>&1; then
+        direnv exec . "$@"
+    else
+        exec "$@"
+    fi
+}
+
+# Run a command under a wall-clock timeout when a timeout(1) implementation is
+# available -- GNU coreutils `timeout` (Linux/FreeBSD/MSYS2) or `gtimeout`
+# (macOS with coreutils). macOS ships neither by default, so fall back to
+# running without a limit (the timeout is a safety net, not essential -- the
+# finance-ohlc example loads with no timeout at all). Preserves the command's
+# exit status, including coreutils' 124-on-timeout convention.
+# Usage: run_with_timeout <seconds> <command...>
+run_with_timeout() {
+    local seconds="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 # Error Handling
 die() {
     local message="$1"
@@ -77,6 +140,79 @@ require_command() {
         die "Required command '$cmd' not found. Please install it first."
     fi
     log_debug "Required command '$cmd' is available"
+}
+
+# CSV Comparison
+
+# Compare two CSV files row-by-row with per-field numeric tolerance, replacing
+# the former numdiff dependency. A field that parses as a number on BOTH sides
+# matches when their absolute difference is <= CSV_ABS_TOLERANCE (default
+# 0.001); every other field (ISO timestamps, quoted strings, empty/null) must
+# match byte-for-byte. Row order and per-row field counts must align -- the
+# QuasarDB export order is deterministic. Both files are streamed in O(1)
+# memory: awk walks the actual file and pulls each positionally-matching golden
+# row via `getline`. On a full match logs [OK] and returns 0; on any difference
+# logs [FAIL], prints up to the first 10 differences to stderr, and returns 1.
+#
+# NOTE: awk arithmetic is IEEE-754 double precision, so integer fields beyond
+# 2^53 (~9.0e15) would not compare exactly. The example datasets stay far below
+# that (max ~1e9), so this is not a concern here.
+#
+# Usage: compare_csv <actual_csv> <golden_csv> <label>
+compare_csv() {
+    local actual="$1"
+    local golden="$2"
+    local label="$3"
+    local diff_output
+
+    # Declare diff_output on its own line above: a combined `local x=$(...)`
+    # would mask awk's exit status with local's (always 0).
+    if diff_output=$(awk -v golden="$golden" -v tol="${CSV_ABS_TOLERANCE:-0.001}" '
+        function abs(x)    { return x < 0 ? -x : x }
+        function is_num(s) { return s ~ /^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/ }
+        BEGIN { FS = ","; diffs = 0; shown = 0; max_show = 10 }
+        {
+            # Pull the positionally-corresponding row from the golden file.
+            if ((getline gline < golden) <= 0) {
+                if (shown < max_show) { printf("row %d: present in actual, missing in golden\n", NR); shown++ }
+                diffs++
+                next
+            }
+            if ($0 == gline) next                       # identical row: fast path
+            gn = split(gline, g, ",")
+            if (NF != gn) {
+                if (shown < max_show) { printf("row %d: field count differs (actual=%d, golden=%d)\n", NR, NF, gn); shown++ }
+                diffs++
+                next
+            }
+            for (i = 1; i <= NF; i++) {
+                if ($i == g[i]) continue
+                if (is_num($i) && is_num(g[i])) {
+                    if (abs(($i + 0) - (g[i] + 0)) <= tol) continue
+                    if (shown < max_show) { printf("row %d col %d: |%s - %s| > %s\n", NR, i, $i, g[i], tol); shown++ }
+                } else {
+                    if (shown < max_show) { printf("row %d col %d: [%s] != [%s]\n", NR, i, $i, g[i]); shown++ }
+                }
+                diffs++
+            }
+        }
+        END {
+            if ((getline gline < golden) > 0) {
+                if (shown < max_show) { printf("row %d: golden has more rows than actual\n", NR + 1); shown++ }
+                diffs++
+            }
+            close(golden)
+            exit (diffs > 0) ? 1 : 0
+        }
+    ' "$actual"); then
+        log_info "[OK] $label validation passed"
+        return 0
+    fi
+
+    log_error "[FAIL] $label validation failed"
+    log_debug "First 10 differences for $label:"
+    printf '%s\n' "$diff_output" >&2
+    return 1
 }
 
 # Error trap function for debugging unexpected exits
@@ -229,129 +365,143 @@ validate_environment() {
     log_info "Environment validation successful - NATS and QuasarDB are running"
 }
 
+# Refuse to proceed if any qdb-nats-connector process is already running.
+# Detection is process-based so it catches leaked or orphaned connectors
+# regardless of PID-file state, including ones reparented to init. The inspector
+# varies by platform: pgrep on Linux/macOS/FreeBSD, tasklist on Windows (the
+# connector is a native .exe and MSYS2 ships no pgrep), ps as a last resort.
+# Hard error (die) listing the offending processes; no bypass.
+assert_no_connector_running() {
+    local matches=""
+
+    if command -v pgrep >/dev/null 2>&1; then
+        matches=$(pgrep -lf 'bin/qdb-nats-connector' 2>/dev/null || true)
+    elif command -v tasklist >/dev/null 2>&1; then
+        matches=$(tasklist 2>/dev/null | grep -i 'qdb-nats-connector' || true)
+    elif command -v ps >/dev/null 2>&1; then
+        matches=$(ps -e 2>/dev/null | grep 'qdb-nats-connector' | grep -v grep || true)
+    else
+        log_info "No process inspector (pgrep/tasklist/ps) available; skipping connector preflight check"
+        return 0
+    fi
+
+    if [[ -n "$matches" ]]; then
+        log_error "Refusing to start: a qdb-nats-connector process is already running:"
+        printf '%s\n' "$matches" >&2
+        die "Stop the running connector(s) above first (e.g. 'kill <PID>'), then re-run."
+    fi
+}
+
 # Silent Cleanup Functions
 
 # Drop QuasarDB table if it exists, silently ignoring errors
 drop_table_if_exists() {
     local table_name="$1"
     set +e  # Temporarily disable error checking
-    qdbsh -c "DROP TABLE \"${table_name}\"" 2>/dev/null
+    "$QDBSH" -c "DROP TABLE \"${table_name}\"" 2>/dev/null
     set -e  # Re-enable error checking
 }
 
 # Row Count Detection
 
-# Parse connector logs for row count messages
-# The QuasarDB Go API logs: L().Info("wrote rows", "count", totalRows, "duration", elapsed)
-# This appears as structured logs, so we look for "wrote rows" and extract count
-parse_processed_rows() {
-    local log_file="$1"
-    
-    if [[ ! -f "$log_file" ]]; then
-        log_error "Log file $log_file does not exist"
-        return 1
-    fi
-    
-    local total_rows=0
-    
-    # Parse structured log format looking for "wrote rows" with count
-    # Expected format: [timestamp] level=info msg="wrote rows" count=123 duration=...
-    # Also handle slog JSON format: {"time":"...","level":"INFO","msg":"wrote rows","count":123}
-    while IFS= read -r line; do
-        # Handle key=value format (default slog text format)
-        if [[ "$line" =~ wrote\ rows.*count=([0-9]+) ]]; then
-            local count="${BASH_REMATCH[1]}"
-            total_rows=$((total_rows + count))
-            log_debug "Found wrote rows: count=$count, total=$total_rows"
-        # Handle JSON format
-        elif [[ "$line" =~ \"msg\":\"wrote\ rows\".*\"count\":([0-9]+) ]]; then
-            local count="${BASH_REMATCH[1]}"
-            total_rows=$((total_rows + count))
-            log_debug "Found wrote rows (JSON): count=$count, total=$total_rows"
-        fi
-    done < "$log_file"
-    
-    echo "$total_rows"
+# Sum SELECT COUNT(*) across one or more QDB tables. Echoes the total to stdout;
+# a query that fails or returns nothing contributes 0. Missing tables (e.g. early
+# in a test before create) are treated as empty -- the loop keeps polling.
+count_qdb_rows() {
+    local total=0 t count
+    for t in "$@"; do
+        # qdbsh COUNT output:
+        #   COUNT(col1)   COUNT(col2)   ...
+        #   ----------------------------------
+        #            2,000       1,712   ...
+        # Grab the first numeric cell under the divider; strip thousands commas.
+        count=$("$QDBSH" -c "SELECT COUNT(*) FROM \"$t\"" 2>/dev/null \
+            | awk '/^-{3,}$/{getline; print $1; exit}' | tr -d ',')
+        total=$((total + ${count:-0}))
+    done
+    echo "$total"
 }
 
-# Wait for expected row count with timeout
-wait_for_row_count() {
+# Dump connector crash diagnostics to stderr.
+#
+# A Go runtime crash (panic, fatal error, or CGO SIGSEGV) prints a full
+# goroutine dump -- often hundreds of lines -- whose *cause* sits at the TOP
+# (`panic:` / `fatal error:` / `[signal SIGSEGV ...]`) and whose crashing stack
+# follows immediately after. A plain `tail` captures only the bottom (an idle
+# goroutine) and hides the reason, so this prints from the first crash marker
+# onward, plus a tail for context. The whole log is also echoed when short, so
+# the reason survives even with no recognizable marker (e.g. a CGO abort).
+dump_connector_crash() {
     local log_file="$1"
-    local expected_rows="$2"
-    local timeout_seconds="${3:-300}"  # Default 5 minutes
-    local check_interval="${4:-5}"     # Default 5 seconds
-    local pid_file="${5:-}"           # Optional PID file to check
-    
-    log_info "Waiting for $expected_rows rows to be processed (timeout: ${timeout_seconds}s)"
-    
-    local elapsed=0
-    local last_reported_count=0
-    
-    while [[ $elapsed -lt $timeout_seconds ]]; do
-        # Check if log file exists and for ERROR logs
-        if [[ -f "$log_file" ]]; then
-            # Check for ERROR level logs
-            if grep -q '"level":"ERROR"' "$log_file" 2>/dev/null; then
-                log_error "ERROR detected in connector log:"
-                grep '"level":"ERROR"' "$log_file" | tail -1
-                return 1
-            fi
-            
-            local current_count
-            current_count=$(parse_processed_rows "$log_file")
-            
-            # DEBUG: Log every check iteration
-            log_debug "[DEBUG] Elapsed: ${elapsed}s, Current count: $current_count, Expected: $expected_rows"
-            
-            # Report progress if count changed
-            if [[ $current_count -ne $last_reported_count ]]; then
-                log_info "Progress: $current_count / $expected_rows rows processed"
-                last_reported_count=$current_count
-                
-                # DEBUG: Show recent log entries when progress is made
-                log_debug "[DEBUG] Recent log entries showing progress:"
-                tail -3 "$log_file" | while IFS= read -r line; do
-                    log_debug "[DEBUG] Log: $line"
-                done
-            fi
-            
-            # Check if we've reached the expected count
-            if [[ $current_count -ge $expected_rows ]]; then
-                log_info "Successfully processed $current_count rows (expected: $expected_rows)"
-                return 0
-            fi
-        else
-            log_debug "[DEBUG] Log file $log_file does not exist yet"
+    [[ -f "$log_file" ]] || { log_error "No connector log at $log_file"; return; }
+
+    local lines marker
+    lines=$(wc -l <"$log_file" | tr -d ' ')
+    log_error "Connector log: $log_file ($lines lines)"
+
+    # First line of the crash report -- the reason. SIGSEGV/SIGABRT lines, Go
+    # panics, runtime fatal errors, and cgo aborts all start with one of these.
+    marker=$(grep -niE '^(panic:|fatal error:|fatal:|runtime:|\[signal |SIG[A-Z]+:|unexpected fault)' "$log_file" \
+        | head -1 | cut -d: -f1)
+
+    if [[ -n "$marker" ]]; then
+        log_error "Crash reason (from line $marker):"
+        # Cap the dumped stack so a huge all-goroutines dump stays readable;
+        # the crashing goroutine is always within the first ~60 lines.
+        sed -n "${marker},$((marker + 60))p" "$log_file" >&2
+    elif [[ "$lines" -le 200 ]]; then
+        log_error "No crash marker found; full connector log:"
+        cat "$log_file" >&2
+    else
+        log_error "No crash marker found; last 80 log lines:"
+        tail -80 "$log_file" >&2
+    fi
+}
+
+# Wait until SUM(COUNT(*)) across the listed tables reaches expected_rows.
+# Queries QDB directly, so it observes actual write-visibility instead of the
+# connector's buffered "wrote rows" log lines -- which return before data is
+# query-visible and previously raced the subsequent export step.
+# Fails fast on connector crash: ERROR-level log entry or PID gone.
+# Args: log_file expected timeout interval pid_file <table>...
+wait_for_qdb_rows() {
+    local log_file="$1" expected="$2" timeout="$3" interval="$4" pid_file="$5"
+    shift 5
+    local -a tables=("$@")
+
+    log_info "Waiting for $expected rows across ${#tables[@]} table(s) (timeout: ${timeout}s)"
+
+    local elapsed=0 last=0 current pid
+    while [[ $elapsed -lt $timeout ]]; do
+        if [[ -f "$log_file" ]] && grep -q '"level":"ERROR"' "$log_file" 2>/dev/null; then
+            log_error "ERROR detected in connector log:"
+            grep '"level":"ERROR"' "$log_file" | tail -1
+            return 1
         fi
-        
-        # Check if process is still running (if PID file provided)
-        if [[ -n "$pid_file" ]] && [[ -f "$pid_file" ]]; then
-            local pid
-            pid=$(cat "$pid_file" 2>/dev/null || echo "")
+        if [[ -n "$pid_file" && -f "$pid_file" ]]; then
+            pid=$(cat "$pid_file" 2>/dev/null || true)
             if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
                 log_error "Connector process (PID: $pid) has exited unexpectedly"
-                if [[ -f "$log_file" ]]; then
-                    log_error "Last log entries:"
-                    tail -10 "$log_file"
-                fi
+                dump_connector_crash "$log_file"
                 return 1
             fi
-            log_debug "[DEBUG] Connector process $pid is still running"
         fi
-        
-        sleep "$check_interval"
-        elapsed=$((elapsed + check_interval))
+
+        current=$(count_qdb_rows "${tables[@]}")
+        if [[ $current -ne $last ]]; then
+            log_info "Progress: $current / $expected rows in QDB"
+            last=$current
+        fi
+        if [[ $current -ge $expected ]]; then
+            log_info "Reached $current rows in QDB (expected: $expected)"
+            return 0
+        fi
+
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
     done
-    
-    # Timeout reached
-    local final_count
-    if [[ -f "$log_file" ]]; then
-        final_count=$(parse_processed_rows "$log_file")
-    else
-        final_count=0
-    fi
-    
-    log_error "Timeout reached after ${timeout_seconds}s. Processed $final_count rows, expected $expected_rows"
+
+    log_error "Timeout after ${timeout}s. QDB has $last rows, expected $expected"
     return 1
 }
 

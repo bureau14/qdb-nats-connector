@@ -180,22 +180,6 @@ func (t *WriterTable) GetData(offset int) (ColumnData, error) { //nolint:ireturn
 //   - pinnableBuilders: Closures that assign pointers AFTER pinning
 //   - release: Cleanup function for all C allocations
 //   - error: Any validation or allocation failures
-// setCPtr stores a pointer into a struct field WITHOUT emitting a Go write
-// barrier. The exp-batch-push structs either live in C-allocated (non-zeroed)
-// memory or briefly hold C pointers in Go memory. A normal pointer assignment
-// to a cgo pointer field makes the compiler emit a write barrier that (a) reads
-// the slot's prior bytes -- uninitialized C garbage -- as a fake Go pointer, and
-// (b) hands the GC the C address being stored. Either aborts the runtime with
-// "found bad pointer in Go heap" / "marked free object" when a C address
-// overlaps a Go heap arena (data-dependent; seen on amd64 and aarch64). Storing
-// through a *uintptr emits no barrier -- the standard idiom for writing pointers
-// into off-heap memory. Safe because C pointers are never moved or freed by the
-// Go GC. The pinning + KeepAlive machinery in Writer.Push keeps any referenced
-// Go memory alive across the C call.
-func setCPtr(field, p unsafe.Pointer) {
-	*(*uintptr)(field) = uintptr(p)
-}
-
 func (t *WriterTable) toNativeTableData(h HandleType, out *C.qdb_exp_batch_push_table_data_t) ([]PinnableBuilder, func(), error) {
 	// Set row and column counts directly.
 	out.row_count = C.qdb_size_t(t.rowCount)
@@ -246,12 +230,10 @@ func (t *WriterTable) toNativeTableData(h HandleType, out *C.qdb_exp_batch_push_
 	for i, column := range t.columnInfoByOffset {
 		elem := &colSlice[i]
 
-		// Allocate C string for column name. Capture the release pointer as
-		// uintptr so the closure (kept on the Go heap) does not hold a C pointer
-		// the GC would scan and reject.
+		// Allocate C string for column name. Store barrier-free (elem is C
+		// memory) and release via releaseCPtr (no C pointer kept in a Go closure).
 		cName := qdbCopyString(h, column.ColumnName)
-		cNameU := uintptr(unsafe.Pointer(cName))
-		releases = append(releases, func() { qdbReleasePointer(h, unsafe.Pointer(cNameU)) })
+		releases = append(releases, releaseCPtr(h, unsafe.Pointer(cName)))
 		setCPtr(unsafe.Pointer(&elem.name), unsafe.Pointer(cName))
 		elem.data_type = C.qdb_ts_column_type_t(column.ColumnType)
 
@@ -276,7 +258,7 @@ func (t *WriterTable) toNativeTableData(h HandleType, out *C.qdb_exp_batch_push_
 			// This executes in Phase 2.5 with captured variables
 			ptr := localBuilder.Builder()
 			// Store the pointer in the C structure (barrier-free; C memory).
-			currentElem := (*C.qdb_exp_batch_push_column_t)(unsafe.Pointer(currentElemU))
+			currentElem := (*C.qdb_exp_batch_push_column_t)(unsafe.Pointer(currentElemU)) //nolint:govet // stable C pointer held as uintptr
 			setCPtr(unsafe.Pointer(&currentElem.data[0]), ptr)
 
 			return ptr
@@ -324,14 +306,10 @@ func (t *WriterTable) toNative(h HandleType, opts WriterOptions, out *C.qdb_exp_
 
 	var releases []func()
 
-	// Allocate C string for table name
+	// Allocate C string for table name. Store barrier-free (out is C memory) and
+	// release via releaseCPtr (no C pointer kept in a Go closure).
 	cTableName := qdbCopyString(h, t.TableName)
-	// Add table name release to releases (capture as uintptr so the Go-heap
-	// closure holds no C pointer for the GC to scan).
-	cTableNameU := uintptr(unsafe.Pointer(cTableName))
-	releases = append(releases, func() {
-		qdbReleasePointer(h, unsafe.Pointer(cTableNameU))
-	})
+	releases = append(releases, releaseCPtr(h, unsafe.Pointer(cTableName)))
 
 	setCPtr(unsafe.Pointer(&out.name), unsafe.Pointer(cTableName))
 
@@ -363,8 +341,7 @@ func (t *WriterTable) toNative(h HandleType, opts WriterOptions, out *C.qdb_exp_
 		dupSlice := unsafe.Slice(ptr, count)
 		for i := range opts.dropDuplicateColumns {
 			cDupCol := qdbCopyString(h, opts.dropDuplicateColumns[i])
-			cDupColU := uintptr(unsafe.Pointer(cDupCol))
-			releases = append(releases, func() { qdbReleasePointer(h, unsafe.Pointer(cDupColU)) })
+			releases = append(releases, releaseCPtr(h, unsafe.Pointer(cDupCol)))
 			// dupSlice backs onto C memory; barrier-free store.
 			setCPtr(unsafe.Pointer(&dupSlice[i]), unsafe.Pointer(cDupCol))
 		}

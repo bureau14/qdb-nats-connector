@@ -520,8 +520,10 @@ func (cd *ColumnDataBlob) PinToC(h HandleType) (builder PinnableBuilder, release
 	envelope := qdbAllocBuffer[C.qdb_blob_t](h, len(cd.xs))
 	envelopeSlice := unsafe.Slice(envelope, len(cd.xs))
 
-	// Track copied blobs for cleanup
-	copiedBlobs := make([]unsafe.Pointer, 0, len(cd.xs))
+	// Track copied blobs for cleanup. Held as uintptr (not []unsafe.Pointer) so
+	// the GC neither scans these C pointers nor emits a write barrier when they
+	// are appended. See setCPtr in utils.go.
+	copiedBlobs := make([]uintptr, 0, len(cd.xs))
 
 	// No objects to pin - we're copying instead
 
@@ -529,22 +531,23 @@ func (cd *ColumnDataBlob) PinToC(h HandleType) (builder PinnableBuilder, release
 			// Build C structures (executed in Phase 2.5 after pinning)
 			for i, blob := range cd.xs {
 				if len(blob) > 0 {
-					// Copy blob to C memory
+					// Copy blob to C memory. The envelope is C memory; store
+					// barrier-free.
 					blobPtr := qdbAllocAndCopyBytes(h, blob)
-					copiedBlobs = append(copiedBlobs, blobPtr)
-					envelopeSlice[i].content = blobPtr
+					copiedBlobs = append(copiedBlobs, uintptr(blobPtr))
+					setCPtr(unsafe.Pointer(&envelopeSlice[i].content), blobPtr)
 					envelopeSlice[i].content_length = C.qdb_size_t(len(blob))
 				} else {
-					envelopeSlice[i].content = nil
+					setCPtr(unsafe.Pointer(&envelopeSlice[i].content), nil)
 					envelopeSlice[i].content_length = 0
 				}
 			}
 
 			return unsafe.Pointer(envelope)
 		}), func() {
-			// Release all copied blobs
+			// Release all copied blobs (held as uintptr; stable C pointers).
 			for _, blobPtr := range copiedBlobs {
-				qdbReleasePointer(h, blobPtr)
+				releaseCU(h, blobPtr)
 			}
 			// Release envelope
 			qdbRelease(h, envelope)
@@ -663,8 +666,7 @@ func (cd *ColumnDataString) PinToC(h HandleType) (builder PinnableBuilder, relea
 
 	// Track copied strings for cleanup. Held as uintptr (not []*C.char) so the
 	// GC neither scans these C pointers nor emits a write barrier when they are
-	// appended: a C address can overlap a Go heap arena range, which makes the
-	// barrier's validation abort with "found bad pointer in Go heap".
+	// appended. See setCPtr in utils.go.
 	copiedStrings := make([]uintptr, 0, len(cd.xs))
 
 	// No objects to pin - we're copying instead
@@ -673,30 +675,23 @@ func (cd *ColumnDataString) PinToC(h HandleType) (builder PinnableBuilder, relea
 			// Build C structures (executed in Phase 2.5 after pinning)
 			for i, str := range cd.xs {
 				if str != "" {
-					// Copy string to C memory (includes null terminator)
+					// Copy string to C memory (includes null terminator). The
+					// envelope is C memory; store barrier-free.
 					cStr := qdbCopyString(h, str)
 					copiedStrings = append(copiedStrings, uintptr(unsafe.Pointer(cStr)))
-					// envelopeSlice backs onto C-allocated, non-zeroed memory.
-					// A plain pointer store to .data emits a Go write barrier
-					// that reads the slot's prior (garbage C) bytes as a Go
-					// pointer; under GC/cgocheck2 that aborts with "found bad
-					// pointer in Go heap". Store via uintptr so no barrier is
-					// emitted -- safe because cStr is C memory the GC never owns.
-					*(*uintptr)(unsafe.Pointer(&envelopeSlice[i].data)) = uintptr(unsafe.Pointer(cStr))
+					setCPtr(unsafe.Pointer(&envelopeSlice[i].data), unsafe.Pointer(cStr))
 					envelopeSlice[i].length = C.qdb_size_t(len(str))
 				} else {
-					*(*uintptr)(unsafe.Pointer(&envelopeSlice[i].data)) = 0
+					setCPtr(unsafe.Pointer(&envelopeSlice[i].data), nil)
 					envelopeSlice[i].length = 0
 				}
 			}
 
 			return unsafe.Pointer(envelope)
 		}), func() {
-			// Release all copied strings (stored as uintptr above; these are
-			// stable C pointers the GC never relocates, so the round-trip back
-			// to unsafe.Pointer is safe).
+			// Release all copied strings (held as uintptr; stable C pointers).
 			for _, cStr := range copiedStrings {
-				qdbReleasePointer(h, unsafe.Pointer(cStr)) //nolint:govet // stable C pointer held as uintptr
+				releaseCU(h, cStr)
 			}
 			// Release envelope
 			qdbRelease(h, envelope)

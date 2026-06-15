@@ -55,4 +55,5 @@ if [[ "$(uname)" == MINGW* ]]; then
 fi
 
 # Convert test output to JUnit XML so buildkite can understand it
-"${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -tags=integration -v -race ./test/integration/... | ${GO_JUNIT_REPORT} -out "${TEST_REPORT_DIR}/integration-junit-report.xml" -iocopy
+# -mod=vendor: resolve strictly from vendor/; fail loudly instead of fetching.
+"${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -mod=vendor -buildvcs=false -tags=integration -v -race ./test/integration/... | ${GO_JUNIT_REPORT} -out "${TEST_REPORT_DIR}/integration-junit-report.xml" -iocopy

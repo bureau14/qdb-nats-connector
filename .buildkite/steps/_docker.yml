@@ -2,8 +2,10 @@
 # agent (no docker plugin wrapper) so the host's docker daemon is
 # available to scripts/cicd/60.docker.sh. No qdb-artifacts plugin --
 # the Dockerfile downloads libqdb_api directly from download.quasar.ai.
+# On master builds the script also pushes the :latest tag to Docker Hub
+# (credentials fetched from SSM inside the script).
 
-label: ":docker: build & smoke-test image"
+label: ":docker: build, smoke-test and push"
 key: docker
 
 env:

@@ -17,6 +17,7 @@ The NATS to QuasarDB connector requires comprehensive end-to-end testing to ensu
 ### Current State
 
 The `examples/` directory contains three scenarios with shell scripts that:
+
 - Generate data inline (slow: ~10s for 1000 rows)
 - Configure YAML parsers with various transformations
 - Load data through NATS → Connector → QuasarDB pipeline
@@ -54,7 +55,7 @@ Implement a **golden data testing approach** using pre-generated input/output da
 |     +-------------------------+                        |
 |     | qdb_export > CSV        |                        |
 |     |         v               |                        |
-|     | numdiff expected actual |                        |
+|     | awk expected vs actual  |                        |
 |     +-------------------------+                        |
 |                                                        |
 +--------------------------------------------------------+
@@ -134,12 +135,12 @@ We explicitly reject adding a data canonicalization layer because:
 
 #### Floating-Point Comparison Strategy
 
-The only legitimate concern is floating-point precision differences. We address this with `numdiff`:
+The only legitimate concern is floating-point precision differences. We address this with a small `awk` comparator (`compare_csv` in `examples/common.sh`):
 
-- **Tool choice**: `numdiff` is a standard Unix utility designed for numeric comparisons with tolerance
-- **Default tolerance**: 1e-9 relative error handles typical IEEE 754 rounding differences
+- **Tool choice**: `awk` is mandated by POSIX and present on every target platform (Linux, macOS, FreeBSD, Windows/mingw64), so the harness has no comparison tool to install
+- **Comparison**: each row is split on commas; fields that parse as numbers on both sides match within an absolute tolerance (0.001 by default, overridable via `CSV_ABS_TOLERANCE`); all other fields (timestamps, quoted strings, empty/null) must match exactly
 - **No data modification**: We compare actual outputs rather than modifying test data
-- **Transparency**: Developers can see exactly what precision issues exist
+- **Transparency**: On a mismatch the comparator prints the first differing rows/columns with the offending values
 
 #### Makefile-Based Orchestration
 
@@ -152,6 +153,7 @@ Test execution is orchestrated through a Makefile that:
 - Provides separate targets for quick (10k) and full (1M) tests
 
 This design leverages Make's strengths:
+
 - **Dependency management**: Downloads happen only when needed
 - **Parallel execution**: `make -j` runs tests concurrently
 - **Extraction tracking**: `.extracted` marker files prevent redundant extractions
@@ -226,7 +228,7 @@ Archives contain both input data and expected outputs in a structured format, wi
 
 ### Positive
 
-- **Simplicity**: Standard Unix tools only (`make`, `curl`, `numdiff`, `qdb_export`) - no custom validation code
+- **Simplicity**: Only ubiquitous tools (`make`, `curl`, `awk`, `qdb_export`); the numeric CSV comparison is a small built-in awk helper with no third-party dependency to install
 - **Transparency**: CSV files are human-readable for debugging
 - **Speed**: Downloads are cached, extractions tracked with `.extracted` markers, `qdb_export` handles millions of rows/sec
 - **Fast re-runs**: Extracted files persist between runs until explicit cleanup
@@ -252,35 +254,51 @@ Archives contain both input data and expected outputs in a structured format, wi
 ## Alternatives Considered
 
 ### Complex Validation Framework
+
 Build Go/Python tools for deep data validation.
-- **Rejected**: Adds unnecessary complexity when `numdiff` suffices for our needs
+
+- **Rejected**: Adds unnecessary complexity when a small awk comparator suffices for our needs
 
 ### Custom Canonicalization Script
+
 Create scripts to normalize CSV output (sort rows, round floats, format timestamps).
+
 - **Rejected**: QuasarDB already provides deterministic output; canonicalization would mask bugs rather than catch them
 
 ### Property-Based Testing
+
 Use `rapid` for generating test data on-the-fly.
+
 - **Rejected**: Better suited for unit/integration tests, not E2E validation
 
 ### Test Containers
+
 Containerize test environments with pre-loaded data.
+
 - **Rejected**: Adds complexity without proportional benefit for this use case
 
 ### Raw `diff` Without Numeric Tolerance
+
 Use standard `diff` for all comparisons.
+
 - **Rejected**: Would fail on legitimate floating-point precision differences
 
 ### Skip Floating-Point Columns
+
 Use `diff --ignore-matching-lines` to skip float columns entirely.
+
 - **Rejected**: Would miss actual bugs in floating-point calculations
 
 ### Idle-Based Completion Detection
+
 Wait for "X seconds of no output" to determine completion.
+
 - **Rejected**: Non-deterministic, causes flaky tests, wastes CI time, incompatible with concurrent workers
 
 ### Direct Database Querying
+
 Query QuasarDB directly to verify row counts instead of parsing logs.
+
 - **Rejected**: Adds complexity of database client in test scripts, though could be reconsidered as future enhancement
 
 ---
@@ -299,4 +317,4 @@ By avoiding custom frameworks or scripts, we ensure the testing infrastructure r
 
 ---
 
-*This ADR documents the decision to use golden data testing with Makefile orchestration and numeric-aware comparison for end-to-end validation of the NATS to QuasarDB connector pipeline.*
+_This ADR documents the decision to use golden data testing with Makefile orchestration and numeric-aware comparison for end-to-end validation of the NATS to QuasarDB connector pipeline._

@@ -1,9 +1,14 @@
-# This hook ensures that we don't leave qdbd cluster running even if one of the steps in the pipeline fails.
+# This hook ensures we don't leave background services running even if a
+# pipeline step fails. qdbd is stopped via the scripts/tests/ submodule; the
+# JetStream NATS server (e2e only) via scripts/cicd/stop-nats.sh. Both stop
+# scripts are idempotent no-ops when their service was never started.
 
-SCRIPT_PATH="scripts/tests/setup/stop-services.sh"
-
-if [ -f "$SCRIPT_PATH" ]; then
-    bash "$SCRIPT_PATH"
-fi
+for SCRIPT_PATH in \
+    "scripts/tests/setup/stop-services.sh" \
+    "scripts/cicd/stop-nats.sh"; do
+    if [ -f "$SCRIPT_PATH" ]; then
+        bash "$SCRIPT_PATH" || true
+    fi
+done
 
 exit 0

@@ -66,7 +66,24 @@ GLOBAL_ENV: dict[str, str] = {
 
 STEP_ENV: dict[str, dict[str, str]] = {}
 
-OS_ENV: dict[str, dict[str, str]] = {}
+# Linux builds run inside bureau14/builder:rhel7, whose default /usr/bin/gcc
+# is 7.3.1 -- too old to provide the aarch64 outline-atomic libgcc helpers
+# (__aarch64_*_sync) that Go 1.25+ emits from its prebuilt -race (TSan)
+# runtime, so linking the race-enabled test binaries fails on linux-aarch64.
+# Pin CC/CXX to gcc15 (the compiler all QuasarDB artifacts are built with;
+# its libgcc has the helpers) for both linux arches -- amd64 never references
+# those symbols, so this is a harmless consistency win there.  The doubled $$
+# escapes Buildkite's upload-time interpolation so the literal
+# $QDB_CICD_AGENT_GCC15_* reaches the agent shell, which substitutes the
+# concrete path (written by qdb-cloud-deployments 36-write-agent-env.sh);
+# the docker plugin then propagates the resolved CC/CXX into the container.
+# Same idiom as _go_env_for_agent() below.
+OS_ENV: dict[str, dict[str, str]] = {
+    "linux": {
+        "CC": "$$QDB_CICD_AGENT_GCC15_CC",
+        "CXX": "$$QDB_CICD_AGENT_GCC15_CXX",
+    },
+}
 
 OS_STEP_ENV: dict[str, dict[str, str]] = {}
 
@@ -77,9 +94,9 @@ CPU_ENV: dict[str, dict[str, str]] = {
 }
 
 # Go version slug used to form the per-OS agent env var names.
-# The slug is the major+minor with no dot: 1.24 -> "124".
+# The slug is the major+minor with no dot: 1.25 -> "125".
 # Changing this constant is the single point of control for the Go version.
-GO_VERSION_SLUG = "124"  # Go 1.24; pinned per plan decision 1.
+GO_VERSION_SLUG = "125"  # Go 1.25
 
 
 def _go_env_for_agent() -> dict[str, str]:
@@ -165,6 +182,10 @@ def _docker_step() -> dict:
     `libqdb_api` directly from `download.quasar.ai` (temporary
     scaffolding; will be superseded once QuasarDB 3.14.3 ships an
     official public artifact for the connector).
+
+    On master builds the step's script pushes the `:latest` tag to
+    Docker Hub; the branch gate and the SSM credential fetch both live
+    in `scripts/cicd/60.docker.sh`, not here.
     """
     step = load_template(STEPS_DIR / "_docker.yml")
     env = merge_env(GLOBAL_ENV, STEP_ENV.get("docker", {}))

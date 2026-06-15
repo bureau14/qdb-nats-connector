@@ -6,7 +6,9 @@ package source
 
 import (
 	"context"
+	stderrors "errors"
 	"log/slog"
+	"strings"
 
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/nats-io/nats.go"
@@ -133,6 +135,43 @@ func (s *Source) Connect(ctx context.Context) error {
 	return nil
 }
 
+// isExpectedFetchErr reports whether a pull-subscription Fetch error is a normal
+// no-data or post-drain lifecycle condition rather than a real failure. A
+// long-running puller must treat these as "no messages this round", not abort:
+//   - ErrTimeout: nothing arrived within MaxWait (steady state when caught up).
+//   - The pull subscription was torn down after the stream drained, after which
+//     Fetch reports an invalid/closed subscription (IsValid() == false).
+//   - The connection is closing/draining (graceful shutdown).
+//
+// Note: this does not re-establish a dropped subscription; it only keeps the
+// connector healthy. Automatic re-subscription is left for a follow-up.
+func isExpectedFetchErr(err error, sub *nats.Subscription) bool {
+	if err == nats.ErrTimeout {
+		return true
+	}
+	if sub != nil && !sub.IsValid() {
+		return true
+	}
+
+	// ErrBadSubscription / ErrSubscriptionClosed are reported by Fetch at the
+	// JetStream layer once the pull subscription is torn down after the stream
+	// drains -- even while the core subscription still reports IsValid().
+	if stderrors.Is(err, nats.ErrBadSubscription) ||
+		stderrors.Is(err, nats.ErrSubscriptionClosed) ||
+		stderrors.Is(err, nats.ErrConnectionClosed) ||
+		stderrors.Is(err, nats.ErrConnectionDraining) {
+		return true
+	}
+
+	// Fallback: the JetStream Fetch path combines these into an error whose
+	// chain errors.Is does not reliably traverse; match the well-known benign
+	// messages directly so a drained subscription is never treated as fatal.
+	msg := err.Error()
+
+	return strings.Contains(msg, "invalid subscription") ||
+		strings.Contains(msg, "subscription closed")
+}
+
 // FetchBatch pulls messages from JetStream with ACK/NACK funcs.
 // In: ctx context.Context - timeout/cancellation
 // Out: *MessageBatch, error - messages+funcs or fetch err
@@ -146,8 +185,10 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 	msgs, err := s.Subscription.Fetch(s.Options.BatchSize,
 		nats.MaxWait(s.Options.BatchTimeout))
 	if err != nil {
-		// Timeout is expected when no messages available
-		if err == nats.ErrTimeout {
+		// No-data and post-drain lifecycle conditions are expected for a
+		// long-running puller and must not be fatal -- report them as an empty
+		// batch so the fetch loop keeps polling without logging an error.
+		if isExpectedFetchErr(err, s.Subscription) {
 			return &MessageBatch{Messages: []MessageInfo{}}, nil
 		}
 

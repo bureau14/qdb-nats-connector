@@ -29,6 +29,9 @@ bin/
 # Where we extract our qdb archives
 qdb/
 
+# Where we extract our NATS binaries (nats-server + nats CLI, fetched by scripts/cicd/start-nats.sh)
+nats/
+
 # Test specific
 cluster_private.key
 cluster_public.key
@@ -79,7 +82,7 @@ claude_desktop_config.json
 
 # Claude code local rules
 .claude/settings.local.json
-**/testdata/**
+**/datasets/**
 
 # Python virtual environments (e.g. .buildkite/.venv used for pipeline.py)
 .venv/

@@ -57,7 +57,7 @@ echo "Built and validated: ${IMAGE}:${VERSION} (also tagged :latest)"
 # DOCKER_CONFIG so the agent's persistent docker config (which holds the
 # fleet-wide read-only pull credential) is never touched.
 
-if [[ "${BUILDKITE_BRANCH:-}" == "sc-16329/nats-connector" ]]
+if [[ "${BUILDKITE_BRANCH:-}" == "master" ]]
 then
     SSM_PREFIX="${BUILDKITE_SSM_PREFIX:-/services/buildkite}"
     SSM_REGION="${AWS_DEFAULT_REGION:-eu-west-1}"

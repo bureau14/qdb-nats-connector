@@ -82,3 +82,15 @@ fields:
     config:
       values: ["NORMAL", "NORMAL", "NORMAL", "NORMAL", "WARNING", "CRITICAL"]
       repeat: true
+
+  # Data-type indicator used to demonstrate row filtering. The numeric sequence
+  # generator ignores `values:`; start/end/step/repeat drive a deterministic
+  # 1,2,3 cycle (shared, lock-serialized counter), so exactly floor(N/3) rows
+  # carry data_type==3 regardless of generator worker count.
+  data_type:
+    type: "sequence"
+    config:
+      start: 1
+      end: 3
+      step: 1
+      repeat: true

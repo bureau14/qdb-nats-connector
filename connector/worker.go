@@ -15,6 +15,7 @@ import (
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/connector/resilience"
+	"github.com/bureau14/qdb-nats-connector/internal/filter"
 	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
@@ -26,6 +27,7 @@ type Worker struct {
 	workerID       string                      // Cached worker ID string for performance
 	workCh         <-chan *source.MessageBatch // Work distribution channel
 	parser         parser.Parser
+	rowFilter      *filter.RowFilter // pre-merge row filter; nil = pass-through
 	sink           *sink.Sink
 	circuitBreaker *resilience.CircuitBreaker
 	hooks          *hooks.HookRegistry
@@ -55,12 +57,15 @@ type Worker struct {
 //
 // Returns:
 //
-//	*Worker: configured worker with parser/sink
+//	*Worker: configured worker with parser/sink/filter
 //	error: parser/sink initialization failure
 //
 // Example:
 //
 //	w := NewWorker(0, opts, workCh, manager) // → *Worker
+//
+// Also obtains and stores the parser's row filter from the factory; a nil
+// filter (noop parser or no filters configured) means pass-through.
 func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manager *resilience.Manager) (*Worker, error) {
 	// Create parser using factory based on command-line options
 	parserOpts := parser.ParserOptions{
@@ -68,7 +73,7 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		ConfigPath:  opts.ParserConfig,
 		ErrorAction: opts.ParseErrorAction,
 	}
-	messageParser, err := parser.NewParserWithOptions(parserOpts)
+	messageParser, rowFilter, err := parser.NewParserWithOptions(parserOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +113,7 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		workerID:       workerID,
 		workCh:         workCh,
 		parser:         messageParser,
+		rowFilter:      rowFilter,
 		sink:           qdbSink,
 		circuitBreaker: circuitBreaker,
 		hooks:          opts.Hooks,
@@ -175,6 +181,11 @@ func (w *Worker) GetStats() (messagesProcessed, parseFailures, writeFailures uin
 }
 
 // processBatchFromChannel processes a batch received from the work channel.
+// It parses each message, applies the configured row filter pre-merge, merges
+// surviving single-row tables, NACKs parse failures, writes survivors to
+// QuasarDB under the circuit breaker, and ACKs every successfully-processed
+// (non-parse-failed) sequence -- including batches whose rows are all filtered
+// out, which write nothing but must still be ACKed to avoid redelivery.
 // In: ctx context.Context - cancellation, batch *source.MessageBatch - received batch
 // Out: error - processing failure
 // Ex: processBatchFromChannel(ctx, batch) → nil
@@ -226,82 +237,31 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 	// 2. Parse messages - failures retry automatically
 	validTables, failedSequenceNumbers := w.parseMessages(batch)
 
+	// 2.1. Drop rows that do not pass the configured filter. Applied pre-merge,
+	// where every table holds exactly one row. Nil filter = pass-through.
+	validTables = w.rowFilter.Apply(validTables)
+
 	// 2.5. Merge tables with the same name to prevent "already exists" errors
 	if len(validTables) > 0 {
-		mergedTables, err := qdb.MergeWriterTables(validTables)
-		if err != nil {
-			slog.Error("Failed to merge tables", "worker_id", w.id, "error", err, "num_tables", len(validTables))
+		mergedTables, mergeErr := qdb.MergeWriterTables(validTables)
+		if mergeErr != nil {
+			slog.Error("Failed to merge tables", "worker_id", w.id, "error", mergeErr, "num_tables", len(validTables))
 
-			return err
+			return mergeErr
 		}
 		validTables = mergedTables
 	}
 
 	// 3. NACK failed parses immediately for retry
 	if len(failedSequenceNumbers) > 0 {
-		err := batch.NackFunc(failedSequenceNumbers)
-		if err != nil {
-			slog.Error("Failed to NACK parse failures", "worker_id", w.id, "error", err)
+		nackErr := batch.NackFunc(failedSequenceNumbers)
+		if nackErr != nil {
+			slog.Error("Failed to NACK parse failures", "worker_id", w.id, "error", nackErr)
 		}
 	}
 
-	// 4. If no valid messages, we're done
-	if len(validTables) == 0 {
-		return nil
-	}
-
-	// 5. Write valid messages with circuit breaker
-	tables := validTables
-
-	// PreWrite hook
-	rowCount := 0
-	for _, table := range tables {
-		rowCount += table.RowCount()
-	}
-	preWriteData := &hooks.PreWriteData{
-		WorkerID:   w.workerID,
-		Topic:      "all",
-		TableCount: len(tables),
-		RowCount:   rowCount,
-		Tables:     tables,
-		Timestamp:  time.Now(),
-	}
-	err = w.hooks.Execute(ctx, "PreWrite", preWriteData)
-	if err != nil {
-		return err
-	}
-
-	writeStart := time.Now()
-	err = w.circuitBreaker.Execute(func() error {
-		return w.sink.Write(ctx, tables)
-	})
-	writeDuration := time.Since(writeStart)
-
-	// PostWrite hook
-	rowsWritten := 0
-	tablesWritten := 0
-	if err == nil {
-		for _, table := range tables {
-			rowsWritten += table.RowCount()
-		}
-		tablesWritten = len(tables)
-	}
-	postWriteData := &hooks.PostWriteData{
-		WorkerID:      w.workerID,
-		Topic:         "all",
-		Duration:      writeDuration,
-		RowsWritten:   rowsWritten,
-		TablesWritten: tablesWritten,
-		Error:         err,
-		Timestamp:     time.Now(),
-	}
-	err = w.hooks.Execute(ctx, "PostWrite", postWriteData)
-	if err != nil {
-		slog.Error("PostWrite hook failed", "worker_id", w.id, "error", err)
-	}
-
-	// 6. ACK or NACK based on write result
-	// Calculate valid sequences by excluding failed ones
+	// 4. Compute valid (non-parse-failed) sequences. These MUST be ACKed whether
+	// they were written or entirely filtered out.
 	var validSequences []uint64
 	failedSeqMap := make(map[uint64]bool)
 	for _, seq := range failedSequenceNumbers {
@@ -315,11 +275,68 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 
 	w.messagesProcessed.Add(uint64(len(validSequences)))
 
-	if err != nil {
-		return w.handleWriteFailure(ctx, batch, validSequences, err)
+	// 5. Write survivors with the circuit breaker -- only when there is something
+	// to write. An all-filtered batch skips the write but still ACKs below.
+	if len(validTables) > 0 {
+		tables := validTables
+
+		// PreWrite hook
+		rowCount := 0
+		for _, table := range tables {
+			rowCount += table.RowCount()
+		}
+		preWriteData := &hooks.PreWriteData{
+			WorkerID:   w.workerID,
+			Topic:      "all",
+			TableCount: len(tables),
+			RowCount:   rowCount,
+			Tables:     tables,
+			Timestamp:  time.Now(),
+		}
+		err = w.hooks.Execute(ctx, "PreWrite", preWriteData)
+		if err != nil {
+			return err
+		}
+
+		writeStart := time.Now()
+		writeErr := w.circuitBreaker.Execute(func() error {
+			return w.sink.Write(ctx, tables)
+		})
+		writeDuration := time.Since(writeStart)
+
+		// PostWrite hook
+		rowsWritten := 0
+		tablesWritten := 0
+		if writeErr == nil {
+			for _, table := range tables {
+				rowsWritten += table.RowCount()
+			}
+			tablesWritten = len(tables)
+		}
+		postWriteData := &hooks.PostWriteData{
+			WorkerID:      w.workerID,
+			Topic:         "all",
+			Duration:      writeDuration,
+			RowsWritten:   rowsWritten,
+			TablesWritten: tablesWritten,
+			Error:         writeErr,
+			Timestamp:     time.Now(),
+		}
+		hookErr := w.hooks.Execute(ctx, "PostWrite", postWriteData)
+		if hookErr != nil {
+			slog.Error("PostWrite hook failed", "worker_id", w.id, "error", hookErr)
+		}
+
+		if writeErr != nil {
+			return w.handleWriteFailure(ctx, batch, validSequences, writeErr)
+		}
 	}
 
-	// Write succeeded - ACK valid messages
+	// 6. Write succeeded (or there was nothing to write) - ACK valid messages.
+	if len(validSequences) == 0 {
+		return nil
+	}
+
 	// PreAck hook (ACK case)
 	preAckData := &hooks.PreAckData{
 		WorkerID:  w.workerID,

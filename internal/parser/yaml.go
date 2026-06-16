@@ -72,6 +72,7 @@ import (
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/filter"
 	"github.com/nats-io/nats.go"
 	"gopkg.in/yaml.v3"
 )
@@ -118,6 +119,7 @@ type YAMLConfig struct {
 	Compression     string          `yaml:"compression"`
 	Output          OutputSchema    `yaml:"output"`
 	Transformations []TransformSpec `yaml:"transformations"`
+	Filters         filter.Spec     `yaml:"filters"`
 }
 
 // OutputSchema: QuasarDB table schema
@@ -159,6 +161,9 @@ type YAMLParser struct {
 	// Column mapping - pre-computed at startup
 	columnTypes []qdb.TsColumnType
 	columns     []qdb.WriterColumn
+
+	// rowFilter drops/keeps rows pre-merge; nil means pass-through.
+	rowFilter *filter.RowFilter
 }
 
 // Compile-time check that YAMLParser implements the Parser interface
@@ -207,7 +212,9 @@ func NewYAMLParser(configPath string) (*YAMLParser, error) {
 //
 //	p := NewYAMLParserFromConfig(cfg) // → parser ready for messages
 //
-// Per ADR-005: validates schema and compiles pipeline at initialization
+// Per ADR-005: validates schema and compiles pipeline at initialization.
+// Also builds the optional row filter from `config.Filters`; a nil filter
+// means pass-through.
 func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser, error) {
 	slog.Info("Initializing YAML parser", "transformations", len(config.Transformations))
 
@@ -235,12 +242,20 @@ func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser
 		return nil, err
 	}
 
+	// Build the optional row filter from the filters block + ordered columns.
+	// Returns nil (pass-through) when no filters are configured.
+	rowFilter, err := filter.New(config.Filters, columns)
+	if err != nil {
+		return nil, err
+	}
+
 	parser := &YAMLParser{
 		config:      config,
 		pipeline:    pipeline,
 		errorAction: opts.ErrorAction,
 		columns:     columns,
 		columnTypes: columnTypes,
+		rowFilter:   rowFilter,
 	}
 
 	// Store column information for ParseState buffer initialization

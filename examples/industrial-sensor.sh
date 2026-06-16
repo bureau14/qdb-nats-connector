@@ -121,9 +121,10 @@ action_generate() {
       building: (if .building | type == "string" then .building else ["B1", "B1", "B1", "B2", "B2"][(.building - 1) % 5] end),
       floor: (if .floor | type == "string" then .floor else ["1", "2", "3", "B", "R"][(.floor - 1) % 5] end),
       timestamp: .timestamp,
+      data_type: .data_type,
       temp: (
         if .temp_error_flag <= 10 then "ERROR"
-        elif .temp_error_flag <= 13 then "N/A"  
+        elif .temp_error_flag <= 13 then "N/A"
         elif .temp_error_flag <= 15 then "SENSOR_FAULT"
         else (.temp_value | tostring)
         end
@@ -131,8 +132,9 @@ action_generate() {
     } catch {
       sensor: {id: "sensor-01", location: "Floor1"},
       building: "B1",
-      floor: "1", 
+      floor: "1",
       timestamp: (if .timestamp then .timestamp else "2025-01-16 09:00:00" end),
+      data_type: 1,
       temp: "ERROR"
     }' > "$INPUT_FILE" 2>&1
     
@@ -196,7 +198,7 @@ action_create() {
         drop_table_if_exists "$table_name"
     done
 
-    local table_schema="(\$timestamp TIMESTAMP, sensor_id STRING, measurement DOUBLE, sensor_tag STRING)"
+    local table_schema="(\$timestamp TIMESTAMP, sensor_id STRING, measurement DOUBLE, sensor_tag STRING, data_type INT64)"
 
     # Create each dynamic table
     for table_name in "${DYNAMIC_TABLES[@]}"; do
@@ -338,8 +340,15 @@ action_wait() {
 
     [[ -f "$LOG_FILE" ]] || die "Log file $LOG_FILE not found. Did you run '$0 run' first?"
 
+    # The whitelist filter (data_type in {1,2}) drops every data_type==3 row.
+    # data_type cycles 1,2,3 globally, so exactly floor(N/3) rows are dropped
+    # regardless of generator worker count. Wait for the post-filter total.
+    local dropped=$(( NUM_MESSAGES / 3 ))
+    local expected_rows=$(( NUM_MESSAGES - dropped ))
+    log_info "Expecting $expected_rows rows after filtering (dropped $dropped of $NUM_MESSAGES)"
+
     local wait_timeout=$(calculate_timeout "$NUM_MESSAGES")
-    if wait_for_qdb_rows "$LOG_FILE" "$NUM_MESSAGES" "$wait_timeout" 5 "$PID_FILE" "${DYNAMIC_TABLES[@]}"; then
+    if wait_for_qdb_rows "$LOG_FILE" "$expected_rows" "$wait_timeout" 5 "$PID_FILE" "${DYNAMIC_TABLES[@]}"; then
         log_info "Processing completed successfully!"
     else
         die "Processing did not complete within timeout"

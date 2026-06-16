@@ -136,10 +136,14 @@ dump_e2e_failure_logs() {
 # Examples run end-to-end against the shared qdbd + NATS server. Each uses its
 # own NATS stream and QuasarDB tables and stops its connector before the next,
 # so they run sequentially without interfering.
+# Dataset size each example runs at. Must be one of the standardized sizes in
+# examples/Makefile (NUM_MESSAGES_SET) and have a matching golden archive in
+# examples/datasets.json -- the e2e downloads <example>-<this size> from S3.
+E2E_NUM_MESSAGES=10000
 E2E_EXAMPLES="finance-ohlc industrial-sensor network-metrics"
 for _example in ${E2E_EXAMPLES}; do
-    echo "+++ Run e2e example: ${_example} (100000 messages)"
-    if ! "${MAKE_BIN}" -C examples test EXAMPLE="${_example}" NUM_MESSAGES=100000; then
+    echo "+++ Run e2e example: ${_example} (${E2E_NUM_MESSAGES} messages)"
+    if ! "${MAKE_BIN}" -C examples test EXAMPLE="${_example}" NUM_MESSAGES="${E2E_NUM_MESSAGES}"; then
         dump_e2e_failure_logs "${_example}"
         exit 1
     fi

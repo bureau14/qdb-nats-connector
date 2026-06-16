@@ -15,6 +15,7 @@ import (
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/filter"
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -1586,4 +1587,72 @@ func TestYAMLParser_DynamicTableSecurityValidation(t *testing.T) {
 	assert.Equal(t, "yaml_parser", connErr.Component)
 	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
 	assert.Contains(t, err.Error(), "path traversal")
+}
+
+// TestYAMLParserFilterValidation exercises the filters block through
+// NewYAMLParserFromConfig using a minimal valid base config.
+func TestYAMLParserFilterValidation(t *testing.T) {
+	// baseConfig is a valid config that satisfies schema + pipeline validation,
+	// so any error from these sub-tests originates in filter.New.
+	baseConfig := func(f filter.Spec) YAMLConfig {
+		return YAMLConfig{
+			Output: OutputSchema{Columns: []ColumnSchema{{Name: "data_type", Type: "int64"}}},
+			Transformations: []TransformSpec{
+				{Step: "parse_json"},
+				{Step: "extract_table", Config: map[string]interface{}{"value": "t1"}},
+				{Step: "extract_index", Config: map[string]interface{}{"source": "ts", "format": "2006-01-02 15:04:05"}},
+				{Step: "extract_field", Config: map[string]interface{}{"source": "data_type", "target": "data_type", "type": "int64"}},
+			},
+			Filters: f,
+		}
+	}
+	opts := ParserOptions{ErrorAction: "drop"}
+
+	t.Run("valid whitelist builds non-nil filter", func(t *testing.T) {
+		p, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
+			Mode:  "whitelist",
+			Match: []filter.MatchEntry{{Column: "data_type", Value: 1}},
+		}), opts)
+		require.NoError(t, err)
+		assert.NotNil(t, p.rowFilter)
+	})
+
+	t.Run("absent filters yields nil filter", func(t *testing.T) {
+		p, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{}), opts)
+		require.NoError(t, err)
+		assert.Nil(t, p.rowFilter)
+	})
+
+	t.Run("invalid mode returns ErrCodeInvalidConfig", func(t *testing.T) {
+		_, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
+			Mode:  "bogus",
+			Match: []filter.MatchEntry{{Column: "data_type", Value: 1}},
+		}), opts)
+		require.Error(t, err)
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	})
+
+	t.Run("unknown column returns ErrCodeInvalidConfig", func(t *testing.T) {
+		_, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
+			Mode:  "whitelist",
+			Match: []filter.MatchEntry{{Column: "nope", Value: 1}},
+		}), opts)
+		require.Error(t, err)
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	})
+
+	t.Run("value type mismatch returns ErrCodeInvalidConfig", func(t *testing.T) {
+		_, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
+			Mode:  "whitelist",
+			Match: []filter.MatchEntry{{Column: "data_type", Value: "x"}},
+		}), opts)
+		require.Error(t, err)
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	})
 }

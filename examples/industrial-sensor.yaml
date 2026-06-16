@@ -1,6 +1,6 @@
 # Industrial sensor monitoring YAML parser configuration
 # Parses JSON messages with nested sensor metadata and temperature measurements
-# Demonstrates error handling for malformed temperature readings
+# Demonstrates error handling for malformed readings and equality row filtering
 
 output:
   columns:
@@ -10,6 +10,8 @@ output:
       type: "double"
     - name: "sensor_tag"
       type: "string"
+    - name: "data_type"
+      type: "int64"
 
 transformations:
   # Parse incoming JSON message
@@ -35,7 +37,7 @@ transformations:
       operation: "concat"
       target: "$table"
       fields: ["industrial.", "building", ".", "floor"]
-  
+
   # Extract table name (required by YAML parser)
   - step: "extract_table"
     config:
@@ -67,3 +69,19 @@ transformations:
       operation: "concat"
       target: "sensor_tag"
       fields: ["building", "-", "floor", "-", "sensor_id"]
+
+  # Extract the data-type indicator consumed by the row filter below
+  - step: "extract_field"
+    config:
+      source: "data_type"
+      target: "data_type"
+      type: "int64"
+
+# Row filtering: keep only rows whose data_type is 1 or 2; drop data_type == 3.
+filters:
+  mode: whitelist
+  match:
+    - column: data_type
+      value: 1
+    - column: data_type
+      value: 2

@@ -19,17 +19,17 @@
     {
       "name": "industrial-sensor",
       "num_messages": 10000,
-      "date": "2026-05-29"
+      "date": "2026-06-16"
     },
     {
       "name": "industrial-sensor",
       "num_messages": 100000,
-      "date": "2026-05-29"
+      "date": "2026-06-16"
     },
     {
       "name": "industrial-sensor",
       "num_messages": 1000000,
-      "date": "2026-05-29"
+      "date": "2026-06-16"
     },
     {
       "name": "network-metrics",

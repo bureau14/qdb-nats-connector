@@ -7,7 +7,9 @@ package source
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
@@ -91,13 +93,52 @@ func (s *Source) Close() {
 	s.NatsConn.Close()
 }
 
+// connectOptions builds nats.Options from source security config.
+// In: opts Options - CredsFile/TLSCAFile ("" = unused)
+// Out: []nats.Option, error - connect options or unreadable-file err
+// Ex: connectOptions(opts) → [UserCredentials, RootCAs], nil
+//
+// Files are validated upfront: nats.go reads the creds file lazily during
+// the auth handshake, so a missing file would otherwise surface as a
+// confusing mid-handshake error instead of a clear config error.
+func connectOptions(opts Options) ([]nats.Option, error) {
+	natsOpts := []nats.Option{}
+
+	if opts.CredsFile != "" {
+		_, err := os.Stat(opts.CredsFile)
+		if err != nil {
+			return nil, errors.NewInvalidConfigError("source",
+				fmt.Sprintf("credentials file not readable: %v", err))
+		}
+		natsOpts = append(natsOpts, nats.UserCredentials(opts.CredsFile))
+	}
+
+	if opts.TLSCAFile != "" {
+		_, err := os.Stat(opts.TLSCAFile)
+		if err != nil {
+			return nil, errors.NewInvalidConfigError("source",
+				fmt.Sprintf("TLS CA file not readable: %v", err))
+		}
+		natsOpts = append(natsOpts, nats.RootCAs(opts.TLSCAFile))
+	}
+
+	return natsOpts, nil
+}
+
 // Connect establishes NATS connection, creates JetStream consumer.
 // In: ctx context.Context - cancellation
 // Out: error - nil or connection/subscription failure
 // Ex: Connect(ctx) → nil (connected+subscribed)
 func (s *Source) Connect(ctx context.Context) error {
-	slog.Info("Establishing NATS connection")
-	nc, err := nats.Connect(s.Options.Endpoint)
+	natsOpts, err := connectOptions(s.Options)
+	if err != nil {
+		return err
+	}
+
+	slog.Info("Establishing NATS connection",
+		"creds_file", s.Options.CredsFile,
+		"tls_ca_file", s.Options.TLSCAFile)
+	nc, err := nats.Connect(s.Options.Endpoint, natsOpts...)
 	if err != nil {
 		slog.Error("Failed to establish NATS connection", "error", err)
 

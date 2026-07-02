@@ -34,6 +34,8 @@ NATS JetStream Options:
     -n, --nats <host>:<port>         NATS cluster endpoint (e.g. 10.192.172.166:4222)
     --stream <name>                  JetStream stream name (required)
     --consumer <name>                Consumer name (default: qdb-connector)
+    --nats-creds-file <file>         NATS credentials (.creds) file for JWT auth
+    --nats-ca-file <file>            CA certificate file for NATS TLS
     -w, --workers <n>                Number of concurrent workers (default: 4)
     --batch-size <n>                 Messages per fetch (default: 100)
     --batch-timeout <duration>       Max wait for batch (default: 1s)

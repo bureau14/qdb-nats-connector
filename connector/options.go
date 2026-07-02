@@ -28,6 +28,8 @@ type Options struct {
 	NatsEndpoint     string        `mapstructure:"nats"`
 	NatsStreamName   string        `mapstructure:"stream"`
 	NatsConsumerName string        `mapstructure:"consumer"`
+	NatsCredsFile    string        `mapstructure:"nats-creds-file"`
+	NatsCAFile       string        `mapstructure:"nats-ca-file"`
 	NatsBatchSize    int           `mapstructure:"batch-size"`
 	NatsBatchTimeout time.Duration `mapstructure:"batch-timeout"`
 	NatsFetchTimeout time.Duration `mapstructure:"fetch-timeout"`
@@ -73,6 +75,8 @@ type Options struct {
 		URL          string
 		StreamName   string
 		ConsumerName string
+		CredsFile    string
+		TLSCAFile    string
 		BatchSize    int
 		BatchTimeout time.Duration
 		FetchTimeout time.Duration
@@ -115,6 +119,8 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	// Set defaults
 	v.SetDefault("nats", nats.DefaultURL)
 	v.SetDefault("consumer", "qdb-connector")
+	v.SetDefault("nats-creds-file", "")
+	v.SetDefault("nats-ca-file", "")
 	v.SetDefault("workers", 4)
 	v.SetDefault("batch-size", 100)
 	v.SetDefault("batch-timeout", time.Second)
@@ -146,6 +152,8 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.StringP("nats", "n", nats.DefaultURL, "NATS cluster endpoint (e.g. 10.192.172.166:4222)")
 	fs.String("stream", "", "JetStream stream name")
 	fs.String("consumer", "qdb-connector", "Consumer name")
+	fs.String("nats-creds-file", "", "NATS credentials (.creds) file for JWT auth")
+	fs.String("nats-ca-file", "", "CA certificate file for NATS TLS")
 	fs.IntP("workers", "w", 4, "Number of concurrent workers")
 	fs.Int("batch-size", 100, "Messages per fetch")
 	fs.Duration("batch-timeout", time.Second, "Max wait for batch")
@@ -472,6 +480,26 @@ func (o *Options) ConsumerName() string {
 	return o.parsedSourceOptions.ConsumerName
 }
 
+// CredsFile returns NATS credentials file path
+// In: none
+// Out: string - .creds path ("" = no credentials)
+// Ex: CredsFile() → "/keys/real.creds"
+func (o *Options) CredsFile() string {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.CredsFile
+}
+
+// TLSCAFile returns CA certificate file path
+// In: none
+// Out: string - PEM CA path ("" = system trust store)
+// Ex: TLSCAFile() → "/keys/ca.pem"
+func (o *Options) TLSCAFile() string {
+	o.ensureInitialized()
+
+	return o.parsedSourceOptions.TLSCAFile
+}
+
 // GetWorkers returns number of concurrent workers
 // In: none
 // Out: int - worker count
@@ -529,6 +557,8 @@ func (o *Options) parseAndSetFields(v *viper.Viper) error {
 	o.parsedSourceOptions.URL = o.NatsEndpoint
 	o.parsedSourceOptions.StreamName = o.NatsStreamName
 	o.parsedSourceOptions.ConsumerName = o.NatsConsumerName
+	o.parsedSourceOptions.CredsFile = o.NatsCredsFile
+	o.parsedSourceOptions.TLSCAFile = o.NatsCAFile
 	o.parsedSourceOptions.BatchSize = o.NatsBatchSize
 	o.parsedSourceOptions.BatchTimeout = o.NatsBatchTimeout
 	o.parsedSourceOptions.FetchTimeout = o.NatsFetchTimeout

@@ -13,11 +13,14 @@ type Option func(Options) Options
 // Options: NATS JetStream configuration for reliable message consumption. Needed for pull-based batch fetching.
 // Who: connector config provides, source consumes via NewSource.
 // Endpoint-ConsumerName: JetStream connection details
+// CredsFile-TLSCAFile: connection security (JWT credentials, private CA)
 // BatchSize-MaxDeliver: message fetching & acknowledgment policies
 type Options struct {
 	Endpoint     string        `json:"endpoint"`
 	StreamName   string        `json:"stream_name"`
 	ConsumerName string        `json:"consumer_name"`
+	CredsFile    string        `json:"creds_file"`
+	TLSCAFile    string        `json:"tls_ca_file"`
 	BatchSize    int           `json:"batch_size"`
 	BatchTimeout time.Duration `json:"batch_timeout"`
 	FetchTimeout time.Duration `json:"fetch_timeout"`
@@ -64,6 +67,30 @@ func WithEndpoint(endpoint string) Option {
 func WithStreamName(streamName string) Option {
 	return func(o Options) Options {
 		o.StreamName = streamName
+
+		return o
+	}
+}
+
+// WithCredsFile sets NATS credentials (.creds) file for JWT auth.
+// In: path string - credentials file
+// Out: Option
+// Ex: WithCredsFile("/keys/real.creds")
+func WithCredsFile(path string) Option {
+	return func(o Options) Options {
+		o.CredsFile = path
+
+		return o
+	}
+}
+
+// WithTLSCAFile sets CA certificate file for NATS TLS.
+// In: path string - PEM CA certificate file
+// Out: Option
+// Ex: WithTLSCAFile("/keys/ca.pem")
+func WithTLSCAFile(path string) Option {
+	return func(o Options) Options {
+		o.TLSCAFile = path
 
 		return o
 	}
@@ -135,6 +162,10 @@ type OptionsProvider interface {
 	URL() string
 	// StreamName returns JetStream stream name for subscription
 	StreamName() string
+	// CredsFile returns NATS credentials file path ("" = no credentials)
+	CredsFile() string
+	// TLSCAFile returns CA certificate file path ("" = system trust store)
+	TLSCAFile() string
 	// BatchSize returns max messages per fetch operation
 	BatchSize() int
 	// BatchTimeout returns max wait time for batch completion
@@ -155,6 +186,8 @@ func FromOptionsProvider(p OptionsProvider) Options {
 	opts := []Option{
 		WithEndpoint(p.URL()),
 		WithStreamName(p.StreamName()),
+		WithCredsFile(p.CredsFile()),
+		WithTLSCAFile(p.TLSCAFile()),
 		WithBatchSize(p.BatchSize()),
 		WithBatchTimeout(p.BatchTimeout()),
 		WithFetchTimeout(p.FetchTimeout()),

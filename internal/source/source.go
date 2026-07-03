@@ -125,6 +125,25 @@ func connectOptions(opts Options) ([]nats.Option, error) {
 	return natsOpts, nil
 }
 
+// consumerFilterSubject resolves the subject to bind the pull subscription
+// with. nats.go rejects a bind whose subject differs from an existing
+// durable's FilterSubject, so the filter is read from the consumer itself.
+// In: js nats.JetStreamContext, stream/consumer - names to look up
+// Out: string, error - durable's FilterSubject; "" when unfiltered or absent
+// Ex: consumerFilterSubject(js, "EVENTS", "qdb-connector") → "events.*.value", nil
+func consumerFilterSubject(js nats.JetStreamContext, stream, consumer string) (string, error) {
+	ci, err := js.ConsumerInfo(stream, consumer)
+	if err != nil {
+		if stderrors.Is(err, nats.ErrConsumerNotFound) {
+			return "", nil
+		}
+
+		return "", errors.NewSubscriptionFailedError("source", consumer, err)
+	}
+
+	return ci.Config.FilterSubject, nil
+}
+
 // Connect establishes NATS connection, creates JetStream consumer.
 // In: ctx context.Context - cancellation
 // Out: error - nil or connection/subscription failure
@@ -156,12 +175,20 @@ func (s *Source) Connect(ctx context.Context) error {
 	}
 	s.JetStream = js
 
+	filterSubject, err := consumerFilterSubject(js, s.Options.StreamName, s.Options.ConsumerName)
+	if err != nil {
+		slog.Error("Failed to resolve consumer filter subject", "error", err)
+
+		return err
+	}
+
 	// Create pull subscription
 	slog.Info("Creating JetStream pull subscription",
 		"stream", s.Options.StreamName,
-		"consumer", s.Options.ConsumerName)
+		"consumer", s.Options.ConsumerName,
+		"filter_subject", filterSubject)
 
-	sub, err := js.PullSubscribe("", s.Options.ConsumerName,
+	sub, err := js.PullSubscribe(filterSubject, s.Options.ConsumerName,
 		nats.BindStream(s.Options.StreamName),
 	)
 	if err != nil {

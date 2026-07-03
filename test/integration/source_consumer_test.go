@@ -1,0 +1,222 @@
+// Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+
+// Consumer-binding integration tests for the NATS source: spawns a plain
+// nats-server with JetStream and verifies that Source binds to pre-created
+// durables (filtered and unfiltered) and still auto-creates one when absent.
+package integration
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/bureau14/qdb-nats-connector/internal/source"
+	"github.com/nats-io/nats.go"
+)
+
+// startNatsServer spawns a plain nats-server with JetStream enabled.
+// Out: server URL; process is terminated via t.Cleanup.
+func startNatsServer(t *testing.T, dir string) string {
+	t.Helper()
+
+	bin, err := exec.LookPath("nats-server")
+	if err != nil {
+		t.Skip("nats-server binary not found in PATH")
+	}
+
+	port := freeTCPPort(t)
+	conf := fmt.Sprintf(`
+listen: 127.0.0.1:%d
+jetstream { store_dir: %q }
+`, port, filepath.Join(dir, "js"))
+
+	confFile := filepath.Join(dir, "nats.conf")
+	err = os.WriteFile(confFile, []byte(conf), 0o600)
+	if err != nil {
+		t.Fatalf("failed to write nats-server config: %v", err)
+	}
+
+	cmd := exec.Command(bin, "-c", confFile) //nolint:gosec // bin from LookPath, confFile from t.TempDir()
+	err = cmd.Start()
+	if err != nil {
+		t.Fatalf("failed to start nats-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	url := fmt.Sprintf("nats://127.0.0.1:%d", port)
+	waitForNatsServer(t, url)
+
+	return url
+}
+
+// waitForNatsServer polls until the server accepts connections.
+func waitForNatsServer(t *testing.T, url string) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		nc, err := nats.Connect(url)
+		if err == nil {
+			nc.Close()
+
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatal("nats-server did not become ready within 10s")
+}
+
+// jetStreamContext connects and returns a JetStream context for test setup.
+//
+//nolint:ireturn // nats.go exposes the JetStream API as an interface
+func jetStreamContext(t *testing.T, url string) nats.JetStreamContext {
+	t.Helper()
+
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("failed to connect for setup: %v", err)
+	}
+	t.Cleanup(nc.Close)
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("failed to create JetStream context: %v", err)
+	}
+
+	return js
+}
+
+// seedFilterStream creates a two-subject stream and publishes one message
+// per subject.
+func seedFilterStream(t *testing.T, js nats.JetStreamContext, streamName, subjectA, subjectB string) {
+	t.Helper()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{subjectA, subjectB},
+	})
+	if err != nil {
+		t.Fatalf("failed to create stream: %v", err)
+	}
+
+	for _, subject := range []string{subjectA, subjectB} {
+		_, err = js.Publish(subject, []byte(`{"probe": true}`))
+		if err != nil {
+			t.Fatalf("failed to publish seed message on %s: %v", subject, err)
+		}
+	}
+}
+
+// addDurablePullConsumer pre-creates a durable pull consumer.
+// In: filterSubject - "" for an unfiltered consumer
+func addDurablePullConsumer(t *testing.T, js nats.JetStreamContext, streamName, consumerName, filterSubject string) {
+	t.Helper()
+
+	_, err := js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:       consumerName,
+		AckPolicy:     nats.AckExplicitPolicy,
+		FilterSubject: filterSubject,
+	})
+	if err != nil {
+		t.Fatalf("failed to create consumer: %v", err)
+	}
+}
+
+// connectSource builds a Source against url/stream/consumer and connects it.
+func connectSource(t *testing.T, url, streamName, consumerName string) *source.Source {
+	t.Helper()
+
+	opts := source.NewOptions(
+		source.WithEndpoint(url),
+		source.WithStreamName(streamName),
+	)
+	opts.ConsumerName = consumerName
+
+	src, err := source.NewSource(opts)
+	if err != nil {
+		t.Fatalf("NewSource failed: %v", err)
+	}
+	t.Cleanup(src.Close)
+
+	err = src.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	return src
+}
+
+// fetchSubjects fetches one batch and returns the subjects of its messages.
+func fetchSubjects(t *testing.T, src *source.Source) []string {
+	t.Helper()
+
+	batch, err := src.FetchBatch(context.Background())
+	if err != nil {
+		t.Fatalf("FetchBatch failed: %v", err)
+	}
+
+	subjects := make([]string, 0, len(batch.Messages))
+	for _, m := range batch.Messages {
+		subjects = append(subjects, m.Msg.Subject)
+	}
+
+	return subjects
+}
+
+func TestSourceBindsToFilteredConsumer(t *testing.T) {
+	url := startNatsServer(t, t.TempDir())
+	js := jetStreamContext(t, url)
+
+	streamName := "FILTER_TEST"
+	seedFilterStream(t, js, streamName, "it.filter.a", "it.filter.b")
+	addDurablePullConsumer(t, js, streamName, "filtered-consumer", "it.filter.a")
+
+	src := connectSource(t, url, streamName, "filtered-consumer")
+
+	subjects := fetchSubjects(t, src)
+	if len(subjects) != 1 {
+		t.Fatalf("got %d messages, want 1 (filtered): %v", len(subjects), subjects)
+	}
+	if subjects[0] != "it.filter.a" {
+		t.Fatalf("got subject %q, want %q", subjects[0], "it.filter.a")
+	}
+}
+
+func TestSourceBindsToUnfilteredConsumer(t *testing.T) {
+	url := startNatsServer(t, t.TempDir())
+	js := jetStreamContext(t, url)
+
+	streamName := "UNFILTERED_TEST"
+	seedFilterStream(t, js, streamName, "it.unfiltered.a", "it.unfiltered.b")
+	addDurablePullConsumer(t, js, streamName, "unfiltered-consumer", "")
+
+	src := connectSource(t, url, streamName, "unfiltered-consumer")
+
+	subjects := fetchSubjects(t, src)
+	if len(subjects) != 2 {
+		t.Fatalf("got %d messages, want 2 (unfiltered): %v", len(subjects), subjects)
+	}
+}
+
+func TestSourceAutoCreatesAbsentConsumer(t *testing.T) {
+	url := startNatsServer(t, t.TempDir())
+	js := jetStreamContext(t, url)
+
+	streamName := "AUTOCREATE_TEST"
+	seedFilterStream(t, js, streamName, "it.autocreate.a", "it.autocreate.b")
+
+	src := connectSource(t, url, streamName, "auto-created-consumer")
+
+	subjects := fetchSubjects(t, src)
+	if len(subjects) != 2 {
+		t.Fatalf("got %d messages, want 2 (auto-created unfiltered): %v", len(subjects), subjects)
+	}
+}

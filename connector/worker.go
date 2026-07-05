@@ -32,6 +32,11 @@ type Worker struct {
 	circuitBreaker *resilience.CircuitBreaker
 	hooks          *hooks.HookRegistry
 
+	// parseErrorAction: "drop" discards structurally-unusable messages
+	// (ACK, no row); "fail" NACKs any message with parse errors for
+	// redelivery. The parser only classifies; policy is applied here.
+	parseErrorAction string
+
 	// Health tracking
 	mu           sync.RWMutex
 	lastFetch    time.Time
@@ -45,6 +50,7 @@ type Worker struct {
 	messagesProcessed atomic.Uint64
 	parseFailures     atomic.Uint64
 	writeFailures     atomic.Uint64
+	messagesDropped   atomic.Uint64
 }
 
 // NewWorker creates NATS→QuasarDB worker.
@@ -69,9 +75,8 @@ type Worker struct {
 func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manager *resilience.Manager) (*Worker, error) {
 	// Create parser using factory based on command-line options
 	parserOpts := parser.ParserOptions{
-		ParserType:  opts.Parser,
-		ConfigPath:  opts.ParserConfig,
-		ErrorAction: opts.ParseErrorAction,
+		ParserType: opts.Parser,
+		ConfigPath: opts.ParserConfig,
 	}
 	messageParser, rowFilter, err := parser.NewParserWithOptions(parserOpts)
 	if err != nil {
@@ -109,16 +114,17 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 	}
 
 	return &Worker{
-		id:             id,
-		workerID:       workerID,
-		workCh:         workCh,
-		parser:         messageParser,
-		rowFilter:      rowFilter,
-		sink:           qdbSink,
-		circuitBreaker: circuitBreaker,
-		hooks:          opts.Hooks,
-		batchTimeout:   opts.NatsBatchTimeout,
-		lastFetch:      time.Now(), // Initialize lastFetch to prevent immediate unhealthy status
+		id:               id,
+		workerID:         workerID,
+		workCh:           workCh,
+		parser:           messageParser,
+		rowFilter:        rowFilter,
+		sink:             qdbSink,
+		circuitBreaker:   circuitBreaker,
+		hooks:            opts.Hooks,
+		parseErrorAction: opts.ParseErrorAction,
+		batchTimeout:     opts.NatsBatchTimeout,
+		lastFetch:        time.Now(), // Initialize lastFetch to prevent immediate unhealthy status
 	}, nil
 }
 
@@ -170,14 +176,15 @@ func (w *Worker) Run(ctx context.Context) error {
 // Returns:
 //
 //	messagesProcessed: total successfully processed
-//	parseFailures: total parse errors
+//	parseFailures: total parse errors (NACKed for redelivery)
 //	writeFailures: total write errors
+//	messagesDropped: total structurally-unusable messages discarded (drop mode)
 //
 // Example:
 //
-//	proc, parse, write := w.GetStats() // → 1000, 5, 2
-func (w *Worker) GetStats() (messagesProcessed, parseFailures, writeFailures uint64) {
-	return w.messagesProcessed.Load(), w.parseFailures.Load(), w.writeFailures.Load()
+//	proc, parse, write, dropped := w.GetStats() // → 1000, 5, 2, 13
+func (w *Worker) GetStats() (messagesProcessed, parseFailures, writeFailures, messagesDropped uint64) {
+	return w.messagesProcessed.Load(), w.parseFailures.Load(), w.writeFailures.Load(), w.messagesDropped.Load()
 }
 
 // processBatchFromChannel processes a batch received from the work channel.
@@ -380,38 +387,60 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 	return nil
 }
 
-// parseMessages transforms NATS→tables, tracks failures.
+// parseMessages transforms NATS→tables, applying the parse-error-action
+// policy to each classified result: "fail" NACKs any message with parse
+// errors for redelivery; "drop" discards structurally-unusable messages
+// (counted, one WARN, ACKed without a row) and keeps sentinel-filled rows
+// for partial field failures (ADR-005).
 // In: batch *source.MessageBatch - messages to parse
 // Out: []qdb.WriterTable - valid tables, []uint64 - failedSequenceNumbers
 // Ex: parseMessages(batch) → [table1, table2], [seq3]
 func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.WriterTable, failedSequenceNumbers []uint64) {
-	// Process batch of messages
-
-	// Parse messages individually
 	for _, msgInfo := range batch.Messages {
 		seq := msgInfo.Sequence
 
-		// Parse individual message
-		tables, err := w.parser.Parse(msgInfo.Msg)
-		if err != nil {
+		// NACK for retry (no poisoning)
+		nack := func(cause error) {
 			slog.Warn("Message parse failed",
 				"worker_id", w.id,
 				"sequence", seq,
-				"error", err,
+				"error", cause,
 				"subject", msgInfo.Msg.Subject)
-
-			// Simply NACK for retry (no poisoning)
 			failedSequenceNumbers = append(failedSequenceNumbers, seq)
 			w.parseFailures.Add(1)
-
-			continue
 		}
 
-		// Add all parsed tables to valid results
-		validTables = append(validTables, tables...)
+		res, err := w.parser.Parse(msgInfo.Msg)
+		switch {
+		case err != nil:
+			nack(err)
+		case w.parseErrorAction == "fail" && res.Outcome != parser.OutcomeOK:
+			nack(firstError(res.Errors))
+		case res.Outcome == parser.OutcomeUnusable:
+			slog.Warn("Message dropped: structurally unusable",
+				"worker_id", w.id,
+				"sequence", seq,
+				"error", firstError(res.Errors),
+				"error_count", len(res.Errors),
+				"subject", msgInfo.Msg.Subject)
+			w.messagesDropped.Add(1)
+		default:
+			// OK, or Partial in drop mode: sentinel-filled row per ADR-005
+			validTables = append(validTables, res.Tables...)
+		}
 	}
 
 	return validTables, failedSequenceNumbers
+}
+
+// firstError returns the representative error from a step-error list.
+// Ex: firstError([e1, e2]) → e1
+func firstError(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+
+	return errs[0]
 }
 
 // isHealthy verifies processing within 2x batch timeout.

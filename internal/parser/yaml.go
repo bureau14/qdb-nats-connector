@@ -101,6 +101,22 @@ type ParseState struct {
 // Per ADR-005: pure functions, no I/O operations
 type TransformationStep func(*ParseState) error
 
+// compiledStep pairs a compiled step function with its compile-time
+// classification. Structural steps (decompress, parse_json) decode the
+// payload itself: when one fails, nothing downstream can succeed and the
+// message is structurally unusable.
+type compiledStep struct {
+	fn         TransformationStep
+	name       string
+	structural bool
+}
+
+// isStructuralStep reports whether a failed step of this kind makes the
+// whole message unusable (vs a partial field failure per ADR-005).
+func isStructuralStep(name string) bool {
+	return name == "decompress" || name == "parse_json"
+}
+
 // stepRegistry maps names to step factories.
 // Per ADR-005: pre-compiled steps for <5% overhead
 var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, error){
@@ -154,9 +170,13 @@ func (t *TransformSpec) GetStepName() string {
 // YAMLParser: Pipeline parser, goroutine-safe
 // Per ADR-005: <5% overhead vs hardcoded
 type YAMLParser struct {
-	config      YAMLConfig
-	pipeline    []TransformationStep
-	errorAction string
+	config   YAMLConfig
+	pipeline []compiledStep
+
+	// hasIndexStep: config defines an extract_index step. When true, a
+	// message that produced no $timestamp is structurally unusable; the
+	// time.Now() index fallback only applies to configs without one.
+	hasIndexStep bool
 
 	// Column mapping - pre-computed at startup
 	columnTypes []qdb.TsColumnType
@@ -190,12 +210,7 @@ func NewYAMLParser(configPath string) (*YAMLParser, error) {
 		return nil, err
 	}
 
-	// Create default options for direct config loading
-	opts := ParserOptions{
-		ErrorAction: "drop",
-	}
-
-	return NewYAMLParserFromConfig(config, opts)
+	return NewYAMLParserFromConfig(config)
 }
 
 // NewYAMLParserFromConfig creates parser from config struct.
@@ -215,7 +230,7 @@ func NewYAMLParser(configPath string) (*YAMLParser, error) {
 // Per ADR-005: validates schema and compiles pipeline at initialization.
 // Also builds the optional row filter from `config.Filters`; a nil filter
 // means pass-through.
-func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser, error) {
+func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 	slog.Info("Initializing YAML parser", "transformations", len(config.Transformations))
 
 	// Validate schema
@@ -250,80 +265,145 @@ func NewYAMLParserFromConfig(config YAMLConfig, opts ParserOptions) (*YAMLParser
 	}
 
 	parser := &YAMLParser{
-		config:      config,
-		pipeline:    pipeline,
-		errorAction: opts.ErrorAction,
-		columns:     columns,
-		columnTypes: columnTypes,
-		rowFilter:   rowFilter,
+		config:       config,
+		pipeline:     pipeline,
+		hasIndexStep: hasStep(config.Transformations, "extract_index"),
+		columns:      columns,
+		columnTypes:  columnTypes,
+		rowFilter:    rowFilter,
 	}
-
-	// Store column information for ParseState buffer initialization
-	parser.columnTypes = columnTypes
-	parser.columns = columns
-
-	// Remove shared state - now allocated per Parse() call for memory safety
 
 	return parser, nil
 }
 
-// Parse transforms single NATS message to QuasarDB tables.
+// Parse transforms single NATS message to a classified ParseResult.
 // In: msg *nats.Msg - NATS message
-// Out: []qdb.WriterTable, error - tables or parse error
-// Ex: Parse(msg) → [{sensors table}], nil
-func (p *YAMLParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
+// Out: ParseResult, error - classified tables/outcome, or invariant error
+// Ex: Parse(msg) → {Tables: [{sensors table}], Outcome: OutcomeOK}, nil
+//
+// The parser only classifies; drop/fail policy is applied by the caller.
+func (p *YAMLParser) Parse(msg *nats.Msg) (ParseResult, error) {
 	if msg == nil {
-		return nil, connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil message"))
+		return ParseResult{}, connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil message"))
 	}
+	// Empty payload is structurally unusable, not an invariant violation:
+	// an error here would NACK-loop the message forever in drop mode.
 	if len(msg.Data) == 0 {
-		return nil, connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty message data"))
+		return ParseResult{
+			Outcome: OutcomeUnusable,
+			Errors:  []error{connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty message data"))},
+		}, nil
 	}
-
-	// Process YAML message through transformation pipeline
 
 	// Create new ParseState per call to prevent memory corruption
 	state := p.newParseState()
-
-	// Initialize state with message data
 	state.Message = msg
 	state.Data = msg.Data
 
-	// Execute pipeline - runs each transformation step in sequence.
-	// Per ADR-005: direct function calls, no reflection
-	for _, step := range p.pipeline {
-		err := step(state)
-		if err != nil {
-			if p.errorAction == "fail" {
-				return nil, connectorErrors.NewParsingFailedError("yaml_parser", err)
-			}
-			// For "drop" mode, log error and continue - allows partial
-			// data extraction when some fields fail (ADR-005)
-			slog.Warn("Pipeline step failed", "error", err, "subject", msg.Subject)
-			state.Errors = append(state.Errors, err)
-		}
+	if !p.runPipeline(state) {
+		return ParseResult{Outcome: OutcomeUnusable, Errors: state.Errors}, nil
 	}
 
-	// Check if parsing failed - in "fail" mode any error stops processing
-	if len(state.Errors) > 0 && p.errorAction == "fail" {
-		return nil, connectorErrors.NewParsingFailedError("yaml_parser", state.Errors[0])
+	// Structural floor: a row needs a real measurement timestamp (when the
+	// config extracts one) and valid table routing; otherwise the message
+	// is unusable and no row may be fabricated.
+	tableName, floorErr := p.checkStructuralFloor(state)
+	if floorErr != nil {
+		state.Errors = append(state.Errors, floorErr)
+
+		return ParseResult{Outcome: OutcomeUnusable, Errors: state.Errors}, nil
 	}
 
 	// Create WriterTable - uses per-call allocated buffers for memory safety
-	table, err := p.createWriterTable(state)
+	table, err := p.createWriterTable(state, tableName)
 	if err != nil {
-		return nil, err
+		return ParseResult{}, err
 	}
 
-	return []qdb.WriterTable{table}, nil
+	outcome := OutcomeOK
+	if len(state.Errors) > 0 {
+		outcome = OutcomePartial
+	}
+
+	return ParseResult{Tables: []qdb.WriterTable{table}, Outcome: outcome, Errors: state.Errors}, nil
+}
+
+// runPipeline executes compiled steps in sequence, accumulating field-step
+// errors in state.Errors (ADR-005 partial extraction). A failed structural
+// step stops execution immediately - nothing downstream can succeed and the
+// remaining steps would only add noise. Returns false when structurally
+// unusable.
+// Per ADR-005: direct function calls, no reflection
+func (p *YAMLParser) runPipeline(state *ParseState) bool {
+	for _, step := range p.pipeline {
+		err := step.fn(state)
+		if err == nil {
+			continue
+		}
+
+		state.Errors = append(state.Errors, err)
+		if step.structural {
+			return false
+		}
+	}
+
+	return true
+}
+
+// checkStructuralFloor validates the parsed state can anchor a real row.
+// In: state *ParseState - post-pipeline state
+// Out: string - validated table name, error - structural failure
+// Ex: checkStructuralFloor(state) → "sensors\x00", nil
+func (p *YAMLParser) checkStructuralFloor(state *ParseState) (string, error) {
+	if p.hasIndexStep {
+		if _, ok := state.Fields["$timestamp"].(time.Time); !ok {
+			return "", connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("extract_index step configured but produced no $timestamp"))
+		}
+	}
+
+	tableNameField, exists := state.Fields["$table"]
+	if !exists {
+		return "", connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name not set - extract_table step is required"))
+	}
+
+	tableName, ok := tableNameField.(string)
+	if !ok {
+		return "", connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name must be a string, got %T", tableNameField))
+	}
+
+	// Validate here as well as in extract_table: $table may have been set
+	// directly by an extract_field step, bypassing extract_table's own
+	// validation when that step failed.
+	trimmed := strings.TrimSuffix(tableName, "\x00")
+	if trimmed == "" {
+		return "", connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("table name cannot be empty"))
+	}
+
+	err := validateTableName(trimmed)
+	if err != nil {
+		return "", err
+	}
+
+	// Memory-pinning contract: table names must carry a null terminator.
+	// extract_table guarantees this; re-add it when $table was set directly.
+	if !strings.HasSuffix(tableName, "\x00") {
+		tableName = fmt.Sprintf("%s\x00", trimmed)
+	}
+
+	return tableName, nil
 }
 
 // createWriterTable builds QDB table from state.
-// In: state *ParseState - parsed fields
+// In: state *ParseState - parsed fields, tableName - validated by checkStructuralFloor
 // Out: qdb.WriterTable - single-row table
-// Ex: createWriterTable(state) → table
+// Ex: createWriterTable(state, "sensors\x00") → table
 //
 //nolint:dupl // per-column-type branches intentionally repeated for buffer-bound performance
-func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, error) {
+func (p *YAMLParser) createWriterTable(state *ParseState, tableName string) (qdb.WriterTable, error) {
 	// CRITICAL MEMORY PINNING REQUIREMENTS:
 	// =====================================
 	// ALL data written to qdb.WriterTable MUST be compatible with Go's runtime.Pinner.
@@ -370,7 +450,10 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 	// producing a merged table whose column_len < rowCount and whose stored
 	// (timestamp, value) pairs are misaligned.
 
-	// Set index - uses parsed index or current time as fallback
+	// Set index - uses parsed index, or current time as fallback. The
+	// fallback is only reachable for configs without an extract_index step:
+	// checkStructuralFloor classifies a configured-but-missing $timestamp
+	// as unusable before this function runs.
 	var ts time.Time
 	if parsedTs, ok := state.Fields["$timestamp"].(time.Time); ok {
 		ts = parsedTs
@@ -385,24 +468,6 @@ func (p *YAMLParser) createWriterTable(state *ParseState) (qdb.WriterTable, erro
 			fmt.Errorf("indexBuf is empty"))
 	}
 	state.indexBuf[0] = ts
-
-	// Get table name from $table field
-	tableNameField, exists := state.Fields["$table"]
-	if !exists {
-		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name not set - extract_table step is required"))
-	}
-
-	tableName, ok := tableNameField.(string)
-	if !ok {
-		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name must be a string, got %T", tableNameField))
-	}
-
-	if tableName == "" || tableName == "\x00" {
-		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name cannot be empty"))
-	}
 
 	// Table name already has null terminator from extract_table step
 	// Create table with pre-defined schema - columns were validated at startup
@@ -631,27 +696,17 @@ func loadYAMLConfig(configPath string) (YAMLConfig, error) {
 // Out: []BuildingBlock - executable pipeline
 // Ex: compilePipeline([{parse_json},{extract_field}]) → pipeline
 // Per ADR-005: pre-compiles at startup for <5% overhead
-func compilePipeline(specs []TransformSpec) ([]TransformationStep, error) {
+func compilePipeline(specs []TransformSpec) ([]compiledStep, error) {
 	if len(specs) == 0 {
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "empty transformation pipeline")
 	}
 
-	// Check for extract_table step
-	hasExtractTable := false
-	for _, spec := range specs {
-		if spec.GetStepName() == "extract_table" {
-			hasExtractTable = true
-
-			break
-		}
-	}
-
-	if !hasExtractTable {
+	if !hasStep(specs, "extract_table") {
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
 			"transformation pipeline must include an extract_table step")
 	}
 
-	steps := make([]TransformationStep, len(specs))
+	steps := make([]compiledStep, len(specs))
 
 	for i, spec := range specs {
 		// Lookup factory in registry - validates step types at compile time
@@ -671,10 +726,26 @@ func compilePipeline(specs []TransformSpec) ([]TransformationStep, error) {
 				fmt.Sprintf("failed to create step '%s': %v", stepName, err))
 		}
 
-		steps[i] = step
+		steps[i] = compiledStep{
+			fn:         step,
+			name:       stepName,
+			structural: isStructuralStep(stepName),
+		}
 	}
 
 	return steps, nil
+}
+
+// hasStep reports whether specs contain a step of the given name.
+// Ex: hasStep(specs, "extract_index") → true
+func hasStep(specs []TransformSpec, name string) bool {
+	for _, spec := range specs {
+		if spec.GetStepName() == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 // validateTableName validates table name for security

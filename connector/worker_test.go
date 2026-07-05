@@ -3,38 +3,55 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/internal/filter"
+	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// fakeParser returns one fixed single-row table per message, ignoring content.
+// fakeParser returns a fixed classified result per message, ignoring content.
+// outcome selects the classification; for OK/Partial a single-row table
+// carrying val in its first column is produced.
 type fakeParser struct {
-	cols []qdb.WriterColumn
-	val  int64
+	cols    []qdb.WriterColumn
+	val     int64
+	outcome parser.Outcome
 }
 
-// Parse returns a single-row table carrying p.val in its first column.
-func (p *fakeParser) Parse(_ *nats.Msg) ([]qdb.WriterTable, error) {
+// Parse returns the configured outcome with a single-row table for OK/Partial.
+func (p *fakeParser) Parse(_ *nats.Msg) (parser.ParseResult, error) {
+	if p.outcome == parser.OutcomeUnusable {
+		return parser.ParseResult{
+			Outcome: parser.OutcomeUnusable,
+			Errors:  []error{fmt.Errorf("undecodable payload")},
+		}, nil
+	}
+
 	tbl, err := qdb.NewWriterTable("t1", p.cols)
 	if err != nil {
-		return nil, err
+		return parser.ParseResult{}, err
 	}
 	cd := qdb.NewColumnDataInt64([]int64{p.val})
 	err = tbl.SetData(0, &cd)
 	if err != nil {
-		return nil, err
+		return parser.ParseResult{}, err
 	}
 	tbl.SetIndex([]time.Time{time.Unix(0, 0)})
 
-	return []qdb.WriterTable{tbl}, nil
+	res := parser.ParseResult{Tables: []qdb.WriterTable{tbl}, Outcome: p.outcome}
+	if p.outcome == parser.OutcomePartial {
+		res.Errors = []error{fmt.Errorf("field missing")}
+	}
+
+	return res, nil
 }
 
 // TestProcessBatchAllRowsFilteredStillAcks is the regression test for the
@@ -52,11 +69,12 @@ func TestProcessBatchAllRowsFilteredStillAcks(t *testing.T) {
 	require.NotNil(t, rf)
 
 	w := &Worker{
-		id:        0,
-		workerID:  "worker-0",
-		parser:    &fakeParser{cols: cols, val: 1},
-		rowFilter: rf,
-		hooks:     hooks.NewHookRegistry(),
+		id:               0,
+		workerID:         "worker-0",
+		parser:           &fakeParser{cols: cols, val: 1},
+		rowFilter:        rf,
+		hooks:            hooks.NewHookRegistry(),
+		parseErrorAction: "drop",
 	}
 
 	var acked, nacked []uint64
@@ -81,4 +99,109 @@ func TestProcessBatchAllRowsFilteredStillAcks(t *testing.T) {
 	require.NoError(t, w.processBatchFromChannel(context.Background(), batch))
 	assert.ElementsMatch(t, []uint64{1, 2, 3}, acked, "all sequences must be ACKed")
 	assert.Empty(t, nacked, "no sequence must be NACKed")
+}
+
+// makeBatch builds a 3-message batch capturing ACKs/NACKs into the given slices.
+func makeBatch(acked, nacked *[]uint64) *source.MessageBatch {
+	return &source.MessageBatch{
+		Messages: []source.MessageInfo{
+			{Msg: &nats.Msg{Subject: "s", Data: []byte("x")}, Sequence: 1},
+			{Msg: &nats.Msg{Subject: "s", Data: []byte("x")}, Sequence: 2},
+			{Msg: &nats.Msg{Subject: "s", Data: []byte("x")}, Sequence: 3},
+		},
+		AckFunc: func(seqs []uint64) error {
+			*acked = append(*acked, seqs...)
+
+			return nil
+		},
+		NackFunc: func(seqs []uint64) error {
+			*nacked = append(*nacked, seqs...)
+
+			return nil
+		},
+	}
+}
+
+// TestProcessBatchUnusablePolicy mirrors the all-filtered test for batches
+// whose messages are ALL structurally unusable: drop mode counts them as
+// dropped and ACKs without a write; fail mode NACKs them for redelivery.
+func TestProcessBatchUnusablePolicy(t *testing.T) {
+	testCases := []struct {
+		name              string
+		mode              string
+		wantAcked         []uint64
+		wantNacked        []uint64
+		wantDropped       uint64
+		wantParseFailures uint64
+	}{
+		{"drop acks without write", "drop", []uint64{1, 2, 3}, nil, 3, 0},
+		{"fail nacks for redelivery", "fail", nil, []uint64{1, 2, 3}, 0, 3},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cols := []qdb.WriterColumn{{ColumnName: "value\x00", ColumnType: qdb.TsColumnInt64}}
+
+			w := &Worker{
+				id:               0,
+				workerID:         "worker-0",
+				parser:           &fakeParser{cols: cols, outcome: parser.OutcomeUnusable},
+				hooks:            hooks.NewHookRegistry(),
+				parseErrorAction: tc.mode,
+			}
+
+			var acked, nacked []uint64
+			batch := makeBatch(&acked, &nacked)
+
+			// nil sink: a write attempt would panic, so completion proves no write.
+			require.NoError(t, w.processBatchFromChannel(context.Background(), batch))
+			assert.ElementsMatch(t, tc.wantAcked, acked)
+			assert.ElementsMatch(t, tc.wantNacked, nacked)
+
+			_, parseFailures, _, dropped := w.GetStats()
+			assert.Equal(t, tc.wantDropped, dropped)
+			assert.Equal(t, tc.wantParseFailures, parseFailures)
+		})
+	}
+}
+
+// TestParseMessagesPolicyTable pins the full mode x outcome policy matrix
+// at the parseMessages level.
+func TestParseMessagesPolicyTable(t *testing.T) {
+	cols := []qdb.WriterColumn{{ColumnName: "value\x00", ColumnType: qdb.TsColumnInt64}}
+
+	testCases := []struct {
+		name        string
+		mode        string
+		outcome     parser.Outcome
+		wantTables  int
+		wantFailed  int
+		wantDropped uint64
+	}{
+		{"drop keeps ok", "drop", parser.OutcomeOK, 3, 0, 0},
+		{"drop keeps partial sentinel rows", "drop", parser.OutcomePartial, 3, 0, 0},
+		{"drop discards unusable", "drop", parser.OutcomeUnusable, 0, 0, 3},
+		{"fail keeps ok", "fail", parser.OutcomeOK, 3, 0, 0},
+		{"fail nacks partial", "fail", parser.OutcomePartial, 0, 3, 0},
+		{"fail nacks unusable", "fail", parser.OutcomeUnusable, 0, 3, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &Worker{
+				id:               0,
+				workerID:         "worker-0",
+				parser:           &fakeParser{cols: cols, val: 1, outcome: tc.outcome},
+				parseErrorAction: tc.mode,
+			}
+
+			var acked, nacked []uint64
+			validTables, failedSeqs := w.parseMessages(makeBatch(&acked, &nacked))
+
+			assert.Len(t, validTables, tc.wantTables)
+			assert.Len(t, failedSeqs, tc.wantFailed)
+			assert.Equal(t, tc.wantDropped, w.messagesDropped.Load())
+			assert.Equal(t, uint64(tc.wantFailed), w.parseFailures.Load()) //nolint:gosec // test count, no overflow
+		})
+	}
 }

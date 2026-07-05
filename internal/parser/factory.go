@@ -15,7 +15,7 @@ import (
 // Args:
 //
 //	parserType: "noop", "yaml"
-//	opts: config path, error mode
+//	opts: config path
 //
 // Returns:
 //
@@ -44,7 +44,7 @@ func NewParser(parserType string, opts ParserOptions) (Parser, *filter.RowFilter
 		}
 
 		// Create YAML parser with building block pipeline compiled from config
-		p, err := NewYAMLParserFromConfig(config, opts)
+		p, err := NewYAMLParserFromConfig(config)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -11,9 +11,33 @@ import (
 
 // ParserOptions: parser factory configuration
 type ParserOptions struct {
-	ParserType  string // noop, yaml
-	ConfigPath  string // Path to parser config file (for yaml parser)
-	ErrorAction string // drop, fail
+	ParserType string // noop, yaml
+	ConfigPath string // Path to parser config file (for yaml parser)
+}
+
+// Outcome classifies what happened to a message during parsing. The parser
+// only reports; policy (drop vs fail) is applied by the caller (worker).
+type Outcome int
+
+const (
+	// OutcomeOK: all pipeline steps succeeded.
+	OutcomeOK Outcome = iota
+	// OutcomePartial: structure intact, some field steps failed; the row is
+	// sentinel-filled for the missing columns (ADR-005 partial extraction).
+	OutcomePartial
+	// OutcomeUnusable: structural failure -- the message cannot become a
+	// valid row (undecodable payload, no $timestamp despite a configured
+	// extract_index step, or missing/invalid $table routing).
+	OutcomeUnusable
+)
+
+// ParseResult: classified result of parsing one message.
+// Tables is populated for OK and Partial, empty for Unusable.
+// Errors holds step errors in pipeline order; Errors[0] is representative.
+type ParseResult struct {
+	Tables  []qdb.WriterTable
+	Outcome Outcome
+	Errors  []error
 }
 
 // Parser: transforms NATS messages into QuasarDB timeseries tables. Needed for pluggable data transformations.
@@ -38,7 +62,11 @@ type ParserOptions struct {
 // - Use race detector to find memory access issues
 // - Test with concurrent writes to expose pinning problems
 type Parser interface {
-	// Parse transforms single NATS message to QuasarDB tables
-	// Returns: WriterTable slice where ALL strings MUST be pinnable by runtime.Pinner
-	Parse(msg *nats.Msg) ([]qdb.WriterTable, error)
+	// Parse transforms single NATS message to a classified ParseResult.
+	// The returned error is reserved for internal invariant violations
+	// (nil/empty message, table construction failure); step-level failures
+	// are reported via ParseResult.Outcome and ParseResult.Errors so the
+	// caller can apply its drop/fail policy.
+	// All strings in ParseResult.Tables MUST be pinnable by runtime.Pinner.
+	Parse(msg *nats.Msg) (ParseResult, error)
 }

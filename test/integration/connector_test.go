@@ -231,12 +231,13 @@ transformations:
 				Data: []byte(message),
 			}
 
-			results, err := p.Parse(natsMsg)
+			res, err := p.Parse(natsMsg)
 			require.NoError(t, err, "Failed to parse message %d", msgNum)
-			require.Len(t, results, 1, "Expected 1 writer table from parser")
+			require.Equal(t, parser.OutcomeOK, res.Outcome, "Expected clean parse for message %d: %v", msgNum, res.Errors)
+			require.Len(t, res.Tables, 1, "Expected 1 writer table from parser")
 
 			// Accumulate tables for batch
-			batchTables = append(batchTables, results...)
+			batchTables = append(batchTables, res.Tables...)
 		}
 
 		// Merge WriterTables to handle duplicates (all messages go to same table)

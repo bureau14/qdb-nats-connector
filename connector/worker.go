@@ -46,11 +46,8 @@ type Worker struct {
 	activeBatches sync.WaitGroup
 	closing       atomic.Bool
 
-	// Metrics (using atomic for thread safety)
-	messagesProcessed atomic.Uint64
-	parseFailures     atomic.Uint64
-	writeFailures     atomic.Uint64
-	messagesDropped   atomic.Uint64
+	// Metrics hot-path counters; snapshot via GetStats (see stats.go)
+	workerCounters
 }
 
 // NewWorker creates NATS→QuasarDB worker.
@@ -171,20 +168,17 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// GetStats returns worker statistics for monitoring.
+// GetStats returns a snapshot of worker statistics for monitoring.
 // Args: none
 // Returns:
 //
-//	messagesProcessed: total successfully processed
-//	parseFailures: total parse errors (NACKed for redelivery)
-//	writeFailures: total write errors
-//	messagesDropped: total structurally-unusable messages discarded (drop mode)
+//	WorkerStats: point-in-time counter snapshot (see stats.go)
 //
 // Example:
 //
-//	proc, parse, write, dropped := w.GetStats() // → 1000, 5, 2, 13
-func (w *Worker) GetStats() (messagesProcessed, parseFailures, writeFailures, messagesDropped uint64) {
-	return w.messagesProcessed.Load(), w.parseFailures.Load(), w.writeFailures.Load(), w.messagesDropped.Load()
+//	stats := w.GetStats() // → WorkerStats{MessagesProcessed: 1000, ...}
+func (w *Worker) GetStats() WorkerStats {
+	return w.snapshot()
 }
 
 // processBatchFromChannel processes a batch received from the work channel.

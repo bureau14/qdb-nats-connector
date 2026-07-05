@@ -158,9 +158,9 @@ func TestProcessBatchUnusablePolicy(t *testing.T) {
 			assert.ElementsMatch(t, tc.wantAcked, acked)
 			assert.ElementsMatch(t, tc.wantNacked, nacked)
 
-			_, parseFailures, _, dropped := w.GetStats()
-			assert.Equal(t, tc.wantDropped, dropped)
-			assert.Equal(t, tc.wantParseFailures, parseFailures)
+			stats := w.GetStats()
+			assert.Equal(t, tc.wantDropped, stats.MessagesDropped)
+			assert.Equal(t, tc.wantParseFailures, stats.ParseFailures)
 		})
 	}
 }
@@ -200,8 +200,9 @@ func TestParseMessagesPolicyTable(t *testing.T) {
 
 			assert.Len(t, validTables, tc.wantTables)
 			assert.Len(t, failedSeqs, tc.wantFailed)
-			assert.Equal(t, tc.wantDropped, w.messagesDropped.Load())
-			assert.Equal(t, uint64(tc.wantFailed), w.parseFailures.Load()) //nolint:gosec // test count, no overflow
+			stats := w.GetStats()
+			assert.Equal(t, tc.wantDropped, stats.MessagesDropped)
+			assert.Equal(t, uint64(tc.wantFailed), stats.ParseFailures) //nolint:gosec // test count, no overflow
 		})
 	}
 }

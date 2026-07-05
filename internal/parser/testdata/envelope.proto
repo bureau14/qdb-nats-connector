@@ -1,0 +1,46 @@
+// Synthetic test schema for the parse_protobuf step. Neutral names only;
+// covers every mapped field kind plus the integer/float normalization
+// edges (uint32, uint64, float, sint32).
+//
+// Compiled with (libprotoc 3.21.12, run from the repository root):
+//   /opt/local/bin/protoc --include_imports \
+//     --descriptor_set_out=internal/parser/testdata/envelope.desc \
+//     --proto_path=internal/parser/testdata \
+//     internal/parser/testdata/envelope.proto
+// --include_imports embeds google/protobuf/timestamp.proto (resolved from
+// protoc's bundled well-known types) so the .desc is self-contained.
+syntax = "proto3";
+
+package test.v1;
+
+import "google/protobuf/timestamp.proto";
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  MODE_ACTIVE = 1;
+  MODE_PASSIVE = 2;
+}
+
+message Inner {
+  double reading = 1;
+  string unit = 2;
+}
+
+message Envelope {
+  string name = 1;
+  int64 count = 2;
+  double ratio = 3;
+  bool enabled = 4;
+  bytes raw = 5;
+  Mode mode = 6;
+  repeated string tags = 7;
+  repeated int64 nums = 8;
+  Inner inner = 9;
+  map<int32, bytes> blobs = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+  uint32 small = 13;
+  uint64 big = 14;
+  float weight = 15;
+  sint32 delta = 16;
+}

@@ -19,6 +19,7 @@ The NATS to QuasarDB connector requires a pluggable parser architecture to handl
 ### Current State
 
 The existing system uses a hardcoded JSON parser with direct Go implementation, providing optimal performance but zero flexibility for customer-specific requirements. Analysis of existing customer parsers reveals common patterns:
+
 - JSON parsing with field extraction and mapping
 - Timestamp format conversions (various formats like "MM/dd/yyyy HH:mm:ss.SSS")
 - GZIP decompression for compressed payloads
@@ -50,7 +51,7 @@ We will implement a **YAML-based parser architecture with pre-compiled building 
 # This file ONLY defines data transformation logic, NOT runtime behavior
 # Note: error_handling controlled via --parse-error-action flag
 # Note: input_format inferred from transformation steps
-compression: gzip  # Optional: none, gzip
+compression: gzip # Optional: none, gzip
 
 # Output schema definition
 output:
@@ -68,13 +69,13 @@ transformations:
   - step: "decompress"
     config:
       algorithm: "gzip"
-      
+
   - step: "parse_json"
     config: {}
-    
+
   - step: "extract_index"
     config:
-      source: "T"  # Compact field name in JSON
+      source: "T" # Compact field name in JSON
       format: "MM/dd/yyyy HH:mm:ss.SSS"
 
   - step: "extract_field"
@@ -82,7 +83,7 @@ transformations:
       source: "V"
       target: "temperature"
       type: "float64"
-      on_error: "skip"  # Field-level error handling
+      on_error: "skip" # Field-level error handling
 
   - step: "compute_field"
     config:
@@ -134,6 +135,7 @@ Building Block Architecture:
 ```
 
 **Performance Benefits:**
+
 - **No external process overhead**: Everything runs in-process
 - **Minimal abstraction cost**: Direct function calls between blocks
 - **Optimized data flow**: The parser prepares data for a batch write, which is then executed in a single, efficient operation.
@@ -169,11 +171,13 @@ Building Block Architecture:
 ### WebAssembly (WASM) - Rejected
 
 **Evaluation:**
+
 - **Performance Impact**: Good (10-20% overhead)
 - **Developer Experience**: Good (Multi-language support)
 - **Security**: Excellent (Excellent sandboxing)
 
 **Rejection Reasons:**
+
 - Performance overhead unacceptable for high-throughput requirements
 - Additional complexity of WASM runtime integration
 - Memory copying costs for large batch operations
@@ -182,11 +186,13 @@ Building Block Architecture:
 ### Embedded Scripting (Lua/JavaScript) - Rejected
 
 **Evaluation:**
+
 - **Performance Impact**: Moderate (Interpreted overhead)
 - **Developer Experience**: Excellent
 - **Security**: Good (Configurable sandboxing)
 
 **Rejection Reasons:**
+
 - Interpreted execution too slow for batch processing requirements
 - JIT compilation warmup time impacts first-message latency
 - Memory management overhead for large datasets
@@ -195,11 +201,13 @@ Building Block Architecture:
 ### Go Plugin System - Rejected
 
 **Evaluation:**
+
 - **Performance Impact**: Excellent (Native performance)
 - **Developer Experience**: Poor (Requires Go knowledge)
 - **Security**: Poor (No sandboxing)
 
 **Rejection Reasons:**
+
 - Requires customers to write Go code (violates requirement)
 - Linux-only platform support
 - No security isolation for customer code
@@ -208,11 +216,13 @@ Building Block Architecture:
 ### Expression Languages (CEL, JSONata) - Rejected
 
 **Evaluation:**
+
 - **Performance Impact**: Good (Good for simple operations)
 - **Developer Experience**: Good (Declarative approach)
 - **Security**: Excellent (Safe by design)
 
 **Rejection Reasons:**
+
 - Insufficient expressiveness for complex transformations
 - Cannot handle binary data processing requirements
 - Limited support for batch operations and compression
@@ -221,6 +231,7 @@ Building Block Architecture:
 ## Implementation Plan
 
 ### Phase 1: Core Building Blocks (Week 1-2)
+
 - Essential building blocks based on customer patterns:
   - `extract_fields`: JSON field extraction with path support
   - `parse_timestamp`: Multi-format timestamp parsing
@@ -232,6 +243,7 @@ Building Block Architecture:
 - Pipeline compilation engine
 
 ### Phase 2: Runtime Integration (Week 3-4)
+
 - Add `--parser` option to connector (json|yaml|noop)
 - Implement `--parser-config` flag for YAML file path
 - Add `--parse-error-action` flag (drop|fail) - controls runtime behavior
@@ -240,12 +252,14 @@ Building Block Architecture:
 - Performance benchmarking vs JSON parser
 
 ### Phase 3: Production Readiness (Week 5-6)
+
 - Comprehensive error messages and debugging
 - Configuration validation at startup
 - Example configurations for common patterns
 - Migration guide from JSON parser
 
 ### Phase 4: Future Enhancements (Week 7+)
+
 - Additional building blocks as needed
 - Hot-reload capability for parser configs
 - Parser composition (reusable sub-pipelines)
@@ -278,6 +292,7 @@ qdb-nats-connector \
 ### Configuration Separation
 
 **YAML Parser Config File** (defines WHAT to parse):
+
 - `compression`: Data compression type
 - `output`: Table schema definition
 - `transformations`: Transformation step pipeline
@@ -285,14 +300,43 @@ qdb-nats-connector \
 - Note: `error_handling` controlled via runtime flags
 
 **Runtime Flags** (control HOW to parse):
+
 - `--parse-error-action`: drop|fail - behavior on parsing errors
 - `--parser-parallel`: Enable parallel processing
 - `--parser-worker-pool-size`: Number of parallel workers
 
 This separation ensures:
+
 1. Parser logic is reusable across environments
 2. Runtime behavior can be adjusted without file changes
 3. Clear separation of concerns between data transformation and execution
+
+### Error-Action Policy (Amended)
+
+The parser does not apply the `--parse-error-action` policy itself. It
+classifies each message into an outcome (`ParseResult.Outcome`) and the
+worker -- the layer that invokes the parser -- decides what to do and tracks
+the metrics:
+
+- **OK**: all steps succeeded; the row is written.
+- **Partial**: structural steps succeeded but some field steps
+  (`extract_field`, `compute_field`, `safe_parse_number`) failed. The row is
+  anchored to a real measurement timestamp and real table routing; missing
+  columns are filled with per-type null sentinels (partial extraction, as
+  originally specified). `drop` keeps the row; `fail` NACKs for redelivery.
+- **Unusable**: a structural failure means no valid row can exist:
+  - a `decompress` or `parse_json` step failed (payload undecodable; the
+    pipeline stops at the first structural failure),
+  - an `extract_index` step is configured but produced no `$timestamp`
+    (a fabricated wall-clock index is worse than no row),
+  - `$table` routing is missing or fails validation.
+
+  `drop` discards the message: zero tables, ACKed as processed, counted in
+  the worker's `messagesDropped` statistic, one WARN log line. `fail` NACKs
+  for redelivery.
+
+The `time.Now()` index fallback applies only to configurations that define
+no `extract_index` step at all -- a compile-time property of the pipeline.
 
 ## Migration Strategy
 
@@ -303,6 +347,7 @@ This separation ensures:
 ## Terminology Update
 
 **Note**: As of 2025-07-15, the YAML configuration terminology has been updated from "building blocks" to "transformation steps" to better reflect the sequential nature of the pipeline processing. The implementation uses:
+
 - `step:` field in YAML configurations (replacing `block:`)
 - `TransformationStep` type in Go code (replacing `BuildingBlock`)
 - `stepRegistry` variable (replacing `blockRegistry`)
@@ -311,4 +356,4 @@ This change maintains backward compatibility - both `step:` and `block:` fields 
 
 ---
 
-*This ADR documents the architectural decision for pluggable parser implementation in the NATS to QuasarDB connector system.*
+_This ADR documents the architectural decision for pluggable parser implementation in the NATS to QuasarDB connector system._

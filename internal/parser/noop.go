@@ -28,17 +28,22 @@ func NewNoopParser() (*NoopParser, error) {
 
 // Parse validates message, returns empty tables.
 // In: msg *nats.Msg - message to validate
-// Out: []WriterTable, error - ∅ or nil/empty error
-// Ex: Parse(msg) → [], nil
-func (p *NoopParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
+// Out: ParseResult, error - OK with zero tables, or invariant error
+// Ex: Parse(msg) → {Tables: [], Outcome: OutcomeOK}, nil
+func (p *NoopParser) Parse(msg *nats.Msg) (ParseResult, error) {
 	if msg == nil {
-		return nil, connectorErrors.NewParsingFailedError("noop_parser", fmt.Errorf("nil message"))
+		return ParseResult{}, connectorErrors.NewParsingFailedError("noop_parser", fmt.Errorf("nil message"))
 	}
+	// Empty payload is structurally unusable, not an invariant violation:
+	// an error here would NACK-loop the message forever in drop mode.
 	if len(msg.Data) == 0 {
-		return nil, connectorErrors.NewParsingFailedError("noop_parser", fmt.Errorf("empty message data"))
+		return ParseResult{
+			Outcome: OutcomeUnusable,
+			Errors:  []error{connectorErrors.NewParsingFailedError("noop_parser", fmt.Errorf("empty message data"))},
+		}, nil
 	}
 
 	slog.Debug("Parsing NATS message", "subject", msg.Subject, "data_len", len(msg.Data))
 
-	return []qdb.WriterTable{}, nil
+	return ParseResult{Tables: []qdb.WriterTable{}, Outcome: OutcomeOK}, nil
 }

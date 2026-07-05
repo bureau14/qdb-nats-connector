@@ -13,6 +13,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/connector/resilience"
 	"github.com/bureau14/qdb-nats-connector/internal/filter"
+	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
@@ -29,21 +30,21 @@ type integrationParser struct {
 }
 
 // Parse returns a single-row table carrying data_type == msg.Data[0].
-func (p *integrationParser) Parse(msg *nats.Msg) ([]qdb.WriterTable, error) {
+func (p *integrationParser) Parse(msg *nats.Msg) (parser.ParseResult, error) {
 	val := int64(msg.Data[0])
 	tbl, err := qdb.NewWriterTable(p.tableName, p.cols)
 	if err != nil {
-		return nil, err
+		return parser.ParseResult{}, err
 	}
 	cd := qdb.NewColumnDataInt64([]int64{val})
 	err = tbl.SetData(0, &cd)
 	if err != nil {
-		return nil, err
+		return parser.ParseResult{}, err
 	}
 	// Use val as a unique sub-second timestamp offset (nanoseconds).
 	tbl.SetIndex([]time.Time{time.Unix(0, val)})
 
-	return []qdb.WriterTable{tbl}, nil
+	return parser.ParseResult{Tables: []qdb.WriterTable{tbl}, Outcome: parser.OutcomeOK}, nil
 }
 
 // TestPartialFilterWorkerIntegration verifies that a batch with data_type values

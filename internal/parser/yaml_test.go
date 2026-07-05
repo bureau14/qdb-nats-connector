@@ -7,8 +7,8 @@ package parser
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -30,6 +30,27 @@ func stripNullTerminator(s string) string {
 	}
 
 	return s
+}
+
+// requireUnusable asserts a structural drop: nil error, OutcomeUnusable,
+// zero tables, at least one recorded step error.
+func requireUnusable(t *testing.T, res ParseResult, err error) {
+	t.Helper()
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeUnusable, res.Outcome)
+	assert.Empty(t, res.Tables)
+	require.NotEmpty(t, res.Errors)
+}
+
+// errorsContain reports whether any recorded step error mentions substr.
+func errorsContain(errs []error, substr string) bool {
+	for _, e := range errs {
+		if strings.Contains(e.Error(), substr) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // TestYAMLParserConfigurationErrors validates config error handling
@@ -82,10 +103,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -105,10 +123,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -131,10 +146,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -156,10 +168,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -178,10 +187,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -201,10 +207,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -222,10 +225,7 @@ func TestYAMLParserConfigurationErrors(t *testing.T) {
 			Transformations: []TransformSpec{},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -248,15 +248,13 @@ func TestYAMLParserInvalidInputs(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{
-		ErrorAction: "fail",
-	}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test nil message handling - should return parsing error
 	t.Run("nil message", func(t *testing.T) {
-		tables, err := parser.Parse(nil)
+		res, err := parser.Parse(nil)
+		tables := res.Tables
 		assert.Nil(t, tables)
 		require.Error(t, err)
 
@@ -266,38 +264,27 @@ func TestYAMLParserInvalidInputs(t *testing.T) {
 		assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
 	})
 
-	// Test empty message data - should return parsing error
+	// Empty message data - structurally unusable, never a NACK loop
 	t.Run("empty message", func(t *testing.T) {
 		msg := &nats.Msg{
 			Subject: util.RandomTopicName(),
 			Data:    []byte{},
 		}
 
-		tables, err := parser.Parse(msg)
-		assert.Nil(t, tables)
-		require.Error(t, err)
-
-		var connErr *connectorErrors.ConnectorError
-		require.True(t, errors.As(err, &connErr))
-		assert.Equal(t, "yaml_parser", connErr.Component)
-		assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+		res, err := parser.Parse(msg)
+		requireUnusable(t, res, err)
+		assert.True(t, errorsContain(res.Errors, "empty message data"))
 	})
 
-	// Test invalid JSON parsing - should return error in fail mode
+	// Test invalid JSON parsing - structural failure, classified unusable
 	t.Run("invalid json", func(t *testing.T) {
 		msg := &nats.Msg{
 			Subject: util.RandomTopicName(),
 			Data:    []byte(`{"invalid": json`),
 		}
 
-		tables, err := parser.Parse(msg)
-		assert.Nil(t, tables)
-		require.Error(t, err)
-
-		var connErr *connectorErrors.ConnectorError
-		require.True(t, errors.As(err, &connErr))
-		assert.Equal(t, "yaml_parser", connErr.Component)
-		assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+		res, err := parser.Parse(msg)
+		requireUnusable(t, res, err)
 	})
 }
 
@@ -332,10 +319,7 @@ func TestYAMLParserValidParsing(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{
-		ErrorAction: "drop",
-	}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test basic JSON parsing with field extraction
@@ -345,7 +329,8 @@ func TestYAMLParserValidParsing(t *testing.T) {
 			Data:    []byte(`{"temp": 23.5, "humid": 65.2, "loc": "kitchen"}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -361,13 +346,19 @@ func TestYAMLParserValidParsing(t *testing.T) {
 			humid := rapid.Float64Range(0, 100).Draw(t, "humidity")
 			location := rapid.String().Draw(t, "location")
 
-			jsonData := fmt.Sprintf(`{"temp": %f, "humid": %f, "loc": %q}`, temp, humid, location)
+			// json.Marshal guarantees valid JSON for arbitrary strings;
+			// %q produces Go escapes (\U...) that JSON does not accept.
+			jsonData, marshalErr := json.Marshal(map[string]interface{}{
+				"temp": temp, "humid": humid, "loc": location,
+			})
+			require.NoError(t, marshalErr)
 			msg := &nats.Msg{
 				Subject: util.RandomTopicName(),
-				Data:    []byte(jsonData),
+				Data:    jsonData,
 			}
 
-			tables, err := parser.Parse(msg)
+			res, err := parser.Parse(msg)
+			tables := res.Tables
 			require.NoError(t, err)
 			require.Len(t, tables, 1)
 
@@ -402,10 +393,7 @@ func TestYAMLParserTimestamp(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{
-		ErrorAction: "drop",
-	}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test RFC3339 format timestamp parsing
@@ -415,7 +403,8 @@ func TestYAMLParserTimestamp(t *testing.T) {
 			Data:    []byte(`{"ts": "2024-01-01T12:00:00Z", "val": 42.5}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -429,10 +418,7 @@ func TestYAMLParserTimestamp(t *testing.T) {
 		unixConfig := config
 		unixConfig.Transformations[1].Config["format"] = "unix"
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		unixParser, err := NewYAMLParserFromConfig(unixConfig, opts)
+		unixParser, err := NewYAMLParserFromConfig(unixConfig)
 		require.NoError(t, err)
 
 		msg := &nats.Msg{
@@ -440,7 +426,8 @@ func TestYAMLParserTimestamp(t *testing.T) {
 			Data:    []byte(`{"ts": 1704110400, "val": 42.5}`),
 		}
 
-		tables, err := unixParser.Parse(msg)
+		res, err := unixParser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -477,10 +464,7 @@ func TestYAMLParserComputeField(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{
-		ErrorAction: "drop",
-	}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test string concatenation with literal and field values
@@ -490,7 +474,8 @@ func TestYAMLParserComputeField(t *testing.T) {
 			Data:    []byte(`{"facility": "plant1", "tag": "sensor01", "val": 42.5}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -527,10 +512,7 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{
-		ErrorAction: "drop",
-	}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test parsing valid numeric string
@@ -540,7 +522,8 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 			Data:    []byte(`{"raw": "42.5"}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -556,7 +539,8 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 			Data:    []byte(`{"raw": "not_a_number"}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -566,72 +550,136 @@ func TestYAMLParserNumberParsing(t *testing.T) {
 	})
 }
 
-// TestYAMLParserErrorHandling validates fail vs drop error modes
+// TestYAMLParserErrorHandling validates outcome classification: structural
+// failures are unusable (no fabricated rows), field failures are partial
+// (sentinel-filled row per ADR-005).
 func TestYAMLParserErrorHandling(t *testing.T) {
-	baseConfig := YAMLConfig{
+	config := YAMLConfig{
 		Output: OutputSchema{
-			Columns: []ColumnSchema{{Name: "value", Type: "double"}},
+			Columns: []ColumnSchema{
+				{Name: "timestamp", Type: "timestamp"},
+				{Name: "value", Type: "double"},
+			},
 		},
 		Transformations: []TransformSpec{
 			{Step: "parse_json", Config: map[string]interface{}{}},
+			{Step: "extract_index", Config: map[string]interface{}{
+				"source": "ts",
+				"format": "rfc3339",
+			}},
 			{Step: "extract_table", Config: map[string]interface{}{
 				"value": "test",
 			}},
 			{Step: "extract_field", Config: map[string]interface{}{
-				"source": "nonexistent",
+				"source": "val",
 				"target": "value",
 				"type":   "float64",
 			}},
 		},
 	}
 
-	// Test drop mode - continues on errors and creates partial results
-	t.Run("drop mode", func(t *testing.T) {
-		dropConfig := baseConfig
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
+	parser, err := NewYAMLParserFromConfig(config)
+	require.NoError(t, err)
 
-		parser, err := NewYAMLParserFromConfig(dropConfig, opts)
-		require.NoError(t, err)
-
+	t.Run("undecodable payload is unusable without warning cascade", func(t *testing.T) {
 		msg := &nats.Msg{
 			Subject: util.RandomTopicName(),
-			Data:    []byte(`{"other": "value"}`),
+			Data:    []byte("\x0a\x22\x08\x96\x01\x12\x07\x74\x65\x73\x74"), // protobuf junk
 		}
 
-		tables, err := parser.Parse(msg)
-		require.NoError(t, err)
-		require.Len(t, tables, 1)
-
-		table := tables[0]
-		assert.Equal(t, "test", stripNullTerminator(table.GetName()))
-		assert.Equal(t, 1, table.RowCount())
+		res, err := parser.Parse(msg)
+		requireUnusable(t, res, err)
+		assert.Len(t, res.Errors, 1, "pipeline must stop at the structural failure")
 	})
 
-	// Test fail mode - returns error immediately on first failure
-	t.Run("fail mode", func(t *testing.T) {
-		failConfig := baseConfig
-		opts := ParserOptions{
-			ErrorAction: "fail",
+	t.Run("missing index source with extract_index configured is unusable", func(t *testing.T) {
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"val": 42.5}`), // valid JSON, no "ts" field
 		}
 
-		parser, err := NewYAMLParserFromConfig(failConfig, opts)
+		res, err := parser.Parse(msg)
+		requireUnusable(t, res, err)
+		assert.True(t, errorsContain(res.Errors, "$timestamp"),
+			"floor check must record the missing index: %v", res.Errors)
+	})
+
+	t.Run("missing non-index field is partial with sentinel fill", func(t *testing.T) {
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"ts": "2024-01-15T10:30:00Z"}`), // "val" missing
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomePartial, res.Outcome)
+		require.NotEmpty(t, res.Errors)
+		require.Len(t, res.Tables, 1)
+		assert.Equal(t, "test", stripNullTerminator(res.Tables[0].GetName()))
+		assert.Equal(t, 1, res.Tables[0].RowCount())
+	})
+
+	t.Run("fully valid message is ok", func(t *testing.T) {
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"ts": "2024-01-15T10:30:00Z", "val": 42.5}`),
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		assert.Empty(t, res.Errors)
+		require.Len(t, res.Tables, 1)
+	})
+
+	t.Run("no extract_index step keeps time.Now fallback", func(t *testing.T) {
+		noIndexConfig := YAMLConfig{
+			Output: OutputSchema{
+				Columns: []ColumnSchema{{Name: "value", Type: "double"}},
+			},
+			Transformations: []TransformSpec{
+				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_table", Config: map[string]interface{}{
+					"value": "test",
+				}},
+				{Step: "extract_field", Config: map[string]interface{}{
+					"source": "val",
+					"target": "value",
+					"type":   "float64",
+				}},
+			},
+		}
+
+		noIndexParser, err := NewYAMLParserFromConfig(noIndexConfig)
 		require.NoError(t, err)
 
 		msg := &nats.Msg{
 			Subject: util.RandomTopicName(),
-			Data:    []byte(`{"other": "value"}`),
+			Data:    []byte(`{"val": 42.5}`),
 		}
 
-		tables, err := parser.Parse(msg)
-		assert.Nil(t, tables)
-		require.Error(t, err)
+		res, err := noIndexParser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		require.Len(t, res.Tables, 1)
+		assert.Equal(t, 1, res.Tables[0].RowCount())
+	})
 
-		var connErr *connectorErrors.ConnectorError
-		require.True(t, errors.As(err, &connErr))
-		assert.Equal(t, "yaml_parser", connErr.Component)
-		assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
+	t.Run("property: non-JSON bytes never produce a row", func(t *testing.T) {
+		nonJSON := rapid.SliceOfN(rapid.Byte(), 1, 64).
+			Filter(func(b []byte) bool { return !json.Valid(b) })
+
+		rapid.Check(t, func(rt *rapid.T) {
+			msg := &nats.Msg{
+				Subject: util.RandomTopicName(),
+				Data:    nonJSON.Draw(rt, "payload"),
+			}
+
+			res, err := parser.Parse(msg)
+			require.NoError(rt, err)
+			assert.Equal(rt, OutcomeUnusable, res.Outcome)
+			assert.Empty(rt, res.Tables)
+		})
 	})
 }
 
@@ -654,10 +702,7 @@ func TestYAMLParserInterfaceCompliance(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{
-		ErrorAction: "drop",
-	}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 	require.NotNil(t, parser)
 
@@ -670,7 +715,8 @@ func TestYAMLParserInterfaceCompliance(t *testing.T) {
 		Data:    []byte(`{"val": 42.5}`),
 	}
 
-	tables, err := parser.Parse(msg)
+	res, err := parser.Parse(msg)
+	tables := res.Tables
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
 
@@ -703,10 +749,7 @@ func TestYAMLParserTransformationSteps(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{
-			ErrorAction: "drop",
-		}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 
 		// Create gzip-compressed JSON data for testing decompression
@@ -718,7 +761,8 @@ func TestYAMLParserTransformationSteps(t *testing.T) {
 			Data:    compressedData,
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -763,8 +807,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 
 		// Verify internal state matches configuration
@@ -779,7 +822,8 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			Data:    []byte(`{"temp": 25.5, "humidity": 60.0, "location": "office"}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 		assert.Equal(t, "sensors", stripNullTerminator(tables[0].GetName()))
@@ -809,8 +853,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 
 		// Verify that column count matches buffer allocation
@@ -824,7 +867,8 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		}
 
 		// Parse and verify no buffer overflow occurs
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 
@@ -855,8 +899,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 
 		// Verify that internal column mapping preserves exact names from config (with null terminator)
@@ -871,7 +914,8 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			Data:    []byte(`{"sensor_id": "temp_001", "measurement_value": 23.7, "recorded_at": "2024-01-01T12:00:00Z"}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 	})
@@ -888,8 +932,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		assert.Nil(t, parser)
 		require.Error(t, err)
 
@@ -918,8 +961,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 
 		// Test with actual parsing instead of directly calling createWriterTable
@@ -928,7 +970,8 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			Data:    []byte(`{"col1": 42.5, "col2": "test"}`),
 		}
 
-		tables, err := parser.Parse(msg)
+		res, err := parser.Parse(msg)
+		tables := res.Tables
 		require.NoError(t, err)
 		require.Len(t, tables, 1)
 		assert.Equal(t, "bounds_test", stripNullTerminator(tables[0].GetName()))
@@ -962,8 +1005,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 
 		// Verify that column types match expected QDB types
@@ -999,8 +1041,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 
 		// Create multiple parse states to verify independent allocation
@@ -1041,8 +1082,7 @@ func TestYAMLParserColumnSynchronizationValidation(t *testing.T) {
 			},
 		}
 
-		opts := ParserOptions{ErrorAction: "drop"}
-		parser, err := NewYAMLParserFromConfig(config, opts)
+		parser, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 		require.NotNil(t, parser)
 
@@ -1205,8 +1245,7 @@ func TestYAMLParser_ExtractTableStatic(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "drop"}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test message
@@ -1216,7 +1255,8 @@ func TestYAMLParser_ExtractTableStatic(t *testing.T) {
 		Data:    []byte(testData),
 	}
 
-	tables, err := parser.Parse(msg)
+	res, err := parser.Parse(msg)
+	tables := res.Tables
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
 
@@ -1248,8 +1288,7 @@ func TestYAMLParser_ExtractTableDynamic(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "drop"}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test message with dynamic table name
@@ -1259,7 +1298,8 @@ func TestYAMLParser_ExtractTableDynamic(t *testing.T) {
 		Data:    []byte(testData),
 	}
 
-	tables, err := parser.Parse(msg)
+	res, err := parser.Parse(msg)
+	tables := res.Tables
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
 
@@ -1303,8 +1343,7 @@ func TestYAMLParser_ExtractTableFromComputedField(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "drop"}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test message with exchange and symbol for computed table name
@@ -1314,7 +1353,8 @@ func TestYAMLParser_ExtractTableFromComputedField(t *testing.T) {
 		Data:    []byte(testData),
 	}
 
-	tables, err := parser.Parse(msg)
+	res, err := parser.Parse(msg)
+	tables := res.Tables
 	require.NoError(t, err)
 	require.Len(t, tables, 1)
 
@@ -1341,8 +1381,7 @@ func TestYAMLParser_MissingExtractTableStep(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "drop"}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	assert.Nil(t, parser)
 	require.Error(t, err)
 
@@ -1376,8 +1415,7 @@ func TestYAMLParser_EmptyTableName(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "fail"}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test message
@@ -1387,15 +1425,10 @@ func TestYAMLParser_EmptyTableName(t *testing.T) {
 		Data:    []byte(testData),
 	}
 
-	tables, err := parser.Parse(msg)
-	assert.Nil(t, tables)
-	require.Error(t, err)
-
-	var connErr *connectorErrors.ConnectorError
-	require.True(t, errors.As(err, &connErr))
-	assert.Equal(t, "yaml_parser", connErr.Component)
-	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-	assert.Contains(t, err.Error(), "table name cannot be empty")
+	res, err := parser.Parse(msg)
+	requireUnusable(t, res, err)
+	assert.True(t, errorsContain(res.Errors, "empty"),
+		"empty table name must be recorded: %v", res.Errors)
 }
 
 // TestYAMLParser_MissingSourceField tests error case for missing source field
@@ -1421,8 +1454,7 @@ func TestYAMLParser_MissingSourceField(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "fail"}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test message without the required field
@@ -1432,15 +1464,10 @@ func TestYAMLParser_MissingSourceField(t *testing.T) {
 		Data:    []byte(testData),
 	}
 
-	tables, err := parser.Parse(msg)
-	assert.Nil(t, tables)
-	require.Error(t, err)
-
-	var connErr *connectorErrors.ConnectorError
-	require.True(t, errors.As(err, &connErr))
-	assert.Equal(t, "yaml_parser", connErr.Component)
-	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-	assert.Contains(t, err.Error(), "source field 'non_existent_field' not found in extract_table")
+	res, err := parser.Parse(msg)
+	requireUnusable(t, res, err)
+	assert.True(t, errorsContain(res.Errors, "source field 'non_existent_field' not found in extract_table"),
+		"missing table source must be recorded: %v", res.Errors)
 }
 
 // TestYAMLParser_TableNameSecurityValidation tests security validation for table names
@@ -1510,8 +1537,7 @@ func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
 				},
 			}
 
-			opts := ParserOptions{ErrorAction: "fail"}
-			parser, err := NewYAMLParserFromConfig(config, opts)
+			parser, err := NewYAMLParserFromConfig(config)
 			require.NoError(t, err)
 
 			// Test message
@@ -1521,18 +1547,14 @@ func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
 				Data:    []byte(testData),
 			}
 
-			tables, err := parser.Parse(msg)
+			res, err := parser.Parse(msg)
+			tables := res.Tables
 
 			if tc.shouldFail {
-				// Should fail with security error
-				assert.Nil(t, tables)
-				require.Error(t, err, "Expected security validation to fail for table name: %s", tc.tableName)
-
-				var connErr *connectorErrors.ConnectorError
-				require.True(t, errors.As(err, &connErr))
-				assert.Equal(t, "yaml_parser", connErr.Component)
-				assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-				assert.Contains(t, err.Error(), tc.errorMsg)
+				// Security violation: no table routing -> structurally unusable
+				requireUnusable(t, res, err)
+				assert.True(t, errorsContain(res.Errors, tc.errorMsg),
+					"expected %q in step errors for table name %q: %v", tc.errorMsg, tc.tableName, res.Errors)
 			} else {
 				// Should succeed with valid table name
 				require.NoError(t, err, "Valid table name should not fail: %s", tc.tableName)
@@ -1567,8 +1589,7 @@ func TestYAMLParser_DynamicTableSecurityValidation(t *testing.T) {
 		},
 	}
 
-	opts := ParserOptions{ErrorAction: "fail"}
-	parser, err := NewYAMLParserFromConfig(config, opts)
+	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
 	// Test with malicious table name in dynamic field
@@ -1578,15 +1599,10 @@ func TestYAMLParser_DynamicTableSecurityValidation(t *testing.T) {
 		Data:    []byte(maliciousData),
 	}
 
-	tables, err := parser.Parse(msg)
-	assert.Nil(t, tables)
-	require.Error(t, err)
-
-	var connErr *connectorErrors.ConnectorError
-	require.True(t, errors.As(err, &connErr))
-	assert.Equal(t, "yaml_parser", connErr.Component)
-	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-	assert.Contains(t, err.Error(), "path traversal")
+	res, err := parser.Parse(msg)
+	requireUnusable(t, res, err)
+	assert.True(t, errorsContain(res.Errors, "path traversal"),
+		"path traversal must be recorded: %v", res.Errors)
 }
 
 // TestYAMLParserFilterValidation exercises the filters block through
@@ -1606,19 +1622,18 @@ func TestYAMLParserFilterValidation(t *testing.T) {
 			Filters: f,
 		}
 	}
-	opts := ParserOptions{ErrorAction: "drop"}
 
 	t.Run("valid whitelist builds non-nil filter", func(t *testing.T) {
 		p, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
 			Mode:  "whitelist",
 			Match: []filter.MatchEntry{{Column: "data_type", Value: 1}},
-		}), opts)
+		}))
 		require.NoError(t, err)
 		assert.NotNil(t, p.rowFilter)
 	})
 
 	t.Run("absent filters yields nil filter", func(t *testing.T) {
-		p, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{}), opts)
+		p, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{}))
 		require.NoError(t, err)
 		assert.Nil(t, p.rowFilter)
 	})
@@ -1627,7 +1642,7 @@ func TestYAMLParserFilterValidation(t *testing.T) {
 		_, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
 			Mode:  "bogus",
 			Match: []filter.MatchEntry{{Column: "data_type", Value: 1}},
-		}), opts)
+		}))
 		require.Error(t, err)
 		var connErr *connectorErrors.ConnectorError
 		require.True(t, errors.As(err, &connErr))
@@ -1638,7 +1653,7 @@ func TestYAMLParserFilterValidation(t *testing.T) {
 		_, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
 			Mode:  "whitelist",
 			Match: []filter.MatchEntry{{Column: "nope", Value: 1}},
-		}), opts)
+		}))
 		require.Error(t, err)
 		var connErr *connectorErrors.ConnectorError
 		require.True(t, errors.As(err, &connErr))
@@ -1649,7 +1664,7 @@ func TestYAMLParserFilterValidation(t *testing.T) {
 		_, err := NewYAMLParserFromConfig(baseConfig(filter.Spec{
 			Mode:  "whitelist",
 			Match: []filter.MatchEntry{{Column: "data_type", Value: "x"}},
-		}), opts)
+		}))
 		require.Error(t, err)
 		var connErr *connectorErrors.ConnectorError
 		require.True(t, errors.As(err, &connErr))

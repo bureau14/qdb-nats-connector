@@ -128,6 +128,7 @@ var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, 
 	"extract_index":     makeExtractIndexStep,
 	"extract_field":     makeExtractFieldStep,
 	"extract_map_entry": makeExtractMapEntryStep,
+	"extract_subject":   makeExtractSubjectStep,
 	"extract_table":     makeExtractTableStep,
 	"compute_field":     makeComputeFieldStep,
 	"safe_parse_number": makeSafeParseNumberStep,
@@ -1374,6 +1375,27 @@ func validateFieldPath(path string) error {
 	}
 
 	return nil
+}
+
+// parseIntOption reads an optional integer config value. YAML integer
+// literals arrive as int (yaml.v3); Go-literal test configs may pass int64.
+// In: config map - raw step config, key - option name
+// Out: (value, present, error) - error on a present non-integer
+// Ex: parseIntOption({"segment": -2}, "segment") → (-2, true, nil)
+func parseIntOption(config map[string]interface{}, key string) (value int, present bool, err error) {
+	raw, present := config[key]
+	if !present {
+		return 0, false, nil
+	}
+
+	switch v := raw.(type) {
+	case int:
+		return v, true, nil
+	case int64:
+		return int(v), true, nil
+	default:
+		return 0, false, fmt.Errorf("'%s' must be an integer, got %T", key, raw)
+	}
 }
 
 // extractFieldByPath navigates nested maps by path.

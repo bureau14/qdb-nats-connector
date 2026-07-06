@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -172,6 +173,83 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 			assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
 		})
 	}
+}
+
+// writeDescriptorPipelineYAML writes a minimal parse_protobuf pipeline
+// config referencing descriptorFile, returning the config path.
+func writeDescriptorPipelineYAML(t *testing.T, dir, descriptorFile string) string {
+	t.Helper()
+
+	content := `
+output:
+  columns:
+    - name: "name"
+      type: "string"
+transformations:
+  - step: "parse_protobuf"
+    config:
+      descriptor_file: "` + descriptorFile + `"
+      message_type: "` + testEnvelopeType + `"
+  - step: "extract_table"
+    config:
+      value: "t"
+  - step: "extract_field"
+    config:
+      source: "name"
+      target: "name"
+      type: "string"
+`
+	path := filepath.Join(dir, "pipeline.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	return path
+}
+
+// TestDescriptorFileResolution pins the path semantics of descriptor_file:
+// file-loaded configs resolve relative paths against the config directory
+// (yaml + desc ship as a relocatable bundle); absolute paths pass through.
+func TestDescriptorFileResolution(t *testing.T) {
+	t.Run("relative resolves against config dir", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "bundle")
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+		prototest.WriteDescriptor(t, dir)
+
+		configPath := writeDescriptorPipelineYAML(t, dir, "envelope.desc")
+
+		parser, err := NewYAMLParser(configPath)
+		require.NoError(t, err)
+		require.NotNil(t, parser)
+	})
+
+	t.Run("absolute passes through", func(t *testing.T) {
+		descDir := t.TempDir()
+		descPath := prototest.WriteDescriptor(t, descDir)
+
+		configPath := writeDescriptorPipelineYAML(t, t.TempDir(), descPath)
+
+		parser, err := NewYAMLParser(configPath)
+		require.NoError(t, err)
+		require.NotNil(t, parser)
+	})
+
+	t.Run("relative missing next to config fails compile", func(t *testing.T) {
+		configPath := writeDescriptorPipelineYAML(t, t.TempDir(), "envelope.desc")
+
+		parser, err := NewYAMLParser(configPath)
+		require.Error(t, err)
+		assert.Nil(t, parser)
+
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	})
+
+	t.Run("programmatic config stays cwd-relative", func(t *testing.T) {
+		// testEnvelopeDesc is relative to internal/parser (the test cwd);
+		// NewYAMLParserFromConfig must not rewrite it.
+		_, err := NewYAMLParserFromConfig(envelopePipelineConfig())
+		require.NoError(t, err)
+	})
 }
 
 // TestParseProtobufSourceField validates decoding from a state.Fields entry

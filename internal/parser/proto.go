@@ -36,7 +36,11 @@ type protoStepConfig struct {
 }
 
 // parseProtoStepConfig validates parse_protobuf step config.
-// In: config["descriptor_file"] - path to a protoc-compiled FileDescriptorSet
+// In: config["descriptor_file"] - path to a protoc-compiled FileDescriptorSet;
+//
+//	relative paths in file-loaded configs are pre-resolved against the
+//	config directory (resolveDescriptorPaths); programmatic configs are
+//	cwd-relative
 //
 //	config["message_type"] - fully-qualified message name to decode
 //	config["source"] - optional dot-path to a []byte/string field to decode
@@ -355,6 +359,8 @@ func resolveProtoSource(state *ParseState, source string) ([]byte, error) {
 // 'allowed_keys' to filter on the map key instead.
 //
 // In: config["descriptor_file"] - protoc-compiled FileDescriptorSet path
+//
+//	(config-dir-relative when file-loaded, cwd-relative when programmatic)
 //
 //	config["message_type"] - fully-qualified message name
 //	config["source"] - optional dot-path to a []byte/string field to decode

@@ -65,6 +65,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -675,7 +676,34 @@ func (p *YAMLParser) newParseState() *ParseState {
 	return state
 }
 
-// LoadYAMLConfig reads YAML parser config.
+// resolveDescriptorPaths rewrites relative parse_protobuf descriptor_file
+// values to be baseDir-relative, making a config + descriptor bundle
+// relocatable (both files side by side, wherever mounted). Absolute paths
+// pass through untouched. Only file-loaded configs get this treatment;
+// programmatic NewYAMLParserFromConfig callers keep cwd/absolute semantics.
+// In: config *YAMLConfig - freshly unmarshalled config (mutated in place)
+//
+//	baseDir string - directory of the YAML config file
+//
+// Ex: resolveDescriptorPaths(&cfg, "/etc/conn") → descriptor_file "/etc/conn/x.desc"
+func resolveDescriptorPaths(config *YAMLConfig, baseDir string) {
+	for i := range config.Transformations {
+		spec := &config.Transformations[i]
+		if spec.GetStepName() != "parse_protobuf" || spec.Config == nil {
+			continue
+		}
+
+		path, ok := spec.Config["descriptor_file"].(string)
+		if !ok || path == "" || filepath.IsAbs(path) {
+			continue
+		}
+
+		spec.Config["descriptor_file"] = filepath.Join(baseDir, path)
+	}
+}
+
+// LoadYAMLConfig reads YAML parser config. Relative descriptor_file values
+// resolve against the config file's directory (resolveDescriptorPaths).
 // In: configPath string - YAML file path
 // Out: YAMLConfig - parsed config
 // Ex: loadYAMLConfig("parser.yaml") → config
@@ -692,6 +720,8 @@ func loadYAMLConfig(configPath string) (YAMLConfig, error) {
 		return YAMLConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("failed to parse YAML config: %v", err))
 	}
+
+	resolveDescriptorPaths(&config, filepath.Dir(configPath))
 
 	return config, nil
 }

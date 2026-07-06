@@ -177,6 +177,9 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 
 // writeDescriptorPipelineYAML writes a minimal parse_protobuf pipeline
 // config referencing descriptorFile, returning the config path.
+// descriptor_file is SINGLE-quoted: absolute Windows temp paths contain
+// backslashes, and in a double-quoted YAML scalar `\U...` is a unicode
+// escape ("did not find expected hexdecimal number").
 func writeDescriptorPipelineYAML(t *testing.T, dir, descriptorFile string) string {
 	t.Helper()
 
@@ -188,7 +191,7 @@ output:
 transformations:
   - step: "parse_protobuf"
     config:
-      descriptor_file: "` + descriptorFile + `"
+      descriptor_file: '` + descriptorFile + `'
       message_type: "` + testEnvelopeType + `"
   - step: "extract_table"
     config:

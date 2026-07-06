@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	qdb "github.com/bureau14/qdb-api-go/v3"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
@@ -621,5 +622,170 @@ func TestParseProtobufProperties(t *testing.T) {
 			require.Equal(rt, seconds, parsed.Unix())
 			require.Equal(rt, int(nanos), parsed.Nanosecond())
 		})
+	})
+}
+
+// composedPipelineConfig returns the SKF-shaped pipeline over the neutral
+// synthetic schema: outer envelope decode -> map entry lift (capability
+// filter) -> nested bytes re-decode -> subject token -> split-derived int64
+// -> table/index/fields. This is the repo's living reference for composing
+// the M2 steps; the real deployment config differs only in names.
+func composedPipelineConfig() YAMLConfig {
+	return YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "timestamp", Type: "timestamp"},
+				{Name: "stream_token", Type: "string"},
+				{Name: "value", Type: "double"},
+				{Name: "capability_key", Type: "int64"},
+				{Name: "revision", Type: "int64"},
+				{Name: "stream_id", Type: "string"},
+				{Name: "ingested_at", Type: "string"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_protobuf", Config: map[string]interface{}{
+				"descriptor_file": testEnvelopeDesc,
+				"message_type":    testEnvelopeType,
+			}},
+			{Step: "extract_map_entry", Config: map[string]interface{}{
+				"source":       "blobs",
+				"key_target":   "capability_key",
+				"value_target": "attribute_raw",
+				"on_multiple":  "first",
+				"allowed_keys": []interface{}{"3"},
+			}},
+			{Step: "parse_protobuf", Config: map[string]interface{}{
+				"descriptor_file": testEnvelopeDesc,
+				"message_type":    testInnerType,
+				"source":          "attribute_raw",
+				"target":          "attr",
+			}},
+			{Step: "extract_subject", Config: map[string]interface{}{
+				"target":  "stream_token",
+				"segment": -2,
+				"trim":    "=",
+			}},
+			{Step: "compute_field", Config: map[string]interface{}{
+				"operation": "split",
+				"source":    "name",
+				"separator": ":",
+				"index":     -1,
+				"target":    "revision_raw",
+			}},
+			{Step: "extract_table", Config: map[string]interface{}{"value": "streams"}},
+			{Step: "extract_index", Config: map[string]interface{}{
+				"source": "created_at",
+				"format": "rfc3339nano",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "stream_token", "target": "stream_token", "type": "string",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "attr.reading", "target": "value", "type": "float64",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "capability_key", "target": "capability_key", "type": "int64",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "revision_raw", "target": "revision", "type": "int64",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "name", "target": "stream_id", "type": "string",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "updated_at", "target": "ingested_at", "type": "string",
+			}},
+		},
+	}
+}
+
+// composedEnvelope marshals the happy-path message for the composed
+// pipeline: capability key 3 carrying a serialized Inner.
+func composedEnvelope(t *testing.T, blobKey int32, blobValue []byte) []byte {
+	t.Helper()
+
+	return marshalEnvelope(t, func(m protoreflect.Message) {
+		setStringField(m, "name", "stream:token:7")
+		setBlobsEntry(m, blobKey, blobValue)
+		setTimestampField(m, "created_at", 1700000000, 123456789)
+		setTimestampField(m, "updated_at", 1700000001, 42)
+	})
+}
+
+// columnValue reads the single row value at a column offset.
+//
+//nolint:ireturn // T is instantiated to concrete types at every call site
+func columnValue[T any](t *testing.T, table *qdb.WriterTable, offset int,
+	get func(qdb.ColumnData) ([]T, error),
+) T {
+	t.Helper()
+
+	cd, err := table.GetData(offset)
+	require.NoError(t, err)
+
+	xs, err := get(cd)
+	require.NoError(t, err)
+	require.Len(t, xs, 1)
+
+	return xs[0]
+}
+
+// TestPipelineComposedSKFShape is the M2 exit criterion: the parent spec's
+// Goal-section pipeline (neutral naming, synthetic descriptor, allowed_keys
+// on extract_map_entry) produces correct rows, nanosecond-exact index, a
+// clean drop for a disallowed capability, and OutcomePartial - not a drop -
+// for wrong-inner-type bytes (the M1 correction, end-to-end)
+func TestPipelineComposedSKFShape(t *testing.T) {
+	parser, err := NewYAMLParserFromConfig(composedPipelineConfig())
+	require.NoError(t, err)
+
+	subject := "t.1.0.ion.streams.ABCDEFG=.value"
+
+	t.Run("happy path produces one exact row", func(t *testing.T) {
+		payload := composedEnvelope(t, 3, marshalInner(t, 42.5, "mm"))
+
+		res, err := parser.Parse(&nats.Msg{Subject: subject, Data: payload})
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		assert.Empty(t, res.Errors)
+		require.Len(t, res.Tables, 1)
+
+		table := &res.Tables[0]
+		assert.Equal(t, "streams", stripNullTerminator(table.GetName()))
+		require.Equal(t, 1, table.RowCount())
+
+		index := table.GetIndex()
+		require.Len(t, index, 1)
+		assert.True(t, index[0].Equal(time.Unix(1700000000, 123456789)),
+			"index must be nanosecond-exact, got %v", index[0])
+
+		assert.Equal(t, "ABCDEFG", columnValue(t, table, 1, qdb.GetColumnDataString))
+		assert.InDelta(t, 42.5, columnValue(t, table, 2, qdb.GetColumnDataDouble), 0)
+		assert.Equal(t, int64(3), columnValue(t, table, 3, qdb.GetColumnDataInt64))
+		assert.Equal(t, int64(7), columnValue(t, table, 4, qdb.GetColumnDataInt64))
+		assert.Equal(t, "stream:token:7", columnValue(t, table, 5, qdb.GetColumnDataString))
+		assert.Equal(t, "2023-11-14T22:13:21.000000042Z", columnValue(t, table, 6, qdb.GetColumnDataString))
+	})
+
+	t.Run("disallowed capability drops", func(t *testing.T) {
+		payload := composedEnvelope(t, 4, marshalInner(t, 1.0, "x"))
+
+		res, err := parser.Parse(&nats.Msg{Subject: subject, Data: payload})
+		requireUnusable(t, res, err)
+		assert.True(t, errorsContain(res.Errors, "allowed_keys"))
+	})
+
+	t.Run("wrong inner type is partial, not drop", func(t *testing.T) {
+		wrongInner := marshalEnvelope(t, func(m protoreflect.Message) {
+			setStringField(m, "name", "not-an-inner")
+		})
+		payload := composedEnvelope(t, 3, wrongInner)
+
+		res, err := parser.Parse(&nats.Msg{Subject: subject, Data: payload})
+		require.NoError(t, err)
+		assert.Equal(t, OutcomePartial, res.Outcome)
+		require.Len(t, res.Tables, 1)
+		assert.True(t, errorsContain(res.Errors, "attr.reading"))
 	})
 }

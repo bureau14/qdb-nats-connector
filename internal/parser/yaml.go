@@ -1205,8 +1205,11 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 }
 
 // makeComputeFieldStep computes derived fields.
-// In: config[operation,target,fields] - computation
-// Out: TransformationStep - concat operation supported
+// In: config[operation,target,...] - operation "concat" (fields array) or
+//
+//	"split" (source, separator, index)
+//
+// Out: TransformationStep - derived string field
 // Ex: makeComputeFieldStep({"operation": "concat"}) → step
 // Per ADR-005: string concatenation for computed fields
 func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, error) {
@@ -1220,22 +1223,24 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'target' string")
 	}
 
-	fieldsInterface, ok := config["fields"]
-	if !ok {
-		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'fields' array")
-	}
-
-	fields, ok := fieldsInterface.([]interface{})
-	if !ok {
-		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field 'fields' must be an array")
-	}
-
 	switch operation {
 	case "concat":
+		fields, ok := config["fields"].([]interface{})
+		if !ok {
+			return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field 'concat' requires a 'fields' array")
+		}
+
 		return makeStringConcatStep(target, fields), nil
+	case "split":
+		cfg, err := parseSplitConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeSplitFieldStep(cfg), nil
 	default:
-		return nil, connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("unsupported operation in compute_field step: %s", operation))
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("unsupported operation in compute_field step: %s", operation))
 	}
 }
 
@@ -1352,6 +1357,90 @@ func makeStringConcatStep(target string, fields []interface{}) TransformationSte
 		}
 
 		state.Fields[target] = result
+
+		return nil
+	}
+}
+
+// splitFieldConfig: compile-time configuration of a compute_field split.
+type splitFieldConfig struct {
+	source    string
+	separator string
+	target    string
+	index     int // negative = from the end
+}
+
+// parseSplitConfig validates compute_field split options.
+// In: config["source"] - input field name (direct lookup, not a dot-path)
+//
+//	config["separator"] - non-empty split separator
+//	config["index"] - required int, negative = from the end
+//	target string - already-validated output field name
+//
+// Out: splitFieldConfig - validated config
+// Ex: parseSplitConfig({"source": "stream_id", "separator": ":", "index": -1}, "revision_raw") → cfg
+func parseSplitConfig(config map[string]interface{}, target string) (splitFieldConfig, error) {
+	source, ok := config["source"].(string)
+	if !ok || source == "" {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires a 'source' string option")
+	}
+
+	separator, ok := config["separator"].(string)
+	if !ok || separator == "" {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires a non-empty 'separator' string option")
+	}
+
+	index, present, err := parseIntOption(config, "index")
+	if err != nil || !present {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires an integer 'index' option")
+	}
+
+	return splitFieldConfig{source: source, separator: separator, target: target, index: index}, nil
+}
+
+// makeSplitFieldStep creates a compute_field split step: strings.Split the
+// source value and select one part. Pure Go split semantics: a separator
+// absent from the value yields a single part, so index 0 and -1 both
+// resolve to the whole string. The output is a string; int64 coercion
+// happens downstream via extract_field/safe_parse_number. Substrings are
+// contiguous and pinning-safe (see makeStringConcatStep contract above).
+//
+// Non-structural: missing/non-string source and out-of-range index follow
+// the normal per-step error flow → OutcomePartial.
+//
+// In: cfg splitFieldConfig - validated config
+// Out: TransformationStep - writes the selected part to cfg.target
+// Ex: makeSplitFieldStep({source: "stream_id", separator: ":", index: -1, target: "revision_raw"}) → step
+func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		value, exists := state.Fields[cfg.source]
+		if !exists {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("field '%s' not found in compute_field split step", cfg.source))
+		}
+
+		s, ok := value.(string)
+		if !ok {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("compute_field split source '%s' has type %T, want string", cfg.source, value))
+		}
+
+		parts := strings.Split(s, cfg.separator)
+
+		idx := cfg.index
+		if idx < 0 {
+			idx += len(parts)
+		}
+
+		if idx < 0 || idx >= len(parts) {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("split index %d out of range (%d parts) in compute_field step", cfg.index, len(parts)))
+		}
+
+		state.Fields[cfg.target] = parts[idx]
 
 		return nil
 	}

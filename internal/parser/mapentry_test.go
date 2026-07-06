@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/parser/prototest"
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -16,12 +17,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"pgregory.net/rapid"
 )
-
-// setBlobsEntry stores raw bytes under an int32 key in Envelope.blobs.
-func setBlobsEntry(m protoreflect.Message, key int32, value []byte) {
-	fd := m.Descriptor().Fields().ByName("blobs")
-	m.Mutable(fd).Map().Set(protoreflect.ValueOfInt32(key).MapKey(), protoreflect.ValueOfBytes(value))
-}
 
 // runMapEntryStep compiles the step and runs it over the given fields.
 func runMapEntryStep(t *testing.T, config, fields map[string]interface{}) (*ParseState, error) {
@@ -238,8 +233,8 @@ func TestExtractMapEntryUnusableThroughPipeline(t *testing.T) {
 	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
-	payload := marshalEnvelope(t, func(m protoreflect.Message) {
-		setBlobsEntry(m, 3, []byte{0xAA})
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		prototest.SetBlobsEntry(m, 3, []byte{0xAA})
 	})
 
 	res, err := parser.Parse(&nats.Msg{Subject: util.RandomTopicName(), Data: payload})

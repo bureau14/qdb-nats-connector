@@ -13,70 +13,22 @@ import (
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/parser/prototest"
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/types/dynamicpb"
 	"pgregory.net/rapid"
 )
 
+// Descriptor path is relative to internal/parser (the test working dir);
+// the shared marshalling helpers live in prototest (same embedded schema).
 const (
-	testEnvelopeDesc = "testdata/envelope.desc"
-	testEnvelopeType = "test.v1.Envelope"
-	testInnerType    = "test.v1.Inner"
+	testEnvelopeDesc = "prototest/testdata/envelope.desc"
+	testEnvelopeType = prototest.EnvelopeType
+	testInnerType    = prototest.InnerType
 )
-
-// newEnvelopeMessage returns an empty dynamic test.v1.Envelope message.
-func newEnvelopeMessage(t *testing.T) *dynamicpb.Message {
-	t.Helper()
-
-	dec, err := newProtoDecoder(protoStepConfig{
-		descriptorFile: testEnvelopeDesc,
-		messageType:    testEnvelopeType,
-	})
-	require.NoError(t, err)
-
-	return dynamicpb.NewMessage(dec.desc)
-}
-
-// marshalEnvelope builds a test payload via dynamicpb round-trip: set
-// populates the message through protoreflect, then it is marshalled.
-func marshalEnvelope(t *testing.T, set func(m protoreflect.Message)) []byte {
-	t.Helper()
-
-	m := newEnvelopeMessage(t)
-	set(m)
-
-	data, err := proto.Marshal(m)
-	require.NoError(t, err)
-
-	return data
-}
-
-// marshalInner builds a serialized test.v1.Inner payload - the synthetic
-// stand-in for a nested attribute message carried as map value bytes.
-func marshalInner(t *testing.T, reading float64, unit string) []byte {
-	t.Helper()
-
-	dec, err := newProtoDecoder(protoStepConfig{
-		descriptorFile: testEnvelopeDesc,
-		messageType:    testInnerType,
-	})
-	require.NoError(t, err)
-
-	m := dynamicpb.NewMessage(dec.desc)
-	fields := m.Descriptor().Fields()
-	m.Set(fields.ByName("reading"), protoreflect.ValueOfFloat64(reading))
-	m.Set(fields.ByName("unit"), protoreflect.ValueOfString(unit))
-
-	data, err := proto.Marshal(m)
-	require.NoError(t, err)
-
-	return data
-}
 
 // requireParsingFailedError asserts err is a yaml_parser ParsingFailed error.
 func requireParsingFailedError(t *testing.T, err error) {
@@ -88,20 +40,6 @@ func requireParsingFailedError(t *testing.T, err error) {
 	require.True(t, errors.As(err, &connErr))
 	assert.Equal(t, "yaml_parser", connErr.Component)
 	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
-}
-
-// setStringField sets a string field by name.
-func setStringField(m protoreflect.Message, name, value string) {
-	m.Set(m.Descriptor().Fields().ByName(protoreflect.Name(name)), protoreflect.ValueOfString(value))
-}
-
-// setTimestampField populates a google.protobuf.Timestamp field by name.
-func setTimestampField(m protoreflect.Message, name string, seconds int64, nanos int32) {
-	fd := m.Descriptor().Fields().ByName(protoreflect.Name(name))
-	ts := m.Mutable(fd).Message()
-	tsFields := ts.Descriptor().Fields()
-	ts.Set(tsFields.ByNumber(1), protoreflect.ValueOfInt64(seconds))
-	ts.Set(tsFields.ByNumber(2), protoreflect.ValueOfInt32(nanos))
 }
 
 // runEnvelopeStep runs the parse_protobuf step on payload and returns the
@@ -246,7 +184,7 @@ func TestParseProtobufSourceField(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	inner := marshalInner(t, 42.5, "mm")
+	inner := prototest.MarshalInner(t, 42.5, "mm")
 
 	t.Run("bytes source decodes", func(t *testing.T) {
 		state := &ParseState{Fields: map[string]interface{}{"attribute_raw": inner}}
@@ -289,7 +227,7 @@ func TestParseProtobufTarget(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &ParseState{Fields: map[string]interface{}{
-		"attribute_raw": marshalInner(t, 1.5, "deg"),
+		"attribute_raw": prototest.MarshalInner(t, 1.5, "deg"),
 		"attr":          "pre-existing", // target overwrites, consistent with root merge
 	}}
 	require.NoError(t, step(state))
@@ -315,8 +253,8 @@ func TestParseProtobufTarget(t *testing.T) {
 // mismatched wire types park as unknown fields (Envelope field 1 is a
 // string, wire type 2; Inner field 1 is a double, wire type 1).
 func TestParseProtobufNestedWrongInnerType(t *testing.T) {
-	wrongInner := marshalEnvelope(t, func(m protoreflect.Message) {
-		setStringField(m, "name", "not-an-inner")
+	wrongInner := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		prototest.SetStringField(m, "name", "not-an-inner")
 	})
 
 	step, err := makeParseProtobufStep(map[string]interface{}{
@@ -338,9 +276,9 @@ func TestParseProtobufNestedWrongInnerType(t *testing.T) {
 // TestParseProtobufScalarMapping validates the normalized Go type for every
 // mapped field kind
 func TestParseProtobufScalarMapping(t *testing.T) {
-	payload := marshalEnvelope(t, func(m protoreflect.Message) {
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
 		fields := m.Descriptor().Fields()
-		setStringField(m, "name", "sensor-a")
+		prototest.SetStringField(m, "name", "sensor-a")
 		m.Set(fields.ByName("count"), protoreflect.ValueOfInt64(42))
 		m.Set(fields.ByName("ratio"), protoreflect.ValueOfFloat64(0.5))
 		m.Set(fields.ByName("enabled"), protoreflect.ValueOfBool(true))
@@ -386,7 +324,7 @@ func TestParseProtobufScalarMapping(t *testing.T) {
 // TestParseProtobufIntegerNormalization pins the int64/float64 widening of
 // uint32, uint64, sint32, and float, including the documented uint64 wrap
 func TestParseProtobufIntegerNormalization(t *testing.T) {
-	payload := marshalEnvelope(t, func(m protoreflect.Message) {
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
 		fields := m.Descriptor().Fields()
 		m.Set(fields.ByName("small"), protoreflect.ValueOfUint32(7))
 		m.Set(fields.ByName("big"), protoreflect.ValueOfUint64(uint64(math.MaxInt64)+1))
@@ -419,8 +357,8 @@ func TestParseProtobufTimestamps(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := marshalEnvelope(t, func(m protoreflect.Message) {
-				setTimestampField(m, "created_at", seconds, tc.nanos)
+			payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+				prototest.SetTimestampField(m, "created_at", seconds, tc.nanos)
 			})
 
 			fields := runEnvelopeStep(t, payload)
@@ -435,8 +373,8 @@ func TestParseProtobufTimestamps(t *testing.T) {
 // TestParseProtobufPopulatedOnly validates populated-only Range semantics:
 // unset proto3 scalars never appear in state.Fields
 func TestParseProtobufPopulatedOnly(t *testing.T) {
-	payload := marshalEnvelope(t, func(m protoreflect.Message) {
-		setStringField(m, "name", "only-me")
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		prototest.SetStringField(m, "name", "only-me")
 	})
 
 	fields := runEnvelopeStep(t, payload)
@@ -447,8 +385,8 @@ func TestParseProtobufPopulatedOnly(t *testing.T) {
 // TestParseProtobufUnknownFields validates that wire fields absent from the
 // descriptor are silently ignored (protobuf forward compatibility)
 func TestParseProtobufUnknownFields(t *testing.T) {
-	payload := marshalEnvelope(t, func(m protoreflect.Message) {
-		setStringField(m, "name", "known")
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		prototest.SetStringField(m, "name", "known")
 	})
 
 	// Append field 999, wire type varint: tag 999<<3 = 7992 → varint
@@ -506,10 +444,10 @@ func TestParseProtobufPipeline(t *testing.T) {
 	parser, err := NewYAMLParserFromConfig(envelopePipelineConfig())
 	require.NoError(t, err)
 
-	payload := marshalEnvelope(t, func(m protoreflect.Message) {
-		setStringField(m, "name", "sensor-a")
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		prototest.SetStringField(m, "name", "sensor-a")
 		m.Set(m.Descriptor().Fields().ByName("ratio"), protoreflect.ValueOfFloat64(0.5))
-		setTimestampField(m, "created_at", time.Date(2026, 7, 2, 11, 22, 33, 0, time.UTC).Unix(), 500000000)
+		prototest.SetTimestampField(m, "created_at", time.Date(2026, 7, 2, 11, 22, 33, 0, time.UTC).Unix(), 500000000)
 	})
 
 	res, err := parser.Parse(&nats.Msg{Subject: util.RandomTopicName(), Data: payload})
@@ -560,10 +498,10 @@ func TestParseProtobufProperties(t *testing.T) {
 	})
 
 	t.Run("property: truncated or mutated valid payloads never panic", func(t *testing.T) {
-		payload := marshalEnvelope(t, func(m protoreflect.Message) {
-			setStringField(m, "name", "sensor-a")
+		payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+			prototest.SetStringField(m, "name", "sensor-a")
 			m.Set(m.Descriptor().Fields().ByName("ratio"), protoreflect.ValueOfFloat64(0.5))
-			setTimestampField(m, "created_at", 1751455353, 123456789)
+			prototest.SetTimestampField(m, "created_at", 1751455353, 123456789)
 		})
 
 		step, err := makeParseProtobufStep(map[string]interface{}{
@@ -594,12 +532,12 @@ func TestParseProtobufProperties(t *testing.T) {
 			seconds := rapid.Int64Range(0, 1e10).Draw(rt, "seconds")
 			nanos := rapid.Int32Range(0, 999999999).Draw(rt, "nanos")
 
-			payload := marshalEnvelope(t, func(m protoreflect.Message) {
+			payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
 				fields := m.Descriptor().Fields()
-				setStringField(m, "name", name)
+				prototest.SetStringField(m, "name", name)
 				m.Set(fields.ByName("count"), protoreflect.ValueOfInt64(count))
 				m.Set(fields.ByName("ratio"), protoreflect.ValueOfFloat64(ratio))
-				setTimestampField(m, "created_at", seconds, nanos)
+				prototest.SetTimestampField(m, "created_at", seconds, nanos)
 			})
 
 			fields := runEnvelopeStep(t, payload)
@@ -705,11 +643,11 @@ func composedPipelineConfig() YAMLConfig {
 func composedEnvelope(t *testing.T, blobKey int32, blobValue []byte) []byte {
 	t.Helper()
 
-	return marshalEnvelope(t, func(m protoreflect.Message) {
-		setStringField(m, "name", "stream:token:7")
-		setBlobsEntry(m, blobKey, blobValue)
-		setTimestampField(m, "created_at", 1700000000, 123456789)
-		setTimestampField(m, "updated_at", 1700000001, 42)
+	return prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		prototest.SetStringField(m, "name", "stream:token:7")
+		prototest.SetBlobsEntry(m, blobKey, blobValue)
+		prototest.SetTimestampField(m, "created_at", 1700000000, 123456789)
+		prototest.SetTimestampField(m, "updated_at", 1700000001, 42)
 	})
 }
 
@@ -743,7 +681,7 @@ func TestPipelineComposedSKFShape(t *testing.T) {
 	subject := "t.1.0.ion.streams.ABCDEFG=.value"
 
 	t.Run("happy path produces one exact row", func(t *testing.T) {
-		payload := composedEnvelope(t, 3, marshalInner(t, 42.5, "mm"))
+		payload := composedEnvelope(t, 3, prototest.MarshalInner(t, 42.5, "mm"))
 
 		res, err := parser.Parse(&nats.Msg{Subject: subject, Data: payload})
 		require.NoError(t, err)
@@ -769,7 +707,7 @@ func TestPipelineComposedSKFShape(t *testing.T) {
 	})
 
 	t.Run("disallowed capability drops", func(t *testing.T) {
-		payload := composedEnvelope(t, 4, marshalInner(t, 1.0, "x"))
+		payload := composedEnvelope(t, 4, prototest.MarshalInner(t, 1.0, "x"))
 
 		res, err := parser.Parse(&nats.Msg{Subject: subject, Data: payload})
 		requireUnusable(t, res, err)
@@ -777,8 +715,8 @@ func TestPipelineComposedSKFShape(t *testing.T) {
 	})
 
 	t.Run("wrong inner type is partial, not drop", func(t *testing.T) {
-		wrongInner := marshalEnvelope(t, func(m protoreflect.Message) {
-			setStringField(m, "name", "not-an-inner")
+		wrongInner := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+			prototest.SetStringField(m, "name", "not-an-inner")
 		})
 		payload := composedEnvelope(t, 3, wrongInner)
 

@@ -1821,3 +1821,58 @@ func TestComputeFieldSplitProperties(t *testing.T) {
 		}
 	})
 }
+
+// TestExtractFieldTypeRequired pins the compile-time requirement: omitting
+// 'type' is a Configuration error; explicit "auto" stays valid and passes
+// parser-native types through untouched
+func TestExtractFieldTypeRequired(t *testing.T) {
+	pipelineConfig := func(fieldConfig map[string]interface{}) YAMLConfig {
+		return YAMLConfig{
+			Output: OutputSchema{
+				Columns: []ColumnSchema{
+					{Name: "value", Type: "int64"},
+				},
+			},
+			Transformations: []TransformSpec{
+				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_field", Config: fieldConfig},
+				{Step: "extract_table", Config: map[string]interface{}{"value": "events"}},
+			},
+		}
+	}
+
+	t.Run("missing type fails compile", func(t *testing.T) {
+		_, err := NewYAMLParserFromConfig(pipelineConfig(map[string]interface{}{
+			"source": "value",
+			"target": "value",
+		}))
+		require.Error(t, err)
+
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+		assert.Contains(t, connErr.Error(), "extract_field")
+	})
+
+	t.Run("empty type fails compile", func(t *testing.T) {
+		_, err := NewYAMLParserFromConfig(pipelineConfig(map[string]interface{}{
+			"source": "value",
+			"target": "value",
+			"type":   "",
+		}))
+		require.Error(t, err)
+	})
+
+	t.Run("explicit auto compiles and passes through", func(t *testing.T) {
+		step, err := makeExtractFieldStep(map[string]interface{}{
+			"source": "value",
+			"target": "out",
+			"type":   "auto",
+		})
+		require.NoError(t, err)
+
+		state := &ParseState{Fields: map[string]interface{}{"value": int64(42)}}
+		require.NoError(t, step(state))
+		assert.Equal(t, int64(42), state.Fields["out"])
+	})
+}

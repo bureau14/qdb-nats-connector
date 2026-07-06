@@ -1168,9 +1168,15 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'target' string")
 	}
 
+	// type is deliberately required: parse_json emits float64 for ALL
+	// numbers while parse_protobuf emits int64 for integer kinds, and
+	// createWriterTable sentinel-fills type-assert mismatches silently. An
+	// implicit "auto" default turns that divergence into silent corruption;
+	// an explicit type: "auto" keeps intentional pass-through expressible.
 	fieldType, ok := config["type"].(string)
-	if !ok {
-		fieldType = "auto" // Default to auto-detection
+	if !ok || fieldType == "" {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"extract_field step requires an explicit 'type' (use \"auto\" for intentional pass-through)")
 	}
 
 	onError, ok := config["on_error"].(string)

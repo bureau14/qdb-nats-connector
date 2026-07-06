@@ -102,9 +102,10 @@ type ParseState struct {
 type TransformationStep func(*ParseState) error
 
 // compiledStep pairs a compiled step function with its compile-time
-// classification. Structural steps (decompress, parse_json, parse_protobuf)
-// decode the payload itself: when one fails, nothing downstream can succeed
-// and the message is structurally unusable.
+// classification. Structural steps either decode the payload itself
+// (decompress, parse_json, parse_protobuf) or reject the message's shape
+// outright (extract_map_entry): when one fails, nothing downstream can
+// succeed and the message is structurally unusable.
 type compiledStep struct {
 	fn         TransformationStep
 	name       string
@@ -114,7 +115,8 @@ type compiledStep struct {
 // isStructuralStep reports whether a failed step of this kind makes the
 // whole message unusable (vs a partial field failure per ADR-005).
 func isStructuralStep(name string) bool {
-	return name == "decompress" || name == "parse_json" || name == "parse_protobuf"
+	return name == "decompress" || name == "parse_json" || name == "parse_protobuf" ||
+		name == "extract_map_entry"
 }
 
 // stepRegistry maps names to step factories.
@@ -125,6 +127,7 @@ var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, 
 	"parse_protobuf":    makeParseProtobufStep,
 	"extract_index":     makeExtractIndexStep,
 	"extract_field":     makeExtractFieldStep,
+	"extract_map_entry": makeExtractMapEntryStep,
 	"extract_table":     makeExtractTableStep,
 	"compute_field":     makeComputeFieldStep,
 	"safe_parse_number": makeSafeParseNumberStep,

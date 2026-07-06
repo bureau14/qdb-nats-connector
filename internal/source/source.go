@@ -128,23 +128,25 @@ func connectOptions(opts Options) ([]nats.Option, error) {
 // consumerFilterSubject resolves the subject to bind the pull subscription
 // with. nats.go rejects a bind whose subject differs from an existing
 // durable's FilterSubject, so the filter is read from the consumer itself.
+// A missing durable is a SubscriptionFailed error (wrapping
+// nats.ErrConsumerNotFound): the connector never auto-creates consumers,
+// because an auto-created one would pull the WHOLE stream unfiltered.
 // In: js nats.JetStreamContext, stream/consumer - names to look up
-// Out: string, error - durable's FilterSubject; "" when unfiltered or absent
+// Out: string, error - durable's FilterSubject; "" when unfiltered
 // Ex: consumerFilterSubject(js, "EVENTS", "qdb-connector") → "events.*.value", nil
 func consumerFilterSubject(js nats.JetStreamContext, stream, consumer string) (string, error) {
 	ci, err := js.ConsumerInfo(stream, consumer)
 	if err != nil {
-		if stderrors.Is(err, nats.ErrConsumerNotFound) {
-			return "", nil
-		}
-
 		return "", errors.NewSubscriptionFailedError("source", consumer, err)
 	}
 
 	return ci.Config.FilterSubject, nil
 }
 
-// Connect establishes NATS connection, creates JetStream consumer.
+// Connect establishes the NATS connection and binds to a pre-created
+// durable JetStream consumer. A missing durable fails loudly (no
+// auto-creation): pre-create it with a FilterSubject, e.g.
+// `nats consumer add <stream> <consumer> --pull --filter <subject>`.
 // In: ctx context.Context - cancellation
 // Out: error - nil or connection/subscription failure
 // Ex: Connect(ctx) → nil (connected+subscribed)
@@ -177,7 +179,12 @@ func (s *Source) Connect(ctx context.Context) error {
 
 	filterSubject, err := consumerFilterSubject(js, s.Options.StreamName, s.Options.ConsumerName)
 	if err != nil {
-		slog.Error("Failed to resolve consumer filter subject", "error", err)
+		slog.Error("Failed to resolve consumer filter subject; "+
+			"the durable consumer must be pre-created with a FilterSubject "+
+			"(nats consumer add) before starting the connector",
+			"stream", s.Options.StreamName,
+			"consumer", s.Options.ConsumerName,
+			"error", err)
 
 		return err
 	}

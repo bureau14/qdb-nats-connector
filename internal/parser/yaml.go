@@ -65,6 +65,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -102,9 +103,10 @@ type ParseState struct {
 type TransformationStep func(*ParseState) error
 
 // compiledStep pairs a compiled step function with its compile-time
-// classification. Structural steps (decompress, parse_json) decode the
-// payload itself: when one fails, nothing downstream can succeed and the
-// message is structurally unusable.
+// classification. Structural steps either decode the payload itself
+// (decompress, parse_json, parse_protobuf) or reject the message's shape
+// outright (extract_map_entry): when one fails, nothing downstream can
+// succeed and the message is structurally unusable.
 type compiledStep struct {
 	fn         TransformationStep
 	name       string
@@ -114,7 +116,8 @@ type compiledStep struct {
 // isStructuralStep reports whether a failed step of this kind makes the
 // whole message unusable (vs a partial field failure per ADR-005).
 func isStructuralStep(name string) bool {
-	return name == "decompress" || name == "parse_json"
+	return name == "decompress" || name == "parse_json" || name == "parse_protobuf" ||
+		name == "extract_map_entry"
 }
 
 // stepRegistry maps names to step factories.
@@ -122,8 +125,11 @@ func isStructuralStep(name string) bool {
 var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, error){
 	"decompress":        makeDecompressStep,
 	"parse_json":        makeParseJSONStep,
+	"parse_protobuf":    makeParseProtobufStep,
 	"extract_index":     makeExtractIndexStep,
 	"extract_field":     makeExtractFieldStep,
+	"extract_map_entry": makeExtractMapEntryStep,
+	"extract_subject":   makeExtractSubjectStep,
 	"extract_table":     makeExtractTableStep,
 	"compute_field":     makeComputeFieldStep,
 	"safe_parse_number": makeSafeParseNumberStep,
@@ -670,7 +676,34 @@ func (p *YAMLParser) newParseState() *ParseState {
 	return state
 }
 
-// LoadYAMLConfig reads YAML parser config.
+// resolveDescriptorPaths rewrites relative parse_protobuf descriptor_file
+// values to be baseDir-relative, making a config + descriptor bundle
+// relocatable (both files side by side, wherever mounted). Absolute paths
+// pass through untouched. Only file-loaded configs get this treatment;
+// programmatic NewYAMLParserFromConfig callers keep cwd/absolute semantics.
+// In: config *YAMLConfig - freshly unmarshalled config (mutated in place)
+//
+//	baseDir string - directory of the YAML config file
+//
+// Ex: resolveDescriptorPaths(&cfg, "/etc/conn") → descriptor_file "/etc/conn/x.desc"
+func resolveDescriptorPaths(config *YAMLConfig, baseDir string) {
+	for i := range config.Transformations {
+		spec := &config.Transformations[i]
+		if spec.GetStepName() != "parse_protobuf" || spec.Config == nil {
+			continue
+		}
+
+		path, ok := spec.Config["descriptor_file"].(string)
+		if !ok || path == "" || filepath.IsAbs(path) {
+			continue
+		}
+
+		spec.Config["descriptor_file"] = filepath.Join(baseDir, path)
+	}
+}
+
+// LoadYAMLConfig reads YAML parser config. Relative descriptor_file values
+// resolve against the config file's directory (resolveDescriptorPaths).
 // In: configPath string - YAML file path
 // Out: YAMLConfig - parsed config
 // Ex: loadYAMLConfig("parser.yaml") → config
@@ -687,6 +720,8 @@ func loadYAMLConfig(configPath string) (YAMLConfig, error) {
 		return YAMLConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("failed to parse YAML config: %v", err))
 	}
+
+	resolveDescriptorPaths(&config, filepath.Dir(configPath))
 
 	return config, nil
 }
@@ -1163,9 +1198,15 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'target' string")
 	}
 
+	// type is deliberately required: parse_json emits float64 for ALL
+	// numbers while parse_protobuf emits int64 for integer kinds, and
+	// createWriterTable sentinel-fills type-assert mismatches silently. An
+	// implicit "auto" default turns that divergence into silent corruption;
+	// an explicit type: "auto" keeps intentional pass-through expressible.
 	fieldType, ok := config["type"].(string)
-	if !ok {
-		fieldType = "auto" // Default to auto-detection
+	if !ok || fieldType == "" {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"extract_field step requires an explicit 'type' (use \"auto\" for intentional pass-through)")
 	}
 
 	onError, ok := config["on_error"].(string)
@@ -1200,8 +1241,11 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 }
 
 // makeComputeFieldStep computes derived fields.
-// In: config[operation,target,fields] - computation
-// Out: TransformationStep - concat operation supported
+// In: config[operation,target,...] - operation "concat" (fields array) or
+//
+//	"split" (source, separator, index)
+//
+// Out: TransformationStep - derived string field
 // Ex: makeComputeFieldStep({"operation": "concat"}) → step
 // Per ADR-005: string concatenation for computed fields
 func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, error) {
@@ -1215,22 +1259,24 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'target' string")
 	}
 
-	fieldsInterface, ok := config["fields"]
-	if !ok {
-		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'fields' array")
-	}
-
-	fields, ok := fieldsInterface.([]interface{})
-	if !ok {
-		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field 'fields' must be an array")
-	}
-
 	switch operation {
 	case "concat":
+		fields, ok := config["fields"].([]interface{})
+		if !ok {
+			return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field 'concat' requires a 'fields' array")
+		}
+
 		return makeStringConcatStep(target, fields), nil
+	case "split":
+		cfg, err := parseSplitConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeSplitFieldStep(cfg), nil
 	default:
-		return nil, connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("unsupported operation in compute_field step: %s", operation))
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("unsupported operation in compute_field step: %s", operation))
 	}
 }
 
@@ -1352,20 +1398,139 @@ func makeStringConcatStep(target string, fields []interface{}) TransformationSte
 	}
 }
 
+// splitFieldConfig: compile-time configuration of a compute_field split.
+type splitFieldConfig struct {
+	source    string
+	separator string
+	target    string
+	index     int // negative = from the end
+}
+
+// parseSplitConfig validates compute_field split options.
+// In: config["source"] - input field name (direct lookup, not a dot-path)
+//
+//	config["separator"] - non-empty split separator
+//	config["index"] - required int, negative = from the end
+//	target string - already-validated output field name
+//
+// Out: splitFieldConfig - validated config
+// Ex: parseSplitConfig({"source": "stream_id", "separator": ":", "index": -1}, "revision_raw") → cfg
+func parseSplitConfig(config map[string]interface{}, target string) (splitFieldConfig, error) {
+	source, ok := config["source"].(string)
+	if !ok || source == "" {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires a 'source' string option")
+	}
+
+	separator, ok := config["separator"].(string)
+	if !ok || separator == "" {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires a non-empty 'separator' string option")
+	}
+
+	index, present, err := parseIntOption(config, "index")
+	if err != nil || !present {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires an integer 'index' option")
+	}
+
+	return splitFieldConfig{source: source, separator: separator, target: target, index: index}, nil
+}
+
+// makeSplitFieldStep creates a compute_field split step: strings.Split the
+// source value and select one part. Pure Go split semantics: a separator
+// absent from the value yields a single part, so index 0 and -1 both
+// resolve to the whole string. The output is a string; int64 coercion
+// happens downstream via extract_field/safe_parse_number. Substrings are
+// contiguous and pinning-safe (see makeStringConcatStep contract above).
+//
+// Non-structural: missing/non-string source and out-of-range index follow
+// the normal per-step error flow → OutcomePartial.
+//
+// In: cfg splitFieldConfig - validated config
+// Out: TransformationStep - writes the selected part to cfg.target
+// Ex: makeSplitFieldStep({source: "stream_id", separator: ":", index: -1, target: "revision_raw"}) → step
+func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		value, exists := state.Fields[cfg.source]
+		if !exists {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("field '%s' not found in compute_field split step", cfg.source))
+		}
+
+		s, ok := value.(string)
+		if !ok {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("compute_field split source '%s' has type %T, want string", cfg.source, value))
+		}
+
+		parts := strings.Split(s, cfg.separator)
+
+		idx := cfg.index
+		if idx < 0 {
+			idx += len(parts)
+		}
+
+		if idx < 0 || idx >= len(parts) {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("split index %d out of range (%d parts) in compute_field step", cfg.index, len(parts)))
+		}
+
+		state.Fields[cfg.target] = parts[idx]
+
+		return nil
+	}
+}
+
+// validateFieldPath checks dot-path format: non-empty, no leading/trailing
+// or consecutive dots. Used at config compile time for fail-fast validation
+// and by extractFieldByPath at runtime.
+// In: path "a.b.c" - dot notation
+// Out: error - nil when well-formed
+// Ex: validateFieldPath("a..b") → error
+func validateFieldPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty field path")
+	}
+	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
+		return fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("invalid field path format: consecutive dots not allowed")
+	}
+
+	return nil
+}
+
+// parseIntOption reads an optional integer config value. YAML integer
+// literals arrive as int (yaml.v3); Go-literal test configs may pass int64.
+// In: config map - raw step config, key - option name
+// Out: (value, present, error) - error on a present non-integer
+// Ex: parseIntOption({"segment": -2}, "segment") → (-2, true, nil)
+func parseIntOption(config map[string]interface{}, key string) (value int, present bool, err error) {
+	raw, present := config[key]
+	if !present {
+		return 0, false, nil
+	}
+
+	switch v := raw.(type) {
+	case int:
+		return v, true, nil
+	case int64:
+		return int(v), true, nil
+	default:
+		return 0, false, fmt.Errorf("'%s' must be an integer, got %T", key, raw)
+	}
+}
+
 // extractFieldByPath navigates nested maps by path.
 // In: fields map, path "a.b.c" - dot notation
 // Out: interface{} - value at path
 // Ex: extractFieldByPath(data, "sensors.temp") → 23.5
 func extractFieldByPath(fields map[string]interface{}, path string) (interface{}, error) {
-	// Validate path format to prevent malformed paths
-	if path == "" {
-		return nil, fmt.Errorf("empty field path")
-	}
-	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
-		return nil, fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
-	}
-	if strings.Contains(path, "..") {
-		return nil, fmt.Errorf("invalid field path format: consecutive dots not allowed")
+	err := validateFieldPath(path)
+	if err != nil {
+		return nil, err
 	}
 
 	parts := strings.Split(path, ".")

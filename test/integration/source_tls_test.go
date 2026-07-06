@@ -143,7 +143,7 @@ func startTLSNatsServer(t *testing.T, dir, certFile, keyFile, caFile string) str
 
 	bin, err := exec.LookPath("nats-server")
 	if err != nil {
-		t.Skip("nats-server binary not found in PATH")
+		skipMissingNats(t)
 	}
 
 	port := freeTCPPort(t)
@@ -196,8 +196,9 @@ func waitForTLSNatsServer(t *testing.T, url, caFile string) {
 	t.Fatal("nats-server did not become ready within 10s")
 }
 
-// seedTLSStream creates a JetStream stream and publishes one message.
-func seedTLSStream(t *testing.T, url, caFile, streamName, subject string) {
+// seedTLSStream creates a JetStream stream with a pre-created durable pull
+// consumer (the source never auto-creates one) and publishes one message.
+func seedTLSStream(t *testing.T, url, caFile, streamName, consumerName, subject string) {
 	t.Helper()
 
 	nc, err := nats.Connect(url, nats.RootCAs(caFile))
@@ -219,6 +220,15 @@ func seedTLSStream(t *testing.T, url, caFile, streamName, subject string) {
 		t.Fatalf("failed to create stream: %v", err)
 	}
 
+	_, err = js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:       consumerName,
+		AckPolicy:     nats.AckExplicitPolicy,
+		FilterSubject: subject,
+	})
+	if err != nil {
+		t.Fatalf("failed to create consumer: %v", err)
+	}
+
 	_, err = js.Publish(subject, []byte(`{"probe": true}`))
 	if err != nil {
 		t.Fatalf("failed to publish seed message: %v", err)
@@ -231,7 +241,7 @@ func TestSourceTLSCAFile(t *testing.T) {
 	url := startTLSNatsServer(t, dir, certFile, keyFile, caFile)
 
 	streamName := "TLS_TEST"
-	seedTLSStream(t, url, caFile, streamName, "tls.test")
+	seedTLSStream(t, url, caFile, streamName, "tls-test-consumer", "tls.test")
 
 	opts := source.NewOptions(
 		source.WithEndpoint(url),

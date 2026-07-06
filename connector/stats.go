@@ -40,3 +40,31 @@ func (c *workerCounters) snapshot() WorkerStats {
 		MessagesDropped:   c.messagesDropped.Load(),
 	}
 }
+
+// accumulateStats sums per-worker snapshots into a single aggregate.
+func accumulateStats(stats []WorkerStats) WorkerStats {
+	var total WorkerStats
+	for _, s := range stats {
+		total.MessagesProcessed += s.MessagesProcessed
+		total.ParseFailures += s.ParseFailures
+		total.WriteFailures += s.WriteFailures
+		total.MessagesDropped += s.MessagesDropped
+	}
+
+	return total
+}
+
+// Stats snapshots every worker's counters and returns their sum. Workers
+// keep sole write ownership of their counters (lock-free hot path, no
+// shared state); this is read-time reduction only. Per-worker snapshots
+// are taken at slightly different instants, so the aggregate is
+// monitoring-grade rather than a globally-atomic view; it is exact once
+// workers have quiesced (RunWithContext returned).
+func (c *Connector) Stats() WorkerStats {
+	stats := make([]WorkerStats, len(c.workers))
+	for i, w := range c.workers {
+		stats[i] = w.GetStats()
+	}
+
+	return accumulateStats(stats)
+}

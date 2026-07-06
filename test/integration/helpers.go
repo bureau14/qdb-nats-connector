@@ -4,7 +4,6 @@
 package integration
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -12,31 +11,10 @@ import (
 	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
-	"github.com/bureau14/qdb-nats-connector/connector"
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/nats-io/nats.go"
 	"pgregory.net/rapid"
 )
-
-// ConnectorConfig holds the configuration parameters for integration tests.
-// It provides all necessary connection details for both NATS and QuasarDB,
-// along with optional security credentials and parser selection.
-type ConnectorConfig struct {
-	// NATSEndpoint is the NATS server URL (e.g., "nats://localhost:4222")
-	NATSEndpoint string
-
-	// QDBEndpoint is the QuasarDB cluster URI (e.g., "qdb://localhost:2836")
-	QDBEndpoint string
-
-	// QDBPublicKey is the optional QuasarDB cluster public key for secure connections
-	QDBPublicKey string
-
-	// QDBUserSecurity is the optional QuasarDB user security credentials
-	QDBUserSecurity string
-
-	// Parser specifies which message parser to use (supported: "yaml", "noop")
-	Parser string
-}
 
 // =============================================================================
 // Data Conversion Helpers
@@ -401,43 +379,4 @@ func sortColumnDataByTimestamp(data *ColumnDataSet) *ColumnDataSet {
 	}
 
 	return sorted
-}
-
-// =============================================================================
-// Connector Helper Functions
-// =============================================================================
-
-// RunConnectorForSubject runs connector for subject with 30s timeout.
-// Uses async mode, TEST_STREAM for testing.
-func RunConnectorForSubject(subject string, cfg ConnectorConfig) error {
-	// Build command line arguments for configuration
-	args := []string{
-		"--nats", cfg.NATSEndpoint,
-		"--stream", "TEST_STREAM", // Required for JetStream
-		"--consumer", "test-consumer",
-		"--qdb", cfg.QDBEndpoint,
-	}
-
-	// Add performance settings
-	args = append(args, "--qdb-push-mode", "async")
-
-	// Load configuration using the proper method
-	loadedOpts, err := connector.LoadConfig(args, func() {})
-	if err != nil {
-		return errors.NewConnectionFailedError("RunConnectorForSubject", "failed to load config", err)
-	}
-
-	// Create connector (parser is created internally by workers)
-	conn, err := connector.NewConnector(loadedOpts)
-	if err != nil {
-		return errors.NewConnectionFailedError("RunConnectorForSubject", "failed to create connector", err)
-	}
-	defer conn.Close()
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Run connector with context
-	return conn.RunWithContext(ctx)
 }

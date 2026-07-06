@@ -2,11 +2,13 @@
 
 // Consumer-binding integration tests for the NATS source: spawns a plain
 // nats-server with JetStream and verifies that Source binds to pre-created
-// durables (filtered and unfiltered) and still auto-creates one when absent.
+// durables (filtered and unfiltered) and fails loudly when the durable is
+// absent (no auto-creation).
 package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
 )
@@ -206,17 +209,41 @@ func TestSourceBindsToUnfilteredConsumer(t *testing.T) {
 	}
 }
 
-func TestSourceAutoCreatesAbsentConsumer(t *testing.T) {
+// TestSourceFailsOnAbsentConsumer pins the no-auto-creation contract: a
+// missing durable is a loud SubscriptionFailed Connect error, not a
+// silently auto-created consumer pulling the whole stream unfiltered.
+func TestSourceFailsOnAbsentConsumer(t *testing.T) {
 	url := startNatsServer(t, t.TempDir())
 	js := jetStreamContext(t, url)
 
-	streamName := "AUTOCREATE_TEST"
-	seedFilterStream(t, js, streamName, "it.autocreate.a", "it.autocreate.b")
+	streamName := "ABSENT_CONSUMER_TEST"
+	seedFilterStream(t, js, streamName, "it.absent.a", "it.absent.b")
 
-	src := connectSource(t, url, streamName, "auto-created-consumer")
+	opts := source.NewOptions(
+		source.WithEndpoint(url),
+		source.WithStreamName(streamName),
+	)
+	opts.ConsumerName = "absent-consumer"
 
-	subjects := fetchSubjects(t, src)
-	if len(subjects) != 2 {
-		t.Fatalf("got %d messages, want 2 (auto-created unfiltered): %v", len(subjects), subjects)
+	src, err := source.NewSource(opts)
+	if err != nil {
+		t.Fatalf("NewSource failed: %v", err)
+	}
+	t.Cleanup(src.Close)
+
+	err = src.Connect(context.Background())
+	if err == nil {
+		t.Fatal("Connect succeeded with an absent durable consumer, want SubscriptionFailed")
+	}
+
+	var connErr *connectorErrors.ConnectorError
+	if !errors.As(err, &connErr) {
+		t.Fatalf("Connect error is not a ConnectorError: %v", err)
+	}
+	if connErr.Code != connectorErrors.ErrCodeSubscriptionFailed {
+		t.Fatalf("got error code %d, want ErrCodeSubscriptionFailed: %v", connErr.Code, err)
+	}
+	if !errors.Is(err, nats.ErrConsumerNotFound) {
+		t.Fatalf("error does not wrap nats.ErrConsumerNotFound: %v", err)
 	}
 }

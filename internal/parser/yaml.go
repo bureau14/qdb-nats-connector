@@ -1353,20 +1353,34 @@ func makeStringConcatStep(target string, fields []interface{}) TransformationSte
 	}
 }
 
+// validateFieldPath checks dot-path format: non-empty, no leading/trailing
+// or consecutive dots. Used at config compile time for fail-fast validation
+// and by extractFieldByPath at runtime.
+// In: path "a.b.c" - dot notation
+// Out: error - nil when well-formed
+// Ex: validateFieldPath("a..b") → error
+func validateFieldPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty field path")
+	}
+	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
+		return fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("invalid field path format: consecutive dots not allowed")
+	}
+
+	return nil
+}
+
 // extractFieldByPath navigates nested maps by path.
 // In: fields map, path "a.b.c" - dot notation
 // Out: interface{} - value at path
 // Ex: extractFieldByPath(data, "sensors.temp") → 23.5
 func extractFieldByPath(fields map[string]interface{}, path string) (interface{}, error) {
-	// Validate path format to prevent malformed paths
-	if path == "" {
-		return nil, fmt.Errorf("empty field path")
-	}
-	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
-		return nil, fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
-	}
-	if strings.Contains(path, "..") {
-		return nil, fmt.Errorf("invalid field path format: consecutive dots not allowed")
+	err := validateFieldPath(path)
+	if err != nil {
+		return nil, err
 	}
 
 	parts := strings.Split(path, ".")

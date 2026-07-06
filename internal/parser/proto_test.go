@@ -25,6 +25,7 @@ import (
 const (
 	testEnvelopeDesc = "testdata/envelope.desc"
 	testEnvelopeType = "test.v1.Envelope"
+	testInnerType    = "test.v1.Inner"
 )
 
 // newEnvelopeMessage returns an empty dynamic test.v1.Envelope message.
@@ -52,6 +53,40 @@ func marshalEnvelope(t *testing.T, set func(m protoreflect.Message)) []byte {
 	require.NoError(t, err)
 
 	return data
+}
+
+// marshalInner builds a serialized test.v1.Inner payload - the synthetic
+// stand-in for a nested attribute message carried as map value bytes.
+func marshalInner(t *testing.T, reading float64, unit string) []byte {
+	t.Helper()
+
+	dec, err := newProtoDecoder(protoStepConfig{
+		descriptorFile: testEnvelopeDesc,
+		messageType:    testInnerType,
+	})
+	require.NoError(t, err)
+
+	m := dynamicpb.NewMessage(dec.desc)
+	fields := m.Descriptor().Fields()
+	m.Set(fields.ByName("reading"), protoreflect.ValueOfFloat64(reading))
+	m.Set(fields.ByName("unit"), protoreflect.ValueOfString(unit))
+
+	data, err := proto.Marshal(m)
+	require.NoError(t, err)
+
+	return data
+}
+
+// requireParsingFailedError asserts err is a yaml_parser ParsingFailed error.
+func requireParsingFailedError(t *testing.T, err error) {
+	t.Helper()
+
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, "yaml_parser", connErr.Component)
+	assert.Equal(t, connectorErrors.ErrCodeParsingFailed, connErr.Code)
 }
 
 // setStringField sets a string field by name.
@@ -154,15 +189,35 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 			"descriptor_file": testEnvelopeDesc,
 			"message_type":    "test.v1.Mode",
 		}},
-		{"source not supported yet", map[string]interface{}{
+		{"source empty", map[string]interface{}{
 			"descriptor_file": testEnvelopeDesc,
 			"message_type":    testEnvelopeType,
-			"source":          "attribute_raw",
+			"source":          "",
 		}},
-		{"target not supported yet", map[string]interface{}{
+		{"source not a string", map[string]interface{}{
 			"descriptor_file": testEnvelopeDesc,
 			"message_type":    testEnvelopeType,
-			"target":          "nested",
+			"source":          7,
+		}},
+		{"source malformed path", map[string]interface{}{
+			"descriptor_file": testEnvelopeDesc,
+			"message_type":    testEnvelopeType,
+			"source":          "a..b",
+		}},
+		{"target empty", map[string]interface{}{
+			"descriptor_file": testEnvelopeDesc,
+			"message_type":    testEnvelopeType,
+			"target":          "",
+		}},
+		{"target not a string", map[string]interface{}{
+			"descriptor_file": testEnvelopeDesc,
+			"message_type":    testEnvelopeType,
+			"target":          7,
+		}},
+		{"target contains dot", map[string]interface{}{
+			"descriptor_file": testEnvelopeDesc,
+			"message_type":    testEnvelopeType,
+			"target":          "a.b",
 		}},
 	}
 
@@ -178,6 +233,105 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 			assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
 		})
 	}
+}
+
+// TestParseProtobufSourceField validates decoding from a state.Fields entry
+// instead of the raw payload (the nested re-decode pattern)
+func TestParseProtobufSourceField(t *testing.T) {
+	step, err := makeParseProtobufStep(map[string]interface{}{
+		"descriptor_file": testEnvelopeDesc,
+		"message_type":    testInnerType,
+		"source":          "attribute_raw",
+	})
+	require.NoError(t, err)
+
+	inner := marshalInner(t, 42.5, "mm")
+
+	t.Run("bytes source decodes", func(t *testing.T) {
+		state := &ParseState{Fields: map[string]interface{}{"attribute_raw": inner}}
+		require.NoError(t, step(state))
+		assert.Equal(t, 42.5, state.Fields["reading"])
+		assert.Equal(t, "mm", state.Fields["unit"])
+	})
+
+	t.Run("string source decodes", func(t *testing.T) {
+		state := &ParseState{Fields: map[string]interface{}{"attribute_raw": string(inner)}}
+		require.NoError(t, step(state))
+		assert.Equal(t, 42.5, state.Fields["reading"])
+	})
+
+	t.Run("missing source field errors", func(t *testing.T) {
+		state := &ParseState{Fields: map[string]interface{}{}}
+		requireParsingFailedError(t, step(state))
+	})
+
+	t.Run("wrong source type errors", func(t *testing.T) {
+		state := &ParseState{Fields: map[string]interface{}{"attribute_raw": int64(7)}}
+		requireParsingFailedError(t, step(state))
+	})
+
+	t.Run("empty source bytes error", func(t *testing.T) {
+		state := &ParseState{Fields: map[string]interface{}{"attribute_raw": []byte{}}}
+		requireParsingFailedError(t, step(state))
+	})
+}
+
+// TestParseProtobufTarget validates nesting decoded fields under a single
+// top-level key instead of merging at the root
+func TestParseProtobufTarget(t *testing.T) {
+	step, err := makeParseProtobufStep(map[string]interface{}{
+		"descriptor_file": testEnvelopeDesc,
+		"message_type":    testInnerType,
+		"source":          "attribute_raw",
+		"target":          "attr",
+	})
+	require.NoError(t, err)
+
+	state := &ParseState{Fields: map[string]interface{}{
+		"attribute_raw": marshalInner(t, 1.5, "deg"),
+		"attr":          "pre-existing", // target overwrites, consistent with root merge
+	}}
+	require.NoError(t, step(state))
+
+	nested, ok := state.Fields["attr"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, 1.5, nested["reading"])
+	assert.Equal(t, "deg", nested["unit"])
+
+	// nested values stay dot-path addressable for extract_field
+	reading, err := extractFieldByPath(state.Fields, "attr.reading")
+	require.NoError(t, err)
+	assert.Equal(t, 1.5, reading)
+
+	// decoded fields must not leak to the root when target is set
+	_, present := state.Fields["reading"]
+	assert.False(t, present)
+}
+
+// TestParseProtobufNestedWrongInnerType pins the M1 finding that makes the
+// nested re-decode unsuitable as a message-shape filter: bytes of the WRONG
+// message type decode without error to zero populated fields, because
+// mismatched wire types park as unknown fields (Envelope field 1 is a
+// string, wire type 2; Inner field 1 is a double, wire type 1).
+func TestParseProtobufNestedWrongInnerType(t *testing.T) {
+	wrongInner := marshalEnvelope(t, func(m protoreflect.Message) {
+		setStringField(m, "name", "not-an-inner")
+	})
+
+	step, err := makeParseProtobufStep(map[string]interface{}{
+		"descriptor_file": testEnvelopeDesc,
+		"message_type":    testInnerType,
+		"source":          "attribute_raw",
+		"target":          "attr",
+	})
+	require.NoError(t, err)
+
+	state := &ParseState{Fields: map[string]interface{}{"attribute_raw": wrongInner}}
+	require.NoError(t, step(state))
+
+	nested, ok := state.Fields["attr"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Empty(t, nested)
 }
 
 // TestParseProtobufScalarMapping validates the normalized Go type for every

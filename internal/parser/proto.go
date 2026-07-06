@@ -10,6 +10,7 @@ package parser
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
@@ -27,17 +28,19 @@ import (
 const protoTimestampName protoreflect.FullName = "google.protobuf.Timestamp"
 
 // protoStepConfig: compile-time configuration of a parse_protobuf step.
-// source/target (decode from a field, nest output under a prefix) are
-// reserved for a later milestone and rejected until implemented.
 type protoStepConfig struct {
 	descriptorFile string
 	messageType    string
+	source         string // dot-path into state.Fields; "" = decode state.Data
+	target         string // top-level key to nest output under; "" = merge at root
 }
 
 // parseProtoStepConfig validates parse_protobuf step config.
 // In: config["descriptor_file"] - path to a protoc-compiled FileDescriptorSet
 //
 //	config["message_type"] - fully-qualified message name to decode
+//	config["source"] - optional dot-path to a []byte/string field to decode
+//	config["target"] - optional top-level key to nest decoded fields under
 //
 // Out: protoStepConfig - validated config
 // Ex: parseProtoStepConfig({"descriptor_file": "x.desc", "message_type": "test.v1.Envelope"}) → cfg
@@ -54,14 +57,32 @@ func parseProtoStepConfig(config map[string]interface{}) (protoStepConfig, error
 			"parse_protobuf step requires a 'message_type' string option")
 	}
 
-	for _, reserved := range []string{"source", "target"} {
-		if _, present := config[reserved]; present {
+	cfg := protoStepConfig{descriptorFile: descriptorFile, messageType: messageType}
+
+	if raw, present := config["source"]; present {
+		source, ok := raw.(string)
+		if !ok || source == "" {
 			return protoStepConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
-				fmt.Sprintf("parse_protobuf option '%s' is not supported yet", reserved))
+				"parse_protobuf 'source' must be a non-empty string")
 		}
+		err := validateFieldPath(source)
+		if err != nil {
+			return protoStepConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("parse_protobuf 'source' is not a valid field path: %v", err))
+		}
+		cfg.source = source
 	}
 
-	return protoStepConfig{descriptorFile: descriptorFile, messageType: messageType}, nil
+	if raw, present := config["target"]; present {
+		target, ok := raw.(string)
+		if !ok || target == "" || strings.Contains(target, ".") {
+			return protoStepConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+				"parse_protobuf 'target' must be a non-empty top-level key without '.'")
+		}
+		cfg.target = target
+	}
+
+	return cfg, nil
 }
 
 // loadDescriptorSet reads a protoc-compiled FileDescriptorSet from disk.
@@ -283,6 +304,37 @@ func (d *protoDecoder) decode(data []byte) (map[string]interface{}, error) {
 	return protoMessageToMap(msg), nil
 }
 
+// resolveProtoSource selects the bytes a parse_protobuf step decodes: the
+// raw payload by default, or a []byte/string field lifted from an earlier
+// step (the nested re-decode pattern). Callers reject empty results: an
+// all-default inner message marshals to zero bytes and is then
+// indistinguishable from a missing payload - a deliberate trade-off.
+// In: state *ParseState - pipeline state
+//
+//	source string - dot-path into state.Fields; "" = state.Data
+//
+// Out: []byte - bytes to decode
+// Ex: resolveProtoSource(state, "attribute_raw") → serialized inner message
+func resolveProtoSource(state *ParseState, source string) ([]byte, error) {
+	if source == "" {
+		return state.Data, nil
+	}
+
+	value, err := extractFieldByPath(state.Fields, source)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve parse_protobuf source '%s': %w", source, err)
+	}
+
+	switch v := value.(type) {
+	case []byte:
+		return v, nil
+	case string:
+		return []byte(v), nil
+	default:
+		return nil, fmt.Errorf("parse_protobuf source '%s' has type %T, want bytes or string", source, v)
+	}
+}
+
 // makeParseProtobufStep creates a descriptor-driven protobuf decode step.
 //
 // parse_protobuf is STRUCTURAL: a decode error yields OutcomeUnusable →
@@ -296,11 +348,19 @@ func (d *protoDecoder) decode(data []byte) (map[string]interface{}, error) {
 // unset proto3 scalars are absent from state.Fields (populated-only
 // semantics).
 //
+// Consequence for nested re-decodes (source set): decoding bytes of the
+// WRONG message type usually SUCCEEDS with zero populated fields, because
+// mismatched wire types park as unknown fields. A second-pass decode is
+// therefore NOT a message-shape filter; use extract_map_entry
+// 'allowed_keys' to filter on the map key instead.
+//
 // In: config["descriptor_file"] - protoc-compiled FileDescriptorSet path
 //
 //	config["message_type"] - fully-qualified message name
+//	config["source"] - optional dot-path to a []byte/string field to decode
+//	config["target"] - optional top-level key to nest decoded fields under
 //
-// Out: TransformationStep - decodes state.Data into state.Fields
+// Out: TransformationStep - decodes into state.Fields
 // Ex: makeParseProtobufStep({"descriptor_file": "x.desc", "message_type": "test.v1.Envelope"}) → step
 func makeParseProtobufStep(config map[string]interface{}) (TransformationStep, error) {
 	cfg, err := parseProtoStepConfig(config)
@@ -318,13 +378,24 @@ func makeParseProtobufStep(config map[string]interface{}) (TransformationStep, e
 			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil state in parse_protobuf step"))
 		}
 
-		if len(state.Data) == 0 {
+		data, err := resolveProtoSource(state, cfg.source)
+		if err != nil {
+			return connectorErrors.NewParsingFailedError("yaml_parser", err)
+		}
+
+		if len(data) == 0 {
 			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("empty data in parse_protobuf step"))
 		}
 
-		decoded, err := decoder.decode(state.Data)
+		decoded, err := decoder.decode(data)
 		if err != nil {
 			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to decode protobuf in parse_protobuf step: %w", err))
+		}
+
+		if cfg.target != "" {
+			state.Fields[cfg.target] = decoded
+
+			return nil
 		}
 
 		// Merge decoded fields - accumulates values for later steps

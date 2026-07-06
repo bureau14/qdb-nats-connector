@@ -40,4 +40,4 @@ plugins:
 timeout_in_minutes: 60
 
 agents:
-  queue: "default-{queue}"
+  queue: "{queue}"

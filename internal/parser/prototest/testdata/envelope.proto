@@ -4,9 +4,9 @@
 //
 // Compiled with (libprotoc 3.21.12, run from the repository root):
 //   /opt/local/bin/protoc --include_imports \
-//     --descriptor_set_out=internal/parser/testdata/envelope.desc \
-//     --proto_path=internal/parser/testdata \
-//     internal/parser/testdata/envelope.proto
+//     --descriptor_set_out=internal/parser/prototest/testdata/envelope.desc \
+//     --proto_path=internal/parser/prototest/testdata \
+//     internal/parser/prototest/testdata/envelope.proto
 // --include_imports embeds google/protobuf/timestamp.proto (resolved from
 // protoc's bundled well-known types) so the .desc is self-contained.
 syntax = "proto3";

@@ -1671,3 +1671,208 @@ func TestYAMLParserFilterValidation(t *testing.T) {
 		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
 	})
 }
+
+// runSplitStep compiles a compute_field split step and runs it.
+func runSplitStep(t *testing.T, config, fields map[string]interface{}) (*ParseState, error) {
+	t.Helper()
+
+	step, err := makeComputeFieldStep(config)
+	require.NoError(t, err)
+
+	state := &ParseState{Fields: fields}
+
+	return state, step(state)
+}
+
+// splitBaseConfig returns a valid compute_field split config.
+func splitBaseConfig(index int) map[string]interface{} {
+	return map[string]interface{}{
+		"operation": "split",
+		"target":    "revision_raw",
+		"source":    "stream_id",
+		"separator": ":",
+		"index":     index,
+	}
+}
+
+// TestComputeFieldSplitFactoryErrors validates fail-fast config handling
+func TestComputeFieldSplitFactoryErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		config map[string]interface{}
+	}{
+		{"missing source", map[string]interface{}{
+			"operation": "split", "target": "t", "separator": ":", "index": 0,
+		}},
+		{"missing separator", map[string]interface{}{
+			"operation": "split", "target": "t", "source": "s", "index": 0,
+		}},
+		{"empty separator", map[string]interface{}{
+			"operation": "split", "target": "t", "source": "s", "separator": "", "index": 0,
+		}},
+		{"missing index", map[string]interface{}{
+			"operation": "split", "target": "t", "source": "s", "separator": ":",
+		}},
+		{"index not an integer", map[string]interface{}{
+			"operation": "split", "target": "t", "source": "s", "separator": ":", "index": "x",
+		}},
+		{"unsupported operation", map[string]interface{}{
+			"operation": "reverse", "target": "t",
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			step, err := makeComputeFieldStep(tc.config)
+			assert.Nil(t, step)
+			require.Error(t, err)
+
+			var connErr *connectorErrors.ConnectorError
+			require.True(t, errors.As(err, &connErr))
+			assert.Equal(t, "yaml_parser", connErr.Component)
+			assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+		})
+	}
+}
+
+// TestComputeFieldSplit covers selection, negative indexing, Go semantics
+// for an absent separator, and runtime failures
+func TestComputeFieldSplit(t *testing.T) {
+	streamID := map[string]interface{}{"stream_id": "skf-cxrn:123:ion-stream:TOKEN:7"}
+
+	t.Run("positive index", func(t *testing.T) {
+		state, err := runSplitStep(t, splitBaseConfig(1), streamID)
+		require.NoError(t, err)
+		assert.Equal(t, "123", state.Fields["revision_raw"])
+	})
+
+	t.Run("negative index", func(t *testing.T) {
+		state, err := runSplitStep(t, splitBaseConfig(-1), streamID)
+		require.NoError(t, err)
+		assert.Equal(t, "7", state.Fields["revision_raw"])
+	})
+
+	t.Run("separator absent yields whole string at 0 and -1", func(t *testing.T) {
+		noSep := map[string]interface{}{"stream_id": "abc"}
+
+		for _, index := range []int{0, -1} {
+			state, err := runSplitStep(t, splitBaseConfig(index), map[string]interface{}{"stream_id": "abc"})
+			require.NoError(t, err)
+			assert.Equal(t, "abc", state.Fields["revision_raw"])
+		}
+
+		for _, index := range []int{1, -2} {
+			_, err := runSplitStep(t, splitBaseConfig(index), noSep)
+			requireParsingFailedError(t, err)
+		}
+	})
+
+	t.Run("out of range", func(t *testing.T) {
+		for _, index := range []int{5, -6} {
+			_, err := runSplitStep(t, splitBaseConfig(index), streamID)
+			requireParsingFailedError(t, err)
+		}
+	})
+
+	t.Run("missing source field", func(t *testing.T) {
+		_, err := runSplitStep(t, splitBaseConfig(0), map[string]interface{}{})
+		requireParsingFailedError(t, err)
+	})
+
+	t.Run("non-string source", func(t *testing.T) {
+		_, err := runSplitStep(t, splitBaseConfig(0), map[string]interface{}{"stream_id": int64(7)})
+		requireParsingFailedError(t, err)
+	})
+}
+
+// TestComputeFieldSplitProperties pins panic-freedom and agreement with the
+// strings.Split reference against generated inputs
+func TestComputeFieldSplitProperties(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		value := rapid.String().Draw(rt, "value")
+		separator := rapid.StringN(1, 3, -1).Draw(rt, "separator")
+		index := rapid.IntRange(-8, 8).Draw(rt, "index")
+
+		config := map[string]interface{}{
+			"operation": "split",
+			"target":    "out",
+			"source":    "in",
+			"separator": separator,
+			"index":     index,
+		}
+
+		step, err := makeComputeFieldStep(config)
+		require.NoError(rt, err)
+
+		state := &ParseState{Fields: map[string]interface{}{"in": value}}
+		err = step(state)
+
+		parts := strings.Split(value, separator)
+		idx := index
+		if idx < 0 {
+			idx += len(parts)
+		}
+
+		if idx >= 0 && idx < len(parts) {
+			require.NoError(rt, err)
+			require.Equal(rt, parts[idx], state.Fields["out"])
+		} else {
+			require.Error(rt, err)
+		}
+	})
+}
+
+// TestExtractFieldTypeRequired pins the compile-time requirement: omitting
+// 'type' is a Configuration error; explicit "auto" stays valid and passes
+// parser-native types through untouched
+func TestExtractFieldTypeRequired(t *testing.T) {
+	pipelineConfig := func(fieldConfig map[string]interface{}) YAMLConfig {
+		return YAMLConfig{
+			Output: OutputSchema{
+				Columns: []ColumnSchema{
+					{Name: "value", Type: "int64"},
+				},
+			},
+			Transformations: []TransformSpec{
+				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_field", Config: fieldConfig},
+				{Step: "extract_table", Config: map[string]interface{}{"value": "events"}},
+			},
+		}
+	}
+
+	t.Run("missing type fails compile", func(t *testing.T) {
+		_, err := NewYAMLParserFromConfig(pipelineConfig(map[string]interface{}{
+			"source": "value",
+			"target": "value",
+		}))
+		require.Error(t, err)
+
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+		assert.Contains(t, connErr.Error(), "extract_field")
+	})
+
+	t.Run("empty type fails compile", func(t *testing.T) {
+		_, err := NewYAMLParserFromConfig(pipelineConfig(map[string]interface{}{
+			"source": "value",
+			"target": "value",
+			"type":   "",
+		}))
+		require.Error(t, err)
+	})
+
+	t.Run("explicit auto compiles and passes through", func(t *testing.T) {
+		step, err := makeExtractFieldStep(map[string]interface{}{
+			"source": "value",
+			"target": "out",
+			"type":   "auto",
+		})
+		require.NoError(t, err)
+
+		state := &ParseState{Fields: map[string]interface{}{"value": int64(42)}}
+		require.NoError(t, step(state))
+		assert.Equal(t, int64(42), state.Fields["out"])
+	})
+}

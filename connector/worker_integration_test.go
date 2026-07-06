@@ -78,13 +78,13 @@ func TestPartialFilterWorkerIntegration(t *testing.T) {
 	require.NoError(t, handle.Connect(qdbEndpoint))
 
 	table := handle.Table(tableName)
-	require.NoError(t, table.Create(0,
+	require.NoError(t, table.Create(24*time.Hour,
 		qdb.NewTsColumnInfo("data_type", qdb.TsColumnInt64),
 	))
 	defer func() { _ = table.Remove() }()
 
 	// Build a real sink connected to the local QuasarDB instance.
-	qdbSink, err := sink.NewSink(sink.Options{ClusterUri: qdbEndpoint})
+	qdbSink, err := sink.NewSink(sink.NewOptions(sink.WithClusterUri(qdbEndpoint)))
 	require.NoError(t, err)
 	defer qdbSink.Close()
 

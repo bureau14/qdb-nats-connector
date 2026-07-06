@@ -143,7 +143,7 @@ func startTLSNatsServer(t *testing.T, dir, certFile, keyFile, caFile string) str
 
 	bin, err := exec.LookPath("nats-server")
 	if err != nil {
-		t.Skip("nats-server binary not found in PATH")
+		skipMissingNats(t)
 	}
 
 	port := freeTCPPort(t)

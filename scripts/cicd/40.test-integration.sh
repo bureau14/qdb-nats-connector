@@ -3,14 +3,23 @@
 # Invoked by .buildkite/steps/_build.yml after start-services.sh,
 # 20.build.sh, and 30.test-unit.sh.
 #
-# Integration tests live under test/integration/ and are guarded by
-# //go:build integration, so they are excluded from 30.test-unit.sh
-# (which omits -tags=integration) and run only here.
+# Integration tests are guarded by //go:build integration and live both
+# under test/integration/ and inside regular packages (e.g.
+# connector/worker_integration_test.go), so this step runs ./... with
+# -tags=integration; 30.test-unit.sh omits the tag and skips them all.
+# GOEXPERIMENT=cgocheck2 is set here (mirroring the Makefile test
+# target) because decoded parser strings/blobs cross the CGO boundary
+# into WriterTables in these tests.
 #
 # Services: qdbd (insecure 127.0.0.1:2836, secure 127.0.0.1:2838) is
 # already provisioned by scripts/tests/setup/start-services.sh earlier
-# in the _build.yml chain. This script must NOT start services and must
-# NOT set RUN_SEGFAULT_TEST (TestComputeFieldSegfault stays opt-in).
+# in the _build.yml chain. nats-server is provisioned below via
+# start-nats.sh (idempotent; stop-nats.sh reaps it in the pre-exit
+# hook) because the NATS-dependent tests spawn their own hermetic
+# server from PATH -- QDB_TEST_REQUIRE_NATS=1 turns a missing binary
+# into a loud failure instead of a silent skip. This script must NOT
+# start qdbd and must NOT set RUN_SEGFAULT_TEST
+# (TestComputeFieldSegfault stays opt-in).
 
 set -euo pipefail
 
@@ -38,6 +47,18 @@ fi
 cicd_setup_qdb_env
 cicd_setup_go_toolchain
 
+# --- nats-server provisioning ---
+
+# The source/protobuf integration tests spawn their own nats-server on a
+# free port via exec.LookPath; they only need the binary on PATH. The
+# server start-nats.sh launches on 4222 is reused later by 50.test-e2e.sh.
+"${SCRIPT_DIR}/start-nats.sh"
+export PATH="${BASE_DIR}/nats/bin:${PATH}"
+
+# A NATS-dependent test that cannot run must be loud in CI (t.Fatal
+# instead of t.Skip when the binary is missing).
+export QDB_TEST_REQUIRE_NATS=1
+
 # --- test ---
 
 GO_EXTRA_FLAGS=()
@@ -56,4 +77,4 @@ fi
 
 # Convert test output to JUnit XML so buildkite can understand it
 # -mod=vendor: resolve strictly from vendor/; fail loudly instead of fetching.
-"${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -mod=vendor -buildvcs=false -tags=integration -v -race ./test/integration/... | ${GO_JUNIT_REPORT} -out "${TEST_REPORT_DIR}/integration-junit-report.xml" -iocopy
+GOEXPERIMENT=cgocheck2 "${GO}" test "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -mod=vendor -buildvcs=false -tags=integration -v -race ./... | ${GO_JUNIT_REPORT} -out "${TEST_REPORT_DIR}/integration-junit-report.xml" -iocopy

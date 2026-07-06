@@ -21,6 +21,20 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// skipMissingNats skips a NATS-dependent test locally; in CI
+// (QDB_TEST_REQUIRE_NATS=1, set by scripts/cicd/40.test-integration.sh
+// after provisioning the binary) a missing nats-server fails loudly
+// instead of skipping silently.
+func skipMissingNats(t *testing.T) {
+	t.Helper()
+
+	if os.Getenv("QDB_TEST_REQUIRE_NATS") == "1" {
+		t.Fatal("nats-server required in this environment but not found in PATH")
+	}
+
+	t.Skip("nats-server binary not found in PATH")
+}
+
 // startNatsServer spawns a plain nats-server with JetStream enabled.
 // Out: server URL; process is terminated via t.Cleanup.
 func startNatsServer(t *testing.T, dir string) string {
@@ -28,7 +42,7 @@ func startNatsServer(t *testing.T, dir string) string {
 
 	bin, err := exec.LookPath("nats-server")
 	if err != nil {
-		t.Skip("nats-server binary not found in PATH")
+		skipMissingNats(t)
 	}
 
 	port := freeTCPPort(t)

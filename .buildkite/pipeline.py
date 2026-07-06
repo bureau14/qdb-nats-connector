@@ -211,7 +211,15 @@ def _per_platform_step(p: Platform) -> dict:
     for the qdb-artifacts download block are injected later in
     `generate_pipeline()`.
     """
-    tvars = {"slug": p.slug(), "queue": f"default-{p.queue_os}-{p.arch}"}
+    tvars = {
+        "slug": p.slug(),
+        "queue": (
+            f"{p.queue_os}-{p.arch}"
+            if p.os == "macos"
+            else f"siege-{p.queue_os}-{p.arch}"
+        ),
+    }
+
     step = load_template(STEPS_DIR / "_build.yml", **tvars)
     env = _env(p, "build")
     env.update(step.get("env") or {})

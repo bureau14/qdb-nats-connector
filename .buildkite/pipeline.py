@@ -216,7 +216,7 @@ def _per_platform_step(p: Platform) -> dict:
         "queue": (
             f"{p.queue_os}-{p.arch}"
             if p.os == "macos"
-            else f"siege-{p.queue_os}-{p.arch}"
+            else f"default-{p.queue_os}-{p.arch}"
         ),
     }
 

@@ -54,6 +54,9 @@ We will implement a **YAML-based parser architecture with pre-compiled building 
 compression: gzip # Optional: none, gzip
 
 # Output schema definition
+# Column types: timestamp, double, int64, blob, string, symbol.
+# Symbol columns are written as strings client-side; the server resolves the
+# symtable from the (pre-created) table schema.
 output:
   table_name: "sensor_data"
   columns:
@@ -62,7 +65,9 @@ output:
     - name: "temperature"
       type: "double"
     - name: "tag_id"
-      type: "string"
+      type: "symbol"
+    - name: "recorded_at"
+      type: "timestamp"
 
 # Transformation pipeline
 transformations:
@@ -76,7 +81,15 @@ transformations:
   - step: "extract_index"
     config:
       source: "T" # Compact field name in JSON
-      format: "MM/dd/yyyy HH:mm:ss.SSS"
+      format: "2006-01-02 15:04:05.000" # Go time layout, or a format keyword
+
+  # Same parsing as extract_index, but the result lands in a regular
+  # timestamp value column instead of the $timestamp index
+  - step: "extract_timestamp"
+    config:
+      source: "T"
+      target: "recorded_at"
+      format: "2006-01-02 15:04:05.000"
 
   - step: "extract_field"
     config:
@@ -97,7 +110,10 @@ transformations:
 1. **Building Block Library**: Pre-compiled Go functions for common operations
    - **Field Extraction**: JSON path navigation, compact field aliases
    - **Type Conversion**: Safe parsing with configurable error handling
-   - **Timestamp Parsing**: Multiple format support (Unix ms, RFC3339, custom)
+   - **Timestamp Parsing**: `extract_index` (the `$timestamp` index) and
+     `extract_timestamp` (a regular timestamp value column) share one
+     conversion helper; formats: `rfc3339` (default), `rfc3339nano`,
+     `unix`, `unix_ms`, `unix_us`, `unix_ns`, or a custom Go time layout
    - **String Operations**: Concatenation, formatting, case conversion
    - **Compression**: GZIP decompression, future support for zstd
    - **Computed Fields**: Combine multiple fields, conditional logic
@@ -113,6 +129,40 @@ transformations:
    - Direct function calls between blocks (no reflection)
    - Optional parallel execution for independent transformations
    - Pure functions only - no I/O operations allowed
+
+### Timestamp Formats
+
+`extract_index` and `extract_timestamp` accept the same `format` variable
+(default `rfc3339`) and the same source value types:
+
+| format \ input   | string                        | int64 / float64                    |
+| ---------------- | ----------------------------- | ---------------------------------- |
+| `rfc3339`        | time.Parse(RFC3339)           | error                              |
+| `rfc3339nano`    | time.Parse(RFC3339Nano)       | error                              |
+| `unix`           | integer or fractional seconds | epoch seconds, float fraction kept |
+| `unix_ms`        | idem, milliseconds            | epoch milliseconds, fraction kept  |
+| `unix_us`        | idem, microseconds            | epoch microseconds, fraction kept  |
+| `unix_ns`        | idem, nanoseconds             | epoch nanoseconds (float: rounded) |
+| custom Go layout | time.Parse(layout, value)     | error                              |
+
+Numeric input with a date format is an ERROR, never an implicit
+unix-seconds guess: silently guessing the unit would corrupt data by
+orders of magnitude (a millisecond epoch read as seconds lands in year
+55978). This replaced an earlier behavior where numeric input was always
+truncated to unix seconds regardless of `format`.
+
+Precision caveat: JSON numbers decode as float64, whose 53-bit mantissa
+cannot represent current-era `unix_ns` epochs (~1.7e18) exactly; use
+int64-producing sources (e.g. protobuf) or string epochs when nanosecond
+exactness matters.
+
+### Symbol Columns
+
+Output columns may be typed `symbol`. Client-side, symbols are plain
+strings (the batch writer sends string data; the server resolves the
+symtable from the pre-created table schema), so any step that produces a
+string can populate a symbol column. Tables with symbol columns must be
+created with a symtable name, e.g. `SYMBOL(my_symtable)` in qdbsh DDL.
 
 ## Performance Characteristics
 
@@ -320,7 +370,8 @@ the metrics:
 
 - **OK**: all steps succeeded; the row is written.
 - **Partial**: structural steps succeeded but some field steps
-  (`extract_field`, `compute_field`, `safe_parse_number`) failed. The row is
+  (`extract_field`, `extract_timestamp`, `compute_field`,
+  `safe_parse_number`) failed. The row is
   anchored to a real measurement timestamp and real table routing; missing
   columns are filled with per-type null sentinels (partial extraction, as
   originally specified). `drop` keeps the row; `fail` NACKs for redelivery.

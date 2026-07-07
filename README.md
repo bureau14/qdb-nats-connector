@@ -41,12 +41,14 @@ The connector uses a three-phase processing pipeline:
 ### Prerequisites
 
 1. NATS Server with JetStream enabled:
+
    ```bash
    # Start NATS with JetStream
    nats-server -js
    ```
 
 2. Create a JetStream stream:
+
    ```bash
    nats stream create EVENTS \
      --subjects "sensors.>,metrics.>" \
@@ -65,6 +67,7 @@ make build
 ## Configuration
 
 The connector supports configuration through:
+
 1. Environment variables (prefix: `QDB_NATS_`)
 2. Command-line flags
 
@@ -107,7 +110,6 @@ Precedence: CLI flags > Environment variables > Defaults
 --help                         # Show help message
 ```
 
-
 ### Environment Variables
 
 All configuration options can be set via environment variables with the `QDB_NATS_` prefix:
@@ -139,7 +141,10 @@ The YAML parser provides a flexible, high-performance alternative with <5% overh
 ```
 
 Key features:
-- **Building blocks**: Pre-compiled transformation functions (decompress, parse_json, extract_field, etc.)
+
+- **Building blocks**: Pre-compiled transformation functions (decompress, parse_json, extract_field, extract_index, extract_timestamp, etc.)
+- **Column types**: timestamp, double, int64, blob, string, symbol
+- **Timestamp formats**: rfc3339, rfc3339nano, unix, unix_ms, unix_us, unix_ns, or custom Go layouts -- for both the index and timestamp value columns
 - **Parallel processing**: Optional worker pools for increased throughput
 - **Error handling**: Configurable drop/fail modes
 - **Type safety**: Automatic conversions with overflow protection
@@ -233,23 +238,27 @@ nats consumer report DATA_STREAM
 ## Performance Tuning
 
 ### Batch Processing
+
 - `--batch-size`: Larger batches improve throughput but increase latency
 - `--batch-timeout`: Balance between latency and batch efficiency
 - `--fetch-timeout`: Should be larger than batch-timeout
 
 ### QuasarDB Performance
+
 - `--qdb-push-mode async`: Best throughput (default)
 - `--qdb-push-mode fast`: Lower latency, less reliability
 - `--qdb-push-mode transactional`: Highest reliability, lower throughput
 - `--qdb-client-max-parallelism`: Increase for better concurrency
 
 ### JetStream Tuning
+
 - `--ack-wait`: Set based on expected processing time
 - `--max-deliver`: Balance between retry attempts and poison message handling
 
 ## Monitoring
 
 The connector logs key events:
+
 - Worker startup and shutdown
 - Message processing statistics
 - Parse and write errors
@@ -261,16 +270,18 @@ The connector logs key events:
 ### Common Issues
 
 1. **Consumer already exists error**
+
    ```bash
    # Delete existing consumer
    nats consumer rm DATA_STREAM old-consumer-name
    ```
 
 2. **Messages not being processed**
+
    ```bash
    # Check consumer status
    nats consumer info DATA_STREAM qdb-connector-12345678
-   
+
    # Look for "Pending Messages" and "Redelivered Messages"
    ```
 

@@ -127,6 +127,7 @@ var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, 
 	"parse_json":        makeParseJSONStep,
 	"parse_protobuf":    makeParseProtobufStep,
 	"extract_index":     makeExtractIndexStep,
+	"extract_timestamp": makeExtractTimestampStep,
 	"extract_field":     makeExtractFieldStep,
 	"extract_map_entry": makeExtractMapEntryStep,
 	"extract_subject":   makeExtractSubjectStep,
@@ -152,7 +153,7 @@ type OutputSchema struct {
 // ColumnSchema: column name+type
 type ColumnSchema struct {
 	Name string `yaml:"name"`
-	Type string `yaml:"type"` // timestamp, double, int64, blob, string
+	Type string `yaml:"type"` // timestamp, double, int64, blob, string, symbol
 }
 
 // TransformSpec: transformation step spec
@@ -449,6 +450,7 @@ func (p *YAMLParser) createWriterTable(state *ParseState, tableName string) (qdb
 	//   - Int64: qdb.Int64Undefined() (matches QDB_IS_NULL_INT64, value 0x8000000000000000)
 	//   - Timestamp: qdb.MinTimespec() (matches QDB_IS_NULL_TIMESTAMP)
 	//   - String: "" (matches QDB_IS_NULL_STRING(pt) -> pt.content_length == 0)
+	//   - Symbol: "" (same as String; symbols are strings client-side, TsValueString)
 	//   - Blob: []byte{} (matches QDB_IS_NULL_BLOB(pt) -> pt.content_length == 0)
 	// This invariant is the precondition for qdb.MergeSingleTableWriters producing
 	// aligned (index_len, column_len) pairs across multi-row merges; without it the
@@ -620,11 +622,35 @@ func (p *YAMLParser) createWriterTable(state *ParseState, tableName string) (qdb
 			if err != nil {
 				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
 			}
+		case qdb.TsColumnSymbol:
+			// MEMORY PINNING CRITICAL POINT:
+			// Symbols are strings client-side (TsColumnSymbol.AsValueType() ==
+			// TsValueString); this string will be pinned by QuasarDB using
+			// runtime.Pinner and MUST be backed by contiguous memory.
+			// Check buffer bounds before accessing
+			if i >= len(state.stringVals) {
+				slog.Error("Buffer overflow detected in symbol column!",
+					"column_index", i,
+					"buffer_len", len(state.stringVals),
+					"column_name", fieldName)
+
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser",
+					fmt.Errorf("buffer overflow: column index %d >= buffer length %d", i, len(state.stringVals)))
+			}
+			v, ok := value.(string)
+			if !ok {
+				// Empty string is QDB's null sentinel for symbol columns,
+				// same as string columns (symbols are strings client-side).
+				v = ""
+			}
+			state.stringVals[i] = v
+			data := qdb.NewColumnDataString([]string{state.stringVals[i]})
+			err := table.SetData(i, &data)
+			if err != nil {
+				return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
+			}
 		case qdb.TsColumnUninitialized:
 			// Schema validation rejects uninitialized columns before reaching here.
-			continue
-		case qdb.TsColumnSymbol:
-			// Symbol columns not currently supported in YAML parser.
 			continue
 		}
 	}
@@ -666,10 +692,11 @@ func (p *YAMLParser) newParseState() *ParseState {
 		switch colType {
 		case qdb.TsColumnBlob:
 			state.blobVals[i] = make([]byte, 0, 1024) // Pre-allocate with capacity
-		case qdb.TsColumnDouble, qdb.TsColumnInt64, qdb.TsColumnString, qdb.TsColumnTimestamp:
+		case qdb.TsColumnDouble, qdb.TsColumnInt64, qdb.TsColumnString, qdb.TsColumnSymbol, qdb.TsColumnTimestamp:
 			// These are already allocated with make() above
-		case qdb.TsColumnUninitialized, qdb.TsColumnSymbol:
-			// No pre-allocation needed for these types
+			// (symbols share stringVals; each column owns its index-i slot)
+		case qdb.TsColumnUninitialized:
+			// No pre-allocation needed for this type
 		}
 	}
 
@@ -846,7 +873,25 @@ func validateSchema(schema OutputSchema) error {
 	return nil
 }
 
+// writerDataType maps a schema column type to the client-side data type used
+// by the batch writer. The batch push column data_type describes how data is
+// stored CLIENT-side (qdb_exp_batch_push_column_t docs): symbols travel as
+// strings and the server resolves the symtable from the table schema, so
+// TsColumnSymbol maps to TsColumnString; every other type maps to itself.
+// In: colType qdb.TsColumnType - schema column type
+// Out: qdb.TsColumnType - client-side writer data type
+// Ex: writerDataType(qdb.TsColumnSymbol) → qdb.TsColumnString
+func writerDataType(colType qdb.TsColumnType) qdb.TsColumnType {
+	if colType == qdb.TsColumnSymbol {
+		return qdb.TsColumnString
+	}
+
+	return colType
+}
+
 // createColumnMapping builds QDB column definitions.
+// The WriterColumn carries the client-side data type (symbol -> string, see
+// writerDataType); columnTypes keeps the schema type for per-column dispatch.
 // In: columns []ColumnSchema - schema columns
 // Out: []WriterColumn, []TsColumnType - QDB types
 // Ex: createColumnMapping(cols) → columns, types
@@ -860,7 +905,7 @@ func createColumnMapping(columns []ColumnSchema) ([]qdb.WriterColumn, []qdb.TsCo
 		// column definitions are reused across multiple batches.
 		writerColumns[i] = qdb.WriterColumn{
 			ColumnName: col.Name + "\x00",
-			ColumnType: stringToColumnType(col.Type),
+			ColumnType: writerDataType(stringToColumnType(col.Type)),
 		}
 		columnTypes[i] = stringToColumnType(col.Type)
 	}
@@ -915,10 +960,11 @@ func validateColumnSynchronization(configColumns []ColumnSchema, writerColumns [
 					i, configCol.Name, configCol.Type, columnTypes[i]))
 		}
 
-		if expectedType != writerColumns[i].ColumnType {
+		// Writer columns carry the client-side data type (symbol -> string).
+		if writerDataType(expectedType) != writerColumns[i].ColumnType {
 			return connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("writer column type mismatch at index %d for column '%s': expected type %d but writer has type %d",
-					i, configCol.Name, expectedType, writerColumns[i].ColumnType))
+					i, configCol.Name, writerDataType(expectedType), writerColumns[i].ColumnType))
 		}
 	}
 
@@ -928,10 +974,10 @@ func validateColumnSynchronization(configColumns []ColumnSchema, writerColumns [
 // isValidColumnType validates QDB column type.
 // In: colType string - type name
 // Out: bool - valid for QuasarDB
-// Ex: isValidColumnType("double") → true
+// Ex: isValidColumnType("symbol") → true
 func isValidColumnType(colType string) bool {
 	switch colType {
-	case "timestamp", "double", "int64", "blob", "string":
+	case "timestamp", "double", "int64", "blob", "string", "symbol":
 		return true
 	default:
 		return false
@@ -954,6 +1000,8 @@ func stringToColumnType(colType string) qdb.TsColumnType {
 		return qdb.TsColumnBlob
 	case "string":
 		return qdb.TsColumnString
+	case "symbol":
+		return qdb.TsColumnSymbol
 	default:
 		return qdb.TsColumnBlob // Default fallback
 	}
@@ -1060,10 +1108,37 @@ func makeParseJSONStep(config map[string]interface{}) (TransformationStep, error
 	}, nil
 }
 
+// makeTimestampExtraction builds the shared lookup+convert+store closure used
+// by extract_index and extract_timestamp, so index and column timestamp
+// parsing are identical by construction.
+// In: stepName - error context; source - field to read; target - field to write
+//
+//	format - see convertToTimestamp
+//
+// Out: TransformationStep - writes time.Time into state.Fields[target]
+// Ex: makeTimestampExtraction("extract_index", "ts", "$timestamp", "unix") → step
+func makeTimestampExtraction(stepName, source, target, format string) TransformationStep {
+	return func(state *ParseState) error {
+		value, exists := state.Fields[source]
+		if !exists {
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in %s step", source, stepName))
+		}
+
+		ts, err := convertToTimestamp(value, format)
+		if err != nil {
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse timestamp in %s step: %w", stepName, err))
+		}
+
+		state.Fields[target] = ts
+
+		return nil
+	}
+}
+
 // makeExtractIndexStep extracts the timeseries index.
-// In: config[source,format] - field names
-// Out: TransformationStep - converts to time.Time
-// Ex: makeExtractIndexStep({"source": "ts"}) → step
+// In: config[source,format] - source field, format (default "rfc3339", see convertToTimestamp)
+// Out: TransformationStep - writes time.Time into state.Fields["$timestamp"]
+// Ex: makeExtractIndexStep({"source": "ts", "format": "unix_ms"}) → step
 // Per ADR-005: handles various timestamp formats
 func makeExtractIndexStep(config map[string]interface{}) (TransformationStep, error) {
 	source, ok := config["source"].(string)
@@ -1071,41 +1146,45 @@ func makeExtractIndexStep(config map[string]interface{}) (TransformationStep, er
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_index step requires 'source' string")
 	}
 
-	target := "$timestamp" // Always use $timestamp for the index
+	format, ok := config["format"].(string)
+	if !ok {
+		format = "rfc3339" // Default format
+	}
+
+	// Target is always $timestamp: the reserved index field.
+	return makeTimestampExtraction("extract_index", source, "$timestamp", format), nil
+}
+
+// makeExtractTimestampStep creates a timestamp value-column extraction step.
+// Identical to extract_index except the parsed time.Time lands in a regular
+// output column (a "timestamp"-typed column in the output schema) instead of
+// the reserved $timestamp index field.
+// In: config[source,target,format] - source field, target column, format (default "rfc3339")
+// Out: TransformationStep - writes time.Time into state.Fields[target]
+// Ex: makeExtractTimestampStep({"source": "updated_at", "target": "ingested_at"}) → step
+func makeExtractTimestampStep(config map[string]interface{}) (TransformationStep, error) {
+	source, ok := config["source"].(string)
+	if !ok {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_timestamp step requires 'source' string")
+	}
+
+	target, ok := config["target"].(string)
+	if !ok {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_timestamp step requires 'target' string")
+	}
+
+	// $-prefixed fields ($timestamp, $table) are pipeline-internal; routing the
+	// index through this step would bypass the extract_index structural floor.
+	if strings.HasPrefix(target, "$") {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_timestamp 'target' must not start with '$'; use extract_index for the index")
+	}
 
 	format, ok := config["format"].(string)
 	if !ok {
 		format = "rfc3339" // Default format
 	}
 
-	return func(state *ParseState) error {
-		value, exists := state.Fields[source]
-		if !exists {
-			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in extract_index step", source))
-		}
-
-		var ts time.Time
-		var err error
-
-		switch v := value.(type) {
-		case string:
-			ts, err = parseTimestampString(v, format)
-		case int64:
-			ts = time.Unix(v, 0)
-		case float64:
-			ts = time.Unix(int64(v), 0)
-		default:
-			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("cannot extract index from type %T in extract_index step", value))
-		}
-
-		if err != nil {
-			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to parse index in extract_index step: %w", err))
-		}
-
-		state.Fields[target] = ts
-
-		return nil
-	}, nil
+	return makeTimestampExtraction("extract_timestamp", source, target, format), nil
 }
 
 // makeExtractTableStep creates table name extraction step.
@@ -1635,26 +1714,124 @@ func convertFieldValue(value interface{}, targetType string) (interface{}, error
 	}
 }
 
-// parseTimestampString parses time formats.
-// In: value, format - timestamp string
+// isEpochFormat reports whether format is a unix epoch keyword.
+// In: format string - format name
+// Out: bool - true for unix, unix_ms, unix_us, unix_ns
+// Ex: isEpochFormat("unix_ms") → true
+func isEpochFormat(format string) bool {
+	switch format {
+	case "unix", "unix_ms", "unix_us", "unix_ns":
+		return true
+	default:
+		return false
+	}
+}
+
+// epochIntToTime converts an integer epoch in the format's unit.
+// In: v int64 - epoch count; format - epoch keyword (see isEpochFormat)
+// Out: time.Time - converted timestamp
+// Ex: epochIntToTime(1704110400000, "unix_ms") → 2024-01-01T12:00:00Z
+func epochIntToTime(v int64, format string) time.Time {
+	switch format {
+	case "unix_ms":
+		return time.UnixMilli(v)
+	case "unix_us":
+		return time.UnixMicro(v)
+	case "unix_ns":
+		return time.Unix(0, v)
+	default: // "unix" - epoch seconds
+		return time.Unix(v, 0)
+	}
+}
+
+// epochFloatToTime converts a fractional epoch, preserving the sub-unit
+// fraction as nanoseconds. Computed in int64 nanoseconds, so the representable
+// range is that of time.Unix(0, ns) (years 1678-2262).
+// In: v float64 - epoch count with fraction; format - epoch keyword (see isEpochFormat)
+// Out: time.Time - converted timestamp
+// Ex: epochFloatToTime(1704110400.5, "unix") → 2024-01-01T12:00:00.5Z
+func epochFloatToTime(v float64, format string) time.Time {
+	var unitNanos float64
+	switch format {
+	case "unix_ms":
+		unitNanos = 1e6
+	case "unix_us":
+		unitNanos = 1e3
+	case "unix_ns":
+		unitNanos = 1
+	default: // "unix" - epoch seconds
+		unitNanos = 1e9
+	}
+
+	whole, frac := math.Modf(v)
+
+	return time.Unix(0, int64(whole)*int64(unitNanos)+int64(math.Round(frac*unitNanos)))
+}
+
+// parseTimestampString parses a timestamp string per format.
+// Epoch keywords accept integer and fractional numeric strings; any other
+// format is a date format: rfc3339, rfc3339nano, or a custom Go time layout.
+// In: value, format - timestamp string and format name
 // Out: time.Time - parsed timestamp
-// Ex: parseTimestampString("2024-01-01", "rfc3339") → time
+// Ex: parseTimestampString("1704110400.5", "unix") → 2024-01-01T12:00:00.5Z
 // Per ADR-005: handles various timestamp formats
 func parseTimestampString(value, format string) (time.Time, error) {
+	if isEpochFormat(format) {
+		i, intErr := strconv.ParseInt(value, 10, 64)
+		if intErr == nil {
+			return epochIntToTime(i, format), nil
+		}
+
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return time.Time{}, err
+		}
+
+		return epochFloatToTime(f, format), nil
+	}
+
 	switch format {
 	case "rfc3339":
 		return time.Parse(time.RFC3339, value)
 	case "rfc3339nano":
 		return time.Parse(time.RFC3339Nano, value)
-	case "unix":
-		unix, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return time.Time{}, err
-		}
-
-		return time.Unix(unix, 0), nil
 	default:
 		// Custom format - use Go time layout per ADR-005
 		return time.Parse(format, value)
+	}
+}
+
+// convertToTimestamp converts a pipeline field value to time.Time per format.
+// Epoch keywords (unix, unix_ms, unix_us, unix_ns) apply to numeric input and
+// numeric strings; date formats (rfc3339, rfc3339nano, custom Go layout) apply
+// to strings only. Numeric input with a date format is an error, never an
+// implicit epoch: silently guessing the unit would corrupt data by orders of
+// magnitude (a millisecond epoch read as seconds lands in year 55978).
+// In: value - string|int64|float64|time.Time from state.Fields
+//
+//	format - "rfc3339"|"rfc3339nano"|"unix"|"unix_ms"|"unix_us"|"unix_ns"|Go layout
+//
+// Out: time.Time, error - converted timestamp
+// Ex: convertToTimestamp(1704110400.5, "unix") → 2024-01-01T12:00:00.5Z
+func convertToTimestamp(value interface{}, format string) (time.Time, error) {
+	switch v := value.(type) {
+	case time.Time:
+		return v, nil
+	case string:
+		return parseTimestampString(v, format)
+	case int64:
+		if !isEpochFormat(format) {
+			return time.Time{}, fmt.Errorf("numeric timestamp requires an epoch format (unix, unix_ms, unix_us, unix_ns), got '%s'", format)
+		}
+
+		return epochIntToTime(v, format), nil
+	case float64:
+		if !isEpochFormat(format) {
+			return time.Time{}, fmt.Errorf("numeric timestamp requires an epoch format (unix, unix_ms, unix_us, unix_ns), got '%s'", format)
+		}
+
+		return epochFloatToTime(v, format), nil
+	default:
+		return time.Time{}, fmt.Errorf("cannot convert %T to timestamp", value)
 	}
 }

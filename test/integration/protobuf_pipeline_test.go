@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,8 +228,9 @@ func publishProtoMix(t *testing.T, js nats.JetStreamContext) map[int64]protoRowE
 
 // startConnector loads options from args and runs the connector in a
 // goroutine. The returned stop func cancels, waits for RunWithContext to
-// return (context.Canceled = clean), and Closes. The done channel surfaces
-// early startup failures to poll loops.
+// return (context.Canceled = clean), and Closes. It is idempotent and also
+// registered as a t.Cleanup, so the connector stops on failure paths too.
+// The done channel surfaces early startup failures to poll loops.
 func startConnector(t *testing.T, args []string) (*connector.Connector, <-chan error, func()) {
 	t.Helper()
 
@@ -242,7 +244,7 @@ func startConnector(t *testing.T, args []string) (*connector.Connector, <-chan e
 	done := make(chan error, 1)
 	go func() { done <- conn.RunWithContext(ctx) }()
 
-	stop := func() {
+	stop := sync.OnceFunc(func() {
 		cancel()
 		select {
 		case runErr := <-done:
@@ -253,7 +255,8 @@ func startConnector(t *testing.T, args []string) (*connector.Connector, <-chan e
 			t.Fatal("connector did not stop within 30s")
 		}
 		conn.Close()
-	}
+	})
+	t.Cleanup(stop)
 
 	return conn, done, stop
 }
@@ -381,7 +384,7 @@ func TestProtobufPipelineEndToEnd(t *testing.T) {
 	handle, err := qdb.NewHandle()
 	require.NoError(t, err)
 
-	defer func() { _ = handle.Close() }()
+	t.Cleanup(func() { _ = handle.Close() })
 	require.NoError(t, handle.Connect(protoQDBEndpoint))
 
 	tableName := fmt.Sprintf("test_proto_pipeline_%d", time.Now().UnixNano())

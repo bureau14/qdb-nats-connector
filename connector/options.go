@@ -61,6 +61,12 @@ type Options struct {
 	//   >0: Maximum number of concurrent requests before closing circuit
 	CircuitBreakerHalfOpenMax int `mapstructure:"circuit-breaker-half-open-max"`
 
+	// HealthStuckThreshold: age past which a goroutine blocked inside a
+	// probed pipeline stage, or a persistently failing fetch, is reported
+	// unhealthy. Idle is never unhealthy; deliberately NOT derived from
+	// batch-timeout.
+	HealthStuckThreshold time.Duration `mapstructure:"health-stuck-threshold"`
+
 	// Parser configuration
 	Parser           string `mapstructure:"parser"`
 	ParserConfig     string `mapstructure:"parser-config"`
@@ -139,6 +145,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("circuit-breaker-jitter-max", 100*time.Millisecond)
 	v.SetDefault("circuit-breaker-half-open-base", 1)
 	v.SetDefault("circuit-breaker-half-open-max", 32)
+	v.SetDefault("health-stuck-threshold", 5*time.Minute)
 	v.SetDefault("parser", "noop")
 	v.SetDefault("parser-config", "")
 	v.SetDefault("parse-error-action", "drop")
@@ -184,6 +191,10 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.Duration("circuit-breaker-jitter-max", 100*time.Millisecond, "Maximum jitter for circuit breaker operations")
 	fs.Int("circuit-breaker-half-open-base", 1, "Initial requests allowed in half-open state")
 	fs.Int("circuit-breaker-half-open-max", 32, "Maximum requests before closing circuit")
+
+	// Health monitoring flags
+	fs.Duration("health-stuck-threshold", 5*time.Minute,
+		"Age past which a blocked pipeline stage or persistently failing fetch is reported unhealthy")
 
 	// Parser flags
 	fs.String("parser", "noop", "Parser type: yaml|noop")
@@ -314,6 +325,10 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 
 	if opts.CircuitBreakerJitterMax > opts.CircuitBreakerTimeout/2 {
 		return errors.NewInvalidConfigError("connector", "circuit breaker jitter max cannot exceed half the timeout")
+	}
+
+	if opts.HealthStuckThreshold <= 0 {
+		return errors.NewInvalidConfigError("connector", "health stuck threshold must be positive")
 	}
 
 	// Validate parser configuration

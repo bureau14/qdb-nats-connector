@@ -223,6 +223,109 @@ func TestSourceBindsToUnfilteredConsumer(t *testing.T) {
 	}
 }
 
+// TestSourceFetchReportsDeletedConsumer pins the dead-subscription contract:
+// deleting the durable mid-run surfaces as a typed SubscriptionFailed fetch
+// error (never a silent empty batch), Rebind refuses to auto-create the
+// absent durable, and Rebind succeeds once the durable is re-created.
+func TestSourceFetchReportsDeletedConsumer(t *testing.T) {
+	url := startNatsServer(t, t.TempDir())
+	js := jetStreamContext(t, url)
+
+	streamName := "DELETED_CONSUMER_TEST"
+	consumerName := "deleted-consumer"
+	seedFilterStream(t, js, streamName, "it.deleted.a", "it.deleted.b")
+	addDurablePullConsumer(t, js, streamName, consumerName, "it.deleted.a")
+
+	src := connectSource(t, url, streamName, consumerName)
+
+	subjects := fetchSubjects(t, src)
+	if len(subjects) != 1 {
+		t.Fatalf("got %d messages before deletion, want 1: %v", len(subjects), subjects)
+	}
+
+	err := js.DeleteConsumer(streamName, consumerName)
+	if err != nil {
+		t.Fatalf("failed to delete consumer: %v", err)
+	}
+
+	fetchErr := pollFetchError(t, src, 15*time.Second)
+	if fetchErr == nil {
+		t.Fatal("FetchBatch kept succeeding after consumer deletion, want SubscriptionFailed")
+	}
+	assertSubscriptionFailed(t, fetchErr)
+
+	// Rebind must fail loudly while the durable is absent (no auto-creation).
+	err = src.Rebind(context.Background())
+	if err == nil {
+		t.Fatal("Rebind succeeded with an absent durable, want SubscriptionFailed")
+	}
+	assertSubscriptionFailed(t, err)
+
+	// Re-created durable: Rebind succeeds and messages flow again.
+	addDurablePullConsumer(t, js, streamName, consumerName, "it.deleted.a")
+	err = src.Rebind(context.Background())
+	if err != nil {
+		t.Fatalf("Rebind failed after durable re-creation: %v", err)
+	}
+
+	_, err = js.Publish("it.deleted.a", []byte(`{"probe": 2}`))
+	if err != nil {
+		t.Fatalf("failed to publish post-rebind message: %v", err)
+	}
+
+	if !pollFetchDelivers(t, src, 15*time.Second) {
+		t.Fatal("FetchBatch delivered no messages after successful Rebind")
+	}
+}
+
+// pollFetchError fetches until an error surfaces or the timeout elapses.
+func pollFetchError(t *testing.T, src *source.Source, timeout time.Duration) error {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := src.FetchBatch(context.Background())
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// pollFetchDelivers fetches until a non-empty batch arrives or the timeout
+// elapses.
+func pollFetchDelivers(t *testing.T, src *source.Source, timeout time.Duration) bool {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		batch, err := src.FetchBatch(context.Background())
+		if err != nil {
+			t.Fatalf("FetchBatch failed after rebind: %v", err)
+		}
+		if len(batch.Messages) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// assertSubscriptionFailed asserts err is a ConnectorError with
+// ErrCodeSubscriptionFailed.
+func assertSubscriptionFailed(t *testing.T, err error) {
+	t.Helper()
+
+	var connErr *connectorErrors.ConnectorError
+	if !errors.As(err, &connErr) {
+		t.Fatalf("error is not a ConnectorError: %v", err)
+	}
+	if connErr.Code != connectorErrors.ErrCodeSubscriptionFailed {
+		t.Fatalf("got error code %d, want ErrCodeSubscriptionFailed: %v", connErr.Code, err)
+	}
+}
+
 // TestSourceFailsOnAbsentConsumer pins the no-auto-creation contract: a
 // missing durable is a loud SubscriptionFailed Connect error, not a
 // silently auto-created consumer pulling the whole stream unfiltered.

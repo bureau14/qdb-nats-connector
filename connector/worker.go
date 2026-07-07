@@ -37,10 +37,9 @@ type Worker struct {
 	// redelivery. The parser only classifies; policy is applied here.
 	parseErrorAction string
 
-	// Health tracking
-	mu           sync.RWMutex
-	lastFetch    time.Time
-	batchTimeout time.Duration
+	// Liveness probe around batch processing; sampled by the health
+	// monitor. Cleared (waiting for work) means healthy by definition.
+	probe Probe
 
 	// Shutdown synchronization
 	activeBatches sync.WaitGroup
@@ -120,8 +119,6 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		circuitBreaker:   circuitBreaker,
 		hooks:            opts.Hooks,
 		parseErrorAction: opts.ParseErrorAction,
-		batchTimeout:     opts.NatsBatchTimeout,
-		lastFetch:        time.Now(), // Initialize lastFetch to prevent immediate unhealthy status
 	}, nil
 }
 
@@ -155,15 +152,13 @@ func (w *Worker) Run(ctx context.Context) error {
 				// Channel closed, exit gracefully
 				return nil
 			}
+			w.probe.Begin("process")
 			err := w.processBatchFromChannel(ctx, batch)
+			w.probe.End()
 			if err != nil {
 				// Log error but continue processing
 				slog.Error("Worker error", "worker_id", w.id, "error", err)
 			}
-
-			w.mu.Lock()
-			w.lastFetch = time.Now()
-			w.mu.Unlock()
 		}
 	}
 }
@@ -435,22 +430,6 @@ func firstError(errs []error) error {
 	}
 
 	return errs[0]
-}
-
-// isHealthy verifies processing within 2x batch timeout.
-// In: none
-// Out: bool - true if lastFetch < 2*batchTimeout
-// Ex: isHealthy() → true
-func (w *Worker) isHealthy() bool {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-
-	// Healthy if fetched within 2x batch timeout
-	if time.Since(w.lastFetch) > 2*w.batchTimeout {
-		return false
-	}
-
-	return true
 }
 
 // shutdown closes source/sink connections.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
@@ -435,6 +436,334 @@ func TestYAMLParserTimestamp(t *testing.T) {
 		assert.Equal(t, "events", stripNullTerminator(table.GetName()))
 		assert.Equal(t, 1, table.RowCount())
 	})
+
+	// Test millisecond epoch timestamp parsing
+	t.Run("unix_ms timestamp", func(t *testing.T) {
+		msConfig := config
+		msConfig.Transformations[1].Config["format"] = "unix_ms"
+
+		msParser, err := NewYAMLParserFromConfig(msConfig)
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"ts": 1704110400123, "val": 42.5}`),
+		}
+
+		res, err := msParser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		require.Len(t, res.Tables, 1)
+	})
+
+	// Test nanosecond epoch timestamp parsing. 1704110400000000000 is exactly
+	// representable as float64 (divisible by 512), so the JSON float64 path is
+	// lossless for this value.
+	t.Run("unix_ns timestamp", func(t *testing.T) {
+		nsConfig := config
+		nsConfig.Transformations[1].Config["format"] = "unix_ns"
+
+		nsParser, err := NewYAMLParserFromConfig(nsConfig)
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"ts": 1704110400000000000, "val": 42.5}`),
+		}
+
+		res, err := nsParser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		require.Len(t, res.Tables, 1)
+	})
+
+	// Regression pin: numeric input with a date format is an error, never an
+	// implicit unix-seconds interpretation. For extract_index that makes the
+	// message structurally unusable.
+	t.Run("numeric with date format is unusable", func(t *testing.T) {
+		dateConfig := config
+		dateConfig.Transformations[1].Config["format"] = "rfc3339"
+
+		dateParser, err := NewYAMLParserFromConfig(dateConfig)
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"ts": 1704110400, "val": 42.5}`),
+		}
+
+		res, err := dateParser.Parse(msg)
+		requireUnusable(t, res, err)
+		assert.True(t, errorsContain(res.Errors, "epoch format"))
+	})
+}
+
+// TestConvertToTimestamp validates the shared conversion helper used by the
+// extract_index and extract_timestamp steps.
+func TestConvertToTimestamp(t *testing.T) {
+	base := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC) // epoch 1704110400
+
+	t.Run("valid conversions", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			value  interface{}
+			format string
+			want   time.Time
+		}{
+			{"string rfc3339", "2024-01-01T12:00:00Z", "rfc3339", base},
+			{"string rfc3339nano", "2024-01-01T12:00:00.123456789Z", "rfc3339nano", base.Add(123456789 * time.Nanosecond)},
+			{"string custom layout", "2024-01-01 12:00:00", "2006-01-02 15:04:05", base},
+			{"string unix", "1704110400", "unix", base},
+			{"string unix_ms", "1704110400123", "unix_ms", base.Add(123 * time.Millisecond)},
+			{"string unix_us", "1704110400123456", "unix_us", base.Add(123456 * time.Microsecond)},
+			{"string unix_ns", "1704110400123456789", "unix_ns", base.Add(123456789 * time.Nanosecond)},
+			{"string fractional unix", "1704110400.5", "unix", base.Add(500 * time.Millisecond)},
+			{"int64 unix", int64(1704110400), "unix", base},
+			{"int64 unix_ms", int64(1704110400123), "unix_ms", time.UnixMilli(1704110400123)},
+			{"int64 unix_us", int64(1704110400123456), "unix_us", time.UnixMicro(1704110400123456)},
+			{"int64 unix_ns", int64(1704110400123456789), "unix_ns", base.Add(123456789 * time.Nanosecond)},
+			{"float64 unix fraction", 1704110400.5, "unix", base.Add(500 * time.Millisecond)},
+			{"float64 unix_ms fraction", 1704110400123.25, "unix_ms", base.Add(123*time.Millisecond + 250*time.Microsecond)},
+			{"float64 unix_us fraction", 1704110400123456.5, "unix_us", base.Add(123456*time.Microsecond + 500*time.Nanosecond)},
+			{"float64 unix_ns rounds", 1704110400000000000.0, "unix_ns", base},
+			{"time.Time pass-through", base, "rfc3339", base},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				got, err := convertToTimestamp(c.value, c.format)
+				require.NoError(t, err)
+				assert.True(t, got.Equal(c.want), "got %v, want %v", got, c.want)
+			})
+		}
+	})
+
+	t.Run("errors", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			value  interface{}
+			format string
+		}{
+			{"garbage string", "not-a-timestamp", "rfc3339"},
+			{"garbage string epoch", "not-a-number", "unix"},
+			{"int64 with rfc3339", int64(1704110400), "rfc3339"},
+			{"int64 with custom layout", int64(1704110400), "2006-01-02 15:04:05"},
+			{"float64 with rfc3339", 1704110400.0, "rfc3339"},
+			{"unsupported type", []byte("2024-01-01"), "rfc3339"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				_, err := convertToTimestamp(c.value, c.format)
+				require.Error(t, err)
+			})
+		}
+	})
+
+	// Property: an instant formatted as RFC3339Nano and expressed as an int64
+	// nanosecond epoch both round-trip to the same instant.
+	t.Run("property epoch round-trip", func(t *testing.T) {
+		rapid.Check(t, func(rt *rapid.T) {
+			sec := rapid.Int64Range(0, 4102444800).Draw(rt, "sec") // 1970..2100
+			nano := rapid.Int64Range(0, 999999999).Draw(rt, "nano")
+			want := time.Unix(sec, nano).UTC()
+
+			viaString, err := convertToTimestamp(want.Format(time.RFC3339Nano), "rfc3339nano")
+			require.NoError(rt, err)
+
+			viaNanos, err := convertToTimestamp(want.UnixNano(), "unix_ns")
+			require.NoError(rt, err)
+
+			assert.Equal(rt, want.UnixNano(), viaString.UnixNano())
+			assert.Equal(rt, want.UnixNano(), viaNanos.UnixNano())
+		})
+	})
+}
+
+// TestYAMLParserExtractTimestamp validates the extract_timestamp value-column step
+func TestYAMLParserExtractTimestamp(t *testing.T) {
+	makeConfig := func(format string) YAMLConfig {
+		return YAMLConfig{
+			Output: OutputSchema{
+				Columns: []ColumnSchema{
+					{Name: "ingested_at", Type: "timestamp"},
+					{Name: "value", Type: "double"},
+				},
+			},
+			Transformations: []TransformSpec{
+				{Step: "parse_json", Config: map[string]interface{}{}},
+				{Step: "extract_timestamp", Config: map[string]interface{}{
+					"source": "event_ts",
+					"target": "ingested_at",
+					"format": format,
+				}},
+				{Step: "extract_field", Config: map[string]interface{}{
+					"source": "val",
+					"target": "value",
+					"type":   "float64",
+				}},
+				{Step: "extract_table", Config: map[string]interface{}{"value": "events"}},
+			},
+		}
+	}
+
+	t.Run("step writes time.Time to target field", func(t *testing.T) {
+		step, err := makeExtractTimestampStep(map[string]interface{}{
+			"source": "event_ts",
+			"target": "ingested_at",
+			"format": "rfc3339",
+		})
+		require.NoError(t, err)
+
+		state := &ParseState{Fields: map[string]interface{}{"event_ts": "2024-01-01T12:00:00Z"}}
+		require.NoError(t, step(state))
+
+		ts, ok := state.Fields["ingested_at"].(time.Time)
+		require.True(t, ok, "target field must hold a time.Time")
+		assert.True(t, ts.Equal(time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)))
+	})
+
+	t.Run("rfc3339 string source", func(t *testing.T) {
+		parser, err := NewYAMLParserFromConfig(makeConfig("rfc3339"))
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"event_ts": "2024-01-01T12:00:00Z", "val": 42.5}`),
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		require.Len(t, res.Tables, 1)
+		assert.Equal(t, 1, res.Tables[0].RowCount())
+	})
+
+	// parse_json decodes all JSON numbers as float64: this is the hot path
+	// for numeric timestamp columns.
+	t.Run("numeric source via parse_json", func(t *testing.T) {
+		for format, payload := range map[string]string{
+			"unix":    `{"event_ts": 1704110400.5, "val": 42.5}`,
+			"unix_ms": `{"event_ts": 1704110400123, "val": 42.5}`,
+		} {
+			parser, err := NewYAMLParserFromConfig(makeConfig(format))
+			require.NoError(t, err)
+
+			res, err := parser.Parse(&nats.Msg{Subject: util.RandomTopicName(), Data: []byte(payload)})
+			require.NoError(t, err)
+			assert.Equal(t, OutcomeOK, res.Outcome, "format %s", format)
+			require.Len(t, res.Tables, 1)
+		}
+	})
+
+	// A failed extract_timestamp is a field-level failure: the row is still
+	// written (Partial) with the MinTimespec null sentinel, unlike a failed
+	// extract_index which makes the whole message unusable.
+	t.Run("missing source is partial", func(t *testing.T) {
+		parser, err := NewYAMLParserFromConfig(makeConfig("rfc3339"))
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"val": 42.5}`),
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomePartial, res.Outcome)
+		require.Len(t, res.Tables, 1)
+		assert.True(t, errorsContain(res.Errors, "extract_timestamp"))
+	})
+
+	t.Run("numeric with date format is partial", func(t *testing.T) {
+		parser, err := NewYAMLParserFromConfig(makeConfig("rfc3339"))
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"event_ts": 1704110400, "val": 42.5}`),
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomePartial, res.Outcome)
+		require.Len(t, res.Tables, 1)
+		assert.True(t, errorsContain(res.Errors, "epoch format"))
+	})
+
+	t.Run("config validation", func(t *testing.T) {
+		_, err := makeExtractTimestampStep(map[string]interface{}{"target": "x"})
+		require.Error(t, err, "missing source must be rejected")
+
+		_, err = makeExtractTimestampStep(map[string]interface{}{"source": "x"})
+		require.Error(t, err, "missing target must be rejected")
+
+		_, err = makeExtractTimestampStep(map[string]interface{}{"source": "x", "target": "$timestamp"})
+		require.Error(t, err, "reserved $-prefixed target must be rejected")
+	})
+}
+
+// TestYAMLParserSymbolColumn validates symbol column configuration and writing
+func TestYAMLParserSymbolColumn(t *testing.T) {
+	t.Run("symbol type maps to TsColumnSymbol", func(t *testing.T) {
+		assert.True(t, isValidColumnType("symbol"))
+		assert.Equal(t, qdb.TsColumnSymbol, stringToColumnType("symbol"))
+	})
+
+	// The batch push data_type is the CLIENT-side type: symbols travel as
+	// strings, everything else maps to itself.
+	t.Run("writer data type maps symbol to string", func(t *testing.T) {
+		assert.Equal(t, qdb.TsColumnString, writerDataType(qdb.TsColumnSymbol))
+		assert.Equal(t, qdb.TsColumnDouble, writerDataType(qdb.TsColumnDouble))
+
+		writerCols, colTypes, err := createColumnMapping([]ColumnSchema{{Name: "s", Type: "symbol"}})
+		require.NoError(t, err)
+		assert.Equal(t, qdb.TsColumnString, writerCols[0].ColumnType)
+		assert.Equal(t, qdb.TsColumnSymbol, colTypes[0])
+	})
+
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "stock_id", Type: "symbol"},
+				{Name: "price", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json", Config: map[string]interface{}{}},
+			{Step: "extract_index", Config: map[string]interface{}{
+				"source": "ts",
+				"format": "unix",
+			}},
+			{Step: "extract_table", Config: map[string]interface{}{"value": "trades"}},
+		},
+	}
+
+	parser, err := NewYAMLParserFromConfig(config)
+	require.NoError(t, err)
+
+	t.Run("symbol column written from string field", func(t *testing.T) {
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"stock_id": "AAPL", "price": 123.45, "ts": 1704110400}`),
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		require.Len(t, res.Tables, 1)
+		assert.Equal(t, 1, res.Tables[0].RowCount())
+	})
+
+	t.Run("missing symbol field falls back to empty sentinel", func(t *testing.T) {
+		msg := &nats.Msg{
+			Subject: util.RandomTopicName(),
+			Data:    []byte(`{"price": 123.45, "ts": 1704110400}`),
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		require.Len(t, res.Tables, 1)
+		assert.Equal(t, 1, res.Tables[0].RowCount())
+	})
 }
 
 // TestYAMLParserComputeField validates computed field operations
@@ -839,6 +1168,7 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 					{Name: "string_col", Type: "string"},
 					{Name: "blob_col", Type: "blob"},
 					{Name: "timestamp_col", Type: "timestamp"},
+					{Name: "symbol_col", Type: "symbol"},
 				},
 			},
 			Transformations: []TransformSpec{
@@ -857,13 +1187,13 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify that column count matches buffer allocation
-		assert.Equal(t, 5, len(parser.columns))
-		assert.Equal(t, 5, len(parser.columnTypes))
+		assert.Equal(t, 6, len(parser.columns))
+		assert.Equal(t, 6, len(parser.columnTypes))
 
-		// Test with data for all column types
+		// Test with data for all column types (symbols share stringVals)
 		msg := &nats.Msg{
 			Subject: util.RandomTopicName(),
-			Data:    []byte(`{"double_col": 42.5, "int64_col": 123, "string_col": "test", "blob_col": "YmluYXJ5", "ts": 1704110400}`),
+			Data:    []byte(`{"double_col": 42.5, "int64_col": 123, "string_col": "test", "blob_col": "YmluYXJ5", "symbol_col": "sym_a", "ts": 1704110400}`),
 		}
 
 		// Parse and verify no buffer overflow occurs
@@ -874,11 +1204,11 @@ func TestYAMLParserColumnMismatch(t *testing.T) {
 
 		// Verify parse state buffer allocation by inspecting new state
 		state := parser.newParseState()
-		assert.Equal(t, 5, len(state.doubleVals))
-		assert.Equal(t, 5, len(state.int64Vals))
-		assert.Equal(t, 5, len(state.stringVals))
-		assert.Equal(t, 5, len(state.blobVals))
-		assert.Equal(t, 5, len(state.timestampVals))
+		assert.Equal(t, 6, len(state.doubleVals))
+		assert.Equal(t, 6, len(state.int64Vals))
+		assert.Equal(t, 6, len(state.stringVals))
+		assert.Equal(t, 6, len(state.blobVals))
+		assert.Equal(t, 6, len(state.timestampVals))
 	})
 
 	t.Run("column name consistency validation", func(t *testing.T) {

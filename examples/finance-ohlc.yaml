@@ -1,12 +1,13 @@
 # Finance OHLC market data YAML parser configuration
 # Routes data to exchange-specific tables: finance.{exchange}.{symbol}
-# Demonstrates dynamic table routing based on message content
-# Example: AAPL on NASDAQ → "finance.NASDAQ.AAPL", MSFT on NYSE → "finance.NYSE.MSFT"
+# Demonstrates dynamic table routing based on message content,
+# a symbol column (stock_id) and a timestamp value column (event_time)
+# Example: AAPL on NASDAQ -> "finance.NASDAQ.AAPL", MSFT on NYSE -> "finance.NYSE.MSFT"
 
 output:
   columns:
     - name: "stock_id"
-      type: "string"
+      type: "symbol"
     - name: "open"
       type: "double"
     - name: "high"
@@ -19,6 +20,8 @@ output:
       type: "int64"
     - name: "trading_pair"
       type: "string"
+    - name: "event_time"
+      type: "timestamp"
 
 transformations:
   # Decompress gzipped message first
@@ -59,6 +62,13 @@ transformations:
   - step: "extract_index"
     config:
       source: "timestamp"
+      format: "2006-01-02T15:04:05Z"
+
+  # Also store the event time as a regular timestamp value column
+  - step: "extract_timestamp"
+    config:
+      source: "timestamp"
+      target: "event_time"
       format: "2006-01-02T15:04:05Z"
 
   # Extract OHLC price data

@@ -146,10 +146,16 @@ func CreateTableFromSchema(handle qdb.HandleType, schema *TableSchema) error {
 	// Get the timeseries entry for this table name
 	table := handle.Table(schema.Name)
 
-	// Convert schema.Columns to []qdb.TsColumnInfo
+	// Convert schema.Columns to []qdb.TsColumnInfo. Symbol columns need a
+	// symtable name at creation time; derive one deterministically per column.
 	columns := make([]qdb.TsColumnInfo, len(schema.Columns))
 	for i, col := range schema.Columns {
-		columns[i] = qdb.NewTsColumnInfo(col.ColumnName, col.ColumnType)
+		name := strings.TrimSuffix(col.ColumnName, "\x00")
+		if col.ColumnType == qdb.TsColumnSymbol {
+			columns[i] = qdb.NewSymbolColumnInfo(name, schema.Name+"_sym_"+name)
+		} else {
+			columns[i] = qdb.NewTsColumnInfo(name, col.ColumnType)
+		}
 	}
 
 	// Create table with 24-hour shard size
@@ -247,7 +253,9 @@ func ReadAllData(handle qdb.HandleType, tableName string) (*ColumnDataSet, error
 				} else {
 					value = string(blobData)
 				}
-			case qdb.TsColumnTypes[3]: // string type
+			case qdb.TsColumnTypes[3], qdb.TsColumnTypes[5]: // string and symbol types
+				// Symbols are strings client-side (TsValueString), so both
+				// read back through GetString.
 				stringData, err := bulk.GetString()
 				if err != nil {
 					value = "" // Default for missing/error values

@@ -7,7 +7,7 @@ This directory contains example configurations and test scenarios demonstrating 
 ### 1. Finance OHLC Market Data (`finance-ohlc`)
 
 - **Use Case**: Real-time financial market data ingestion
-- **Features**: Dynamic table routing based on exchange/symbol, compressed data handling
+- **Features**: Dynamic table routing based on exchange/symbol, compressed data handling, symbol column (`stock_id`), timestamp value column (`event_time` via `extract_timestamp`)
 - **Tables**: `finance.NASDAQ.AAPL`, `finance.NASDAQ.GOOGL`, etc.
 
 ### 2. Industrial Sensor Monitoring (`industrial-sensor`)

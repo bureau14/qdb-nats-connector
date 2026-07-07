@@ -6,8 +6,9 @@
 // into a hermetic JetStream, consumed by the full connector, decoded by the
 // composed SKF-shaped YAML pipeline (parse_protobuf x2, extract_map_entry
 // allowed_keys capability filter, extract_subject, compute_field split),
-// written to a real QuasarDB table. Pins the three outcome classes
-// end-to-end under --parse-error-action drop:
+// written to a real QuasarDB table (including a symbol column for the
+// stream token and a timestamp value column filled via extract_timestamp).
+// Pins the three outcome classes end-to-end under --parse-error-action drop:
 //   - valid messages   -> exact rows, nanosecond-exact index
 //   - malformed wire   -> structural drop (counted, no row)
 //   - disallowed key   -> structural drop at extract_map_entry (counted)
@@ -39,9 +40,11 @@ const (
 	protoStreamName   = "PROTO_IT"
 	protoConsumerName = "proto-it-consumer"
 	protoSubject      = "it.proto.1.0.ion.streams.ABCDEFG=.value"
-	// updated_at for every message: renders as a fixed 9-digit RFC3339
-	// string through formatProtoTimestamp.
-	protoIngestedAt = "2023-11-14T22:13:21.000000042Z"
+	// updated_at for every message: renders as a fixed 9-digit RFC3339 string
+	// through formatProtoTimestamp, then lands in the ingested_at timestamp
+	// column via extract_timestamp.
+	protoIngestedAtSec  = 1700000001
+	protoIngestedAtNano = 42
 )
 
 // protoRowExpect describes one expected row keyed by its index timestamp.
@@ -51,7 +54,7 @@ type protoRowExpect struct {
 	capability int64
 	revision   int64
 	streamID   string
-	ingestedAt string
+	ingestedAt time.Time
 }
 
 // protoPipelineYAML renders the composed SKF-shaped pipeline config with a
@@ -61,7 +64,7 @@ func protoPipelineYAML(tableName string) string {
 output:
   columns:
     - name: "stream_token"
-      type: "string"
+      type: "symbol"
     - name: "value"
       type: "double"
     - name: "capability_key"
@@ -71,7 +74,7 @@ output:
     - name: "stream_id"
       type: "string"
     - name: "ingested_at"
-      type: "string"
+      type: "timestamp"
 
 transformations:
   - step: "parse_protobuf"
@@ -120,8 +123,8 @@ transformations:
     config: { source: "revision_raw", target: "revision", type: "int64" }
   - step: "extract_field"
     config: { source: "name", target: "stream_id", type: "string" }
-  - step: "extract_field"
-    config: { source: "updated_at", target: "ingested_at", type: "string" }
+  - step: "extract_timestamp"
+    config: { source: "updated_at", target: "ingested_at", format: "rfc3339nano" }
 `
 }
 
@@ -145,12 +148,12 @@ func createProtoTable(t *testing.T, handle qdb.HandleType, tableName string) []q
 	t.Helper()
 
 	cols := []qdb.TsColumnInfo{
-		qdb.NewTsColumnInfo("stream_token", qdb.TsColumnString),
+		qdb.NewSymbolColumnInfo("stream_token", tableName+"_sym"),
 		qdb.NewTsColumnInfo("value", qdb.TsColumnDouble),
 		qdb.NewTsColumnInfo("capability_key", qdb.TsColumnInt64),
 		qdb.NewTsColumnInfo("revision", qdb.TsColumnInt64),
 		qdb.NewTsColumnInfo("stream_id", qdb.TsColumnString),
-		qdb.NewTsColumnInfo("ingested_at", qdb.TsColumnString),
+		qdb.NewTsColumnInfo("ingested_at", qdb.TsColumnTimestamp),
 	}
 
 	table := handle.Table(tableName)
@@ -161,7 +164,7 @@ func createProtoTable(t *testing.T, handle qdb.HandleType, tableName string) []q
 }
 
 // protoEnvelope marshals a pipeline-shaped envelope: name, one blobs entry,
-// and both timestamps (updated_at fixed at the protoIngestedAt instant).
+// and both timestamps (updated_at fixed at the protoIngestedAt* instant).
 func protoEnvelope(t *testing.T, name string, blobKey int32, blobValue []byte, sec int64, nanos int32) []byte {
 	t.Helper()
 
@@ -169,7 +172,7 @@ func protoEnvelope(t *testing.T, name string, blobKey int32, blobValue []byte, s
 		prototest.SetStringField(m, "name", name)
 		prototest.SetBlobsEntry(m, blobKey, blobValue)
 		prototest.SetTimestampField(m, "created_at", sec, nanos)
-		prototest.SetTimestampField(m, "updated_at", 1700000001, 42)
+		prototest.SetTimestampField(m, "updated_at", protoIngestedAtSec, protoIngestedAtNano)
 	})
 }
 
@@ -196,7 +199,8 @@ func publishProtoMix(t *testing.T, js nats.JetStreamContext) map[int64]protoRowE
 		publish(protoEnvelope(t, name, 3, prototest.MarshalInner(t, reading, "mm"), sec, nanos))
 		expected[time.Unix(sec, int64(nanos)).UnixNano()] = protoRowExpect{
 			token: "ABCDEFG", value: reading, capability: 3,
-			revision: int64(n), streamID: name, ingestedAt: protoIngestedAt,
+			revision: int64(n), streamID: name,
+			ingestedAt: time.Unix(protoIngestedAtSec, protoIngestedAtNano),
 		}
 
 		switch n {
@@ -215,7 +219,8 @@ func publishProtoMix(t *testing.T, js nats.JetStreamContext) map[int64]protoRowE
 	publish(protoEnvelope(t, "x:y:9", 3, wrongInner, 1700000100, 777000111))
 	expected[time.Unix(1700000100, 777000111).UnixNano()] = protoRowExpect{
 		token: "ABCDEFG", value: math.NaN(), capability: 3,
-		revision: 9, streamID: "x:y:9", ingestedAt: protoIngestedAt,
+		revision: 9, streamID: "x:y:9",
+		ingestedAt: time.Unix(protoIngestedAtSec, protoIngestedAtNano),
 	}
 
 	return expected
@@ -309,7 +314,8 @@ func readProtoRows(t *testing.T, handle qdb.HandleType, tableName string,
 		row.capability = mustGetInt64(t, bulk)
 		row.revision = mustGetInt64(t, bulk)
 		row.streamID = mustGetString(t, bulk)
-		row.ingestedAt = mustGetString(t, bulk)
+		row.ingestedAt, err = bulk.GetTimestamp()
+		require.NoError(t, err)
 
 		rows[ts.UnixNano()] = row
 	}
@@ -350,7 +356,8 @@ func assertProtoRows(t *testing.T, expected, actual map[int64]protoRowExpect) {
 		assert.Equal(t, want.capability, got.capability, "capability_key at %d", key)
 		assert.Equal(t, want.revision, got.revision, "revision at %d", key)
 		assert.Equal(t, want.streamID, got.streamID, "stream_id at %d", key)
-		assert.Equal(t, want.ingestedAt, got.ingestedAt, "ingested_at at %d", key)
+		assert.True(t, want.ingestedAt.Equal(got.ingestedAt),
+			"ingested_at at %d: want %v, got %v", key, want.ingestedAt, got.ingestedAt)
 
 		if math.IsNaN(want.value) {
 			assert.True(t, math.IsNaN(got.value), "value at %d: want NaN sentinel, got %v", key, got.value)

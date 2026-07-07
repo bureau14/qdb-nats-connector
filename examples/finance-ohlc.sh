@@ -134,7 +134,10 @@ action_create() {
         drop_table_if_exists "$table_name"
     done
 
-    local table_schema="(\$timestamp TIMESTAMP, stock_id STRING, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64, trading_pair STRING)"
+    # stock_id is a symbol column (shared finance_symbols symtable across the
+    # dynamic tables); event_time is a timestamp value column filled by the
+    # extract_timestamp parser step.
+    local table_schema="(\$timestamp TIMESTAMP, stock_id SYMBOL(finance_symbols), open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume INT64, trading_pair STRING, event_time TIMESTAMP)"
 
     # Create each dynamic table
     for table_name in "${DYNAMIC_TABLES[@]}"; do

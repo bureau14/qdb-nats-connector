@@ -4,12 +4,12 @@
     {
       "name": "finance-ohlc",
       "num_messages": 10000,
-      "date": "2026-05-29"
+      "date": "2026-07-07"
     },
     {
       "name": "finance-ohlc",
       "num_messages": 100000,
-      "date": "2026-05-29"
+      "date": "2026-07-07"
     },
     {
       "name": "finance-ohlc",

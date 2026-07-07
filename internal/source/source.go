@@ -22,11 +22,14 @@ import (
 // JetStream: JS context for pull subscriptions
 // Subscription: active pull subscription
 // Options: connection & batch configuration
+// filterSubject: durable's FilterSubject resolved at Connect, reused by Rebind
 type Source struct {
 	NatsConn     *nats.Conn
 	JetStream    nats.JetStreamContext
 	Subscription *nats.Subscription
 	Options      Options
+
+	filterSubject string
 }
 
 // MessageInfo: NATS message with sequence number. Needed for selective ACK/NACK operations.
@@ -188,6 +191,7 @@ func (s *Source) Connect(ctx context.Context) error {
 
 		return err
 	}
+	s.filterSubject = filterSubject
 
 	// Create pull subscription
 	slog.Info("Creating JetStream pull subscription",
@@ -195,13 +199,11 @@ func (s *Source) Connect(ctx context.Context) error {
 		"consumer", s.Options.ConsumerName,
 		"filter_subject", filterSubject)
 
-	sub, err := js.PullSubscribe(filterSubject, s.Options.ConsumerName,
-		nats.BindStream(s.Options.StreamName),
-	)
+	sub, err := s.bindPullSubscription()
 	if err != nil {
 		slog.Error("Failed to create pull subscription", "error", err)
 
-		return errors.NewSubscriptionFailedError("source", s.Options.ConsumerName, err)
+		return err
 	}
 	s.Subscription = sub
 
@@ -210,28 +212,60 @@ func (s *Source) Connect(ctx context.Context) error {
 	return nil
 }
 
-// isExpectedFetchErr reports whether a pull-subscription Fetch error is a normal
-// no-data or post-drain lifecycle condition rather than a real failure. A
-// long-running puller must treat these as "no messages this round", not abort:
-//   - ErrTimeout: nothing arrived within MaxWait (steady state when caught up).
-//   - The pull subscription was torn down after the stream drained, after which
-//     Fetch reports an invalid/closed subscription (IsValid() == false).
-//   - The connection is closing/draining (graceful shutdown).
-//
-// Note: this does not re-establish a dropped subscription; it only keeps the
-// connector healthy. Automatic re-subscription is left for a follow-up.
-func isExpectedFetchErr(err error, sub *nats.Subscription) bool {
-	if err == nats.ErrTimeout {
-		return true
+// Rebind replaces a dead pull subscription by re-binding to the pre-created
+// durable using the filterSubject stored at Connect. Never creates consumers
+// (nats.Bind); the NATS client reconnects the connection layer itself, this
+// only replaces the dead pull subscription object. Single-owner: must be
+// called from the fetch goroutine only.
+// In: ctx context.Context - cancellation
+// Out: error - nil on success, SubscriptionFailed while durable is absent
+// Ex: Rebind(ctx) → nil (subscription replaced)
+func (s *Source) Rebind(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
+
+	if s.Subscription != nil {
+		// Best-effort teardown of the dead subscription object.
+		_ = s.Subscription.Unsubscribe()
+	}
+
+	sub, err := s.bindPullSubscription()
+	if err != nil {
+		return err
+	}
+	s.Subscription = sub
+
+	return nil
+}
+
+// isNoData reports whether a Fetch error means "no messages this round":
+// nothing arrived within MaxWait (steady state when caught up). This is the
+// only benign fetch error; a healthy-but-idle stream produces it forever.
+func isNoData(err error) bool {
+	return stderrors.Is(err, nats.ErrTimeout)
+}
+
+// isSubscriptionDead reports whether a Fetch error means the pull
+// subscription no longer delivers and must be re-bound:
+//   - The consumer was deleted: ErrConsumerDeleted (409 on an in-flight
+//     pull) then ErrNoResponders (503 on every later pull).
+//   - The pull subscription was torn down: invalid/closed/bad subscription.
+//   - The connection was closed/draining outside graceful shutdown (the
+//     fetch loop exits on context cancellation before these can surface
+//     during shutdown).
+//
+// These must never be masked as empty batches: a dead subscription returns
+// quickly and forever, which is indistinguishable from a quiet stream.
+func isSubscriptionDead(err error, sub *nats.Subscription) bool {
 	if sub != nil && !sub.IsValid() {
 		return true
 	}
 
-	// ErrBadSubscription / ErrSubscriptionClosed are reported by Fetch at the
-	// JetStream layer once the pull subscription is torn down after the stream
-	// drains -- even while the core subscription still reports IsValid().
-	if stderrors.Is(err, nats.ErrBadSubscription) ||
+	if stderrors.Is(err, nats.ErrConsumerDeleted) ||
+		stderrors.Is(err, nats.ErrNoResponders) ||
+		stderrors.Is(err, nats.ErrConsumerNotFound) ||
+		stderrors.Is(err, nats.ErrBadSubscription) ||
 		stderrors.Is(err, nats.ErrSubscriptionClosed) ||
 		stderrors.Is(err, nats.ErrConnectionClosed) ||
 		stderrors.Is(err, nats.ErrConnectionDraining) {
@@ -239,8 +273,8 @@ func isExpectedFetchErr(err error, sub *nats.Subscription) bool {
 	}
 
 	// Fallback: the JetStream Fetch path combines these into an error whose
-	// chain errors.Is does not reliably traverse; match the well-known benign
-	// messages directly so a drained subscription is never treated as fatal.
+	// chain errors.Is does not reliably traverse; match the well-known
+	// messages directly so a dead subscription is never misclassified.
 	msg := err.Error()
 
 	return strings.Contains(msg, "invalid subscription") ||
@@ -260,11 +294,16 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 	msgs, err := s.Subscription.Fetch(s.Options.BatchSize,
 		nats.MaxWait(s.Options.BatchTimeout))
 	if err != nil {
-		// No-data and post-drain lifecycle conditions are expected for a
-		// long-running puller and must not be fatal -- report them as an empty
-		// batch so the fetch loop keeps polling without logging an error.
-		if isExpectedFetchErr(err, s.Subscription) {
+		// No data within MaxWait is the steady state when caught up --
+		// report an empty batch so the fetch loop keeps polling quietly.
+		if isNoData(err) {
 			return &MessageBatch{Messages: []MessageInfo{}}, nil
+		}
+
+		// A dead pull subscription returns quickly and forever; surface it
+		// as a typed error so the fetch loop can re-bind to the durable.
+		if isSubscriptionDead(err, s.Subscription) {
+			return nil, errors.NewSubscriptionFailedError("source", s.Options.ConsumerName, err)
 		}
 
 		return nil, errors.NewConnectionFailedError("source", "fetch", err)
@@ -301,6 +340,24 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 	}
 
 	return batch, nil
+}
+
+// bindPullSubscription binds a pull subscription to the pre-created durable.
+// nats.Bind (not BindStream) is essential: with only BindStream, nats.go
+// auto-creates a missing durable on PullSubscribe -- violating the
+// never-create contract -- whereas Bind surfaces ErrConsumerNotFound.
+// In: none - uses JetStream context + filterSubject stored at Connect
+// Out: *nats.Subscription, error - bound subscription or SubscriptionFailed
+// Ex: bindPullSubscription() → sub, nil
+func (s *Source) bindPullSubscription() (*nats.Subscription, error) {
+	sub, err := s.JetStream.PullSubscribe(s.filterSubject, s.Options.ConsumerName,
+		nats.Bind(s.Options.StreamName, s.Options.ConsumerName),
+	)
+	if err != nil {
+		return nil, errors.NewSubscriptionFailedError("source", s.Options.ConsumerName, err)
+	}
+
+	return sub, nil
 }
 
 // ackMessages acknowledges messages by sequence number.

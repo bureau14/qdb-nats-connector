@@ -3,7 +3,7 @@ module github.com/bureau14/qdb-nats-connector
 go 1.25.0
 
 require (
-	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260707044020-a39226d58322
+	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260707072009-1675a4d77067
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.51.0
 	github.com/spf13/pflag v1.0.10

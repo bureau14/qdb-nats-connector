@@ -1,4 +1,4 @@
-# github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260707044020-a39226d58322
+# github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260707072009-1675a4d77067
 ## explicit; go 1.23.0
 github.com/bureau14/qdb-api-go/v3
 # github.com/davecgh/go-spew v1.1.1

@@ -66,7 +66,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -385,10 +384,6 @@ func (p *YAMLParser) checkStructuralFloor(state *ParseState) (string, error) {
 	// directly by an extract_field step, bypassing extract_table's own
 	// validation when that step failed.
 	trimmed := strings.TrimSuffix(tableName, "\x00")
-	if trimmed == "" {
-		return "", connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name cannot be empty"))
-	}
 
 	err := validateTableName(trimmed)
 	if err != nil {
@@ -810,33 +805,24 @@ func hasStep(specs []TransformSpec, name string) bool {
 	return false
 }
 
-// validateTableName validates table name for security
-// Prevents injection attacks and ensures safe table names
-// Rules: alphanumeric start, alphanumeric/dots/underscores/hyphens only, max 255 chars
-// No path traversal patterns (.., /, \)
-var tableNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$`)
-
+// validateTableName enforces the minimal table name contract.
+// QuasarDB accepts liberal names (GP shards are "skf/<hex>"); the
+// connector must not be more restrictive. Callers pass the name with
+// the \x00 terminator already trimmed.
+// In: tableName string - table name without \x00 terminator
+// Out: error if empty or first character is not alphanumeric
+// Ex: validateTableName("skf/b831") -> nil
 func validateTableName(tableName string) error {
 	if tableName == "" {
 		return connectorErrors.NewParsingFailedError("yaml_parser",
 			fmt.Errorf("table name cannot be empty"))
 	}
 
-	if len(tableName) > 255 {
+	c := tableName[0]
+	isAlnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	if !isAlnum {
 		return connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name too long: %d characters (max 255)", len(tableName)))
-	}
-
-	// Check for path traversal patterns
-	if strings.Contains(tableName, "..") || strings.Contains(tableName, "/") || strings.Contains(tableName, "\\") {
-		return connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name contains invalid path traversal patterns: %s", tableName))
-	}
-
-	// Validate against secure regex pattern
-	if !tableNameRegex.MatchString(tableName) {
-		return connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name '%s' contains invalid characters or format - only alphanumeric, dots, underscores, and hyphens allowed", tableName))
+			fmt.Errorf("table name must start with an alphanumeric character: %s", tableName))
 	}
 
 	return nil

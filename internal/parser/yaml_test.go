@@ -1801,15 +1801,17 @@ func TestYAMLParser_MissingSourceField(t *testing.T) {
 }
 
 // TestYAMLParser_TableNameSecurityValidation tests security validation for table names
-func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
-	// Test cases for malicious/invalid table names
+func TestYAMLParser_TableNameValidation(t *testing.T) {
+	// Only two rules: non-empty, first character alphanumeric.
+	// Everything else (slashes, dots, spaces, any length) is accepted;
+	// QuasarDB is liberal and the connector must not be more restrictive.
 	testCases := []struct {
 		name       string
 		tableName  string
 		shouldFail bool
 		errorMsg   string
 	}{
-		// Valid table names
+		// Conventional names
 		{"valid_basic", "sensors", false, ""},
 		{"valid_with_dots", "finance.nasdaq.aapl", false, ""},
 		{"valid_with_underscores", "network_metrics_v2", false, ""},
@@ -1817,33 +1819,29 @@ func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
 		{"valid_mixed", "finance.nasdaq_v2.aapl-data", false, ""},
 		{"valid_numeric_start", "5g_network_metrics", false, ""},
 
-		// Security violations - path traversal
-		{"path_traversal_dotdot", "../../../etc/passwd", true, "path traversal"},
-		{"path_traversal_slash", "table/../../secret", true, "path traversal"},
-		{"path_traversal_backslash", "table\\..\\secret", true, "path traversal"},
+		// Sharded names (GP scheme: <prefix>/<shard>)
+		{"valid_shard_slash", "skf/b831", false, ""},
+		{"valid_shard_prefix", "process_info/4c93", false, ""},
 
-		// Invalid characters
-		{"invalid_spaces", "table with spaces", true, "invalid characters"},
-		{"invalid_special_chars", "table@#$%", true, "invalid characters"},
-		{"invalid_parentheses", "table()", true, "invalid characters"},
-		{"invalid_brackets", "table[0]", true, "invalid characters"},
-		{"invalid_semicolon", "table;DROP TABLE", true, "invalid characters"},
-		{"invalid_quotes", "table\"name", true, "invalid characters"},
-		{"invalid_backticks", "table`name", true, "invalid characters"},
+		// Liberal charset: formerly rejected, now accepted
+		{"valid_interior_dotdot", "table/../../secret", false, ""},
+		{"valid_backslash", "table\\..\\secret", false, ""},
+		{"valid_spaces", "table with spaces", false, ""},
+		{"valid_special_chars", "table@#$%", false, ""},
+		{"valid_brackets", "table[0]", false, ""},
+		{"valid_semicolon", "table;DROP TABLE", false, ""},
+		{"valid_quotes", "table\"name", false, ""},
+		{"valid_long", strings.Repeat("a", 256), false, ""},
 
-		// Format violations
-		{"starts_with_dot", ".hidden_table", true, "invalid characters"},
-		{"starts_with_underscore", "_private_table", true, "invalid characters"},
-		{"starts_with_hyphen", "-bad_table", true, "invalid characters"},
-
-		// Length violations
+		// Rejected: empty
 		{"empty_name", "", true, "cannot be empty"},
-		{"too_long", strings.Repeat("a", 256), true, "too long"},
 
-		// SQL injection attempts
-		{"sql_injection_1", "table'; DROP TABLE users; --", true, "invalid characters"},
-		{"sql_injection_2", "table OR 1=1", true, "invalid characters"},
-		{"sql_injection_3", "table UNION SELECT", true, "invalid characters"},
+		// Rejected: first character not alphanumeric
+		{"starts_with_dot", ".hidden_table", true, "must start with an alphanumeric"},
+		{"starts_with_underscore", "_private_table", true, "must start with an alphanumeric"},
+		{"starts_with_hyphen", "-bad_table", true, "must start with an alphanumeric"},
+		{"starts_with_slash", "/leading_slash", true, "must start with an alphanumeric"},
+		{"starts_with_traversal", "../../../etc/passwd", true, "must start with an alphanumeric"},
 	}
 
 	for _, tc := range testCases {
@@ -1881,7 +1879,7 @@ func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
 			tables := res.Tables
 
 			if tc.shouldFail {
-				// Security violation: no table routing -> structurally unusable
+				// Invalid name: no table routing -> structurally unusable
 				requireUnusable(t, res, err)
 				assert.True(t, errorsContain(res.Errors, tc.errorMsg),
 					"expected %q in step errors for table name %q: %v", tc.errorMsg, tc.tableName, res.Errors)
@@ -1895,8 +1893,8 @@ func TestYAMLParser_TableNameSecurityValidation(t *testing.T) {
 	}
 }
 
-// TestYAMLParser_DynamicTableSecurityValidation tests security for dynamic table names
-func TestYAMLParser_DynamicTableSecurityValidation(t *testing.T) {
+// TestYAMLParser_DynamicTableValidation tests validation of dynamic table names
+func TestYAMLParser_DynamicTableValidation(t *testing.T) {
 	config := YAMLConfig{
 		Output: OutputSchema{
 			Columns: []ColumnSchema{
@@ -1922,17 +1920,30 @@ func TestYAMLParser_DynamicTableSecurityValidation(t *testing.T) {
 	parser, err := NewYAMLParserFromConfig(config)
 	require.NoError(t, err)
 
-	// Test with malicious table name in dynamic field
-	maliciousData := `{"table_name": "../../../etc/passwd", "data": 42.5}`
-	msg := &nats.Msg{
-		Subject: "test.subject",
-		Data:    []byte(maliciousData),
-	}
+	t.Run("slash_table_accepted", func(t *testing.T) {
+		// End-to-end: sharded table name (GP scheme) flows through Parse
+		msg := &nats.Msg{
+			Subject: "test.subject",
+			Data:    []byte(`{"table_name": "skf/b831", "data": 42.5}`),
+		}
 
-	res, err := parser.Parse(msg)
-	requireUnusable(t, res, err)
-	assert.True(t, errorsContain(res.Errors, "path traversal"),
-		"path traversal must be recorded: %v", res.Errors)
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		require.Len(t, res.Tables, 1)
+		assert.Equal(t, "skf/b831", stripNullTerminator(res.Tables[0].TableName))
+	})
+
+	t.Run("non_alphanumeric_start_rejected", func(t *testing.T) {
+		msg := &nats.Msg{
+			Subject: "test.subject",
+			Data:    []byte(`{"table_name": "../../../etc/passwd", "data": 42.5}`),
+		}
+
+		res, err := parser.Parse(msg)
+		requireUnusable(t, res, err)
+		assert.True(t, errorsContain(res.Errors, "must start with an alphanumeric"),
+			"first-char rule must be recorded: %v", res.Errors)
+	})
 }
 
 // TestYAMLParserFilterValidation exercises the filters block through

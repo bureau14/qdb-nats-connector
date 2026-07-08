@@ -31,8 +31,9 @@ const protoTimestampName protoreflect.FullName = "google.protobuf.Timestamp"
 type protoStepConfig struct {
 	descriptorFile string
 	messageType    string
-	source         string // dot-path into state.Fields; "" = decode state.Data
-	target         string // top-level key to nest output under; "" = merge at root
+	source         string                                                  // original dot-path, for error messages; "" = decode state.Data
+	lookupSource   func(fields map[string]interface{}) (interface{}, bool) // nil = decode state.Data
+	target         string                                                  // top-level key to nest output under; "" = merge at root
 }
 
 // parseProtoStepConfig validates parse_protobuf step config.
@@ -69,12 +70,13 @@ func parseProtoStepConfig(config map[string]interface{}) (protoStepConfig, error
 			return protoStepConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 				"parse_protobuf 'source' must be a non-empty string")
 		}
-		err := validateFieldPath(source)
+		lookupSource, err := compileFieldPath(source)
 		if err != nil {
 			return protoStepConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 				fmt.Sprintf("parse_protobuf 'source' is not a valid field path: %v", err))
 		}
 		cfg.source = source
+		cfg.lookupSource = lookupSource
 	}
 
 	if raw, present := config["target"]; present {
@@ -315,18 +317,18 @@ func (d *protoDecoder) decode(data []byte) (map[string]interface{}, error) {
 // indistinguishable from a missing payload - a deliberate trade-off.
 // In: state *ParseState - pipeline state
 //
-//	source string - dot-path into state.Fields; "" = state.Data
+//	cfg protoStepConfig - nil lookupSource = state.Data
 //
 // Out: []byte - bytes to decode
-// Ex: resolveProtoSource(state, "attribute_raw") → serialized inner message
-func resolveProtoSource(state *ParseState, source string) ([]byte, error) {
-	if source == "" {
+// Ex: resolveProtoSource(state, cfg) → serialized inner message
+func resolveProtoSource(state *ParseState, cfg protoStepConfig) ([]byte, error) {
+	if cfg.lookupSource == nil {
 		return state.Data, nil
 	}
 
-	value, err := extractFieldByPath(state.Fields, source)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve parse_protobuf source '%s': %w", source, err)
+	value, ok := cfg.lookupSource(state.Fields)
+	if !ok {
+		return nil, fmt.Errorf("source field '%s' not found in parse_protobuf step", cfg.source)
 	}
 
 	switch v := value.(type) {
@@ -335,7 +337,7 @@ func resolveProtoSource(state *ParseState, source string) ([]byte, error) {
 	case string:
 		return []byte(v), nil
 	default:
-		return nil, fmt.Errorf("parse_protobuf source '%s' has type %T, want bytes or string", source, v)
+		return nil, fmt.Errorf("parse_protobuf source '%s' has type %T, want bytes or string", cfg.source, v)
 	}
 }
 
@@ -384,7 +386,7 @@ func makeParseProtobufStep(config map[string]interface{}) (TransformationStep, e
 			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("nil state in parse_protobuf step"))
 		}
 
-		data, err := resolveProtoSource(state, cfg.source)
+		data, err := resolveProtoSource(state, cfg)
 		if err != nil {
 			return connectorErrors.NewParsingFailedError("yaml_parser", err)
 		}

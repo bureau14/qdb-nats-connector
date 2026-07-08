@@ -35,13 +35,13 @@ transformations:
   - step: "compute_field"
     config:
       operation: "concat"
-      target: "$table"
-      fields: ["industrial.", "building", ".", "floor"]
+      target: "table_name"
+      fields: ['"industrial."', "building", '"."', "floor"]
 
   # Extract table name (required by YAML parser)
   - step: "extract_table"
     config:
-      source: "$table"
+      source: "table_name"
 
   # Extract and convert timestamp field (custom format)
   - step: "extract_index"
@@ -68,7 +68,7 @@ transformations:
     config:
       operation: "concat"
       target: "sensor_tag"
-      fields: ["building", "-", "floor", "-", "sensor_id"]
+      fields: ["building", '"-"', "floor", '"-"', "sensor_id"]
 
   # Extract the data-type indicator consumed by the row filter below
   - step: "extract_field"

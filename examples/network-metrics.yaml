@@ -85,5 +85,5 @@ transformations:
     config:
       target: "device_path"
       operation: "concat"
-      fields: ["datacenter", "/", "rack", "/", "device_id"]
+      fields: ["datacenter", '"/"', "rack", '"/"', "device_id"]
 

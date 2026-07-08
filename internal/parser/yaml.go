@@ -59,6 +59,9 @@ package parser
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha1" //nolint:gosec // sharding scheme, not cryptographic use
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -66,7 +69,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -385,10 +387,6 @@ func (p *YAMLParser) checkStructuralFloor(state *ParseState) (string, error) {
 	// directly by an extract_field step, bypassing extract_table's own
 	// validation when that step failed.
 	trimmed := strings.TrimSuffix(tableName, "\x00")
-	if trimmed == "" {
-		return "", connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name cannot be empty"))
-	}
 
 	err := validateTableName(trimmed)
 	if err != nil {
@@ -810,33 +808,24 @@ func hasStep(specs []TransformSpec, name string) bool {
 	return false
 }
 
-// validateTableName validates table name for security
-// Prevents injection attacks and ensures safe table names
-// Rules: alphanumeric start, alphanumeric/dots/underscores/hyphens only, max 255 chars
-// No path traversal patterns (.., /, \)
-var tableNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$`)
-
+// validateTableName enforces the minimal table name contract.
+// QuasarDB accepts liberal names (GP shards are "skf/<hex>"); the
+// connector must not be more restrictive. Callers pass the name with
+// the \x00 terminator already trimmed.
+// In: tableName string - table name without \x00 terminator
+// Out: error if empty or first character is not alphanumeric
+// Ex: validateTableName("skf/b831") -> nil
 func validateTableName(tableName string) error {
 	if tableName == "" {
 		return connectorErrors.NewParsingFailedError("yaml_parser",
 			fmt.Errorf("table name cannot be empty"))
 	}
 
-	if len(tableName) > 255 {
+	c := tableName[0]
+	isAlnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	if !isAlnum {
 		return connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name too long: %d characters (max 255)", len(tableName)))
-	}
-
-	// Check for path traversal patterns
-	if strings.Contains(tableName, "..") || strings.Contains(tableName, "/") || strings.Contains(tableName, "\\") {
-		return connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name contains invalid path traversal patterns: %s", tableName))
-	}
-
-	// Validate against secure regex pattern
-	if !tableNameRegex.MatchString(tableName) {
-		return connectorErrors.NewParsingFailedError("yaml_parser",
-			fmt.Errorf("table name '%s' contains invalid characters or format - only alphanumeric, dots, underscores, and hyphens allowed", tableName))
+			fmt.Errorf("table name must start with an alphanumeric character: %s", tableName))
 	}
 
 	return nil
@@ -1187,10 +1176,14 @@ func makeExtractTimestampStep(config map[string]interface{}) (TransformationStep
 	return makeTimestampExtraction("extract_timestamp", source, target, format), nil
 }
 
-// makeExtractTableStep creates table name extraction step.
-// In: config[value,source] - static value or field name
+// makeExtractTableStep creates table name extraction step. Always
+// configure exactly one of value/source explicitly: computed table names
+// concat into a plain field, then point source at it (compute_field
+// rejects $-prefixed targets, so the legacy "$table" default source is
+// only reachable by a message that literally carries a "$table" key).
+// In: config[value,source] - static value or source field
 // Out: TransformationStep - sets state.Fields["$table"]
-// Ex: makeExtractTableStep({"value": "sensors"}) → step
+// Ex: makeExtractTableStep({"source": "table_name"}) → step
 func makeExtractTableStep(config map[string]interface{}) (TransformationStep, error) {
 	// Two modes:
 	// 1. value: "static_table_name" - for static tables
@@ -1229,7 +1222,7 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 				return connectorErrors.NewParsingFailedError("yaml_parser",
 					fmt.Errorf("source field '%s' not found in extract_table", source))
 			}
-			// Security fix: only allow string fields to prevent injection
+			// Strictly typed: the routed value must already be a string
 			if fieldStr, ok := field.(string); ok {
 				// CRITICAL: Create defensive copy with null terminator.
 				// Same reasoning as above for dynamic routing.
@@ -1240,9 +1233,9 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 			}
 		}
 
-		// Security validation: prevent injection attacks
-		// Note: We validate before the null terminator is added conceptually,
-		// but since we add it inline above, we need to exclude it from validation
+		// Minimal table-name contract (non-empty, alphanumeric first char;
+		// see validateTableName). The \x00 terminator added above is
+		// excluded from validation.
 		if tableName != "" && tableName[len(tableName)-1] == 0 {
 			err := validateTableName(tableName[:len(tableName)-1])
 			if err != nil {
@@ -1261,8 +1254,61 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 	}, nil
 }
 
+// validateFieldPath checks dot-path format: non-empty, no leading/trailing
+// or consecutive dots. Called by compileFieldPath at config compile time.
+// In: path "a.b.c" - dot notation
+// Out: error - nil when well-formed
+// Ex: validateFieldPath("a..b") → error
+func validateFieldPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty field path")
+	}
+	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
+		return fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("invalid field path format: consecutive dots not allowed")
+	}
+
+	return nil
+}
+
+// compileFieldPath validates a dot-path at config time and returns a
+// per-message lookup closure. Segments are split once, here; the closure
+// only walks nested maps. A missing key or a non-map intermediate resolves
+// to (nil, false). Known accepted wart: a flat field whose literal name
+// contains a dot is unaddressable.
+// In: path "a.b.c" - dot notation
+// Out: lookup closure over state.Fields, or a path-format error
+// Ex: compileFieldPath("sensors.temp") → lookup; lookup(fields) → (23.5, true)
+func compileFieldPath(path string) (func(fields map[string]interface{}) (interface{}, bool), error) {
+	err := validateFieldPath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	segments := strings.Split(path, ".")
+
+	return func(fields map[string]interface{}) (interface{}, bool) {
+		current := fields
+
+		for _, segment := range segments[:len(segments)-1] {
+			next, ok := current[segment].(map[string]interface{})
+			if !ok {
+				return nil, false
+			}
+
+			current = next
+		}
+
+		value, ok := current[segments[len(segments)-1]]
+
+		return value, ok
+	}, nil
+}
+
 // makeExtractFieldStep extracts nested fields.
-// In: config[source,target,type,on_error] - paths
+// In: config[source,target,type,on_error] - source is a compiled dot-path
 // Out: TransformationStep - dot notation extraction
 // Ex: makeExtractFieldStep({"source": "data.temp"}) → step
 // Per ADR-005: supports JSON path navigation
@@ -1270,6 +1316,12 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 	source, ok := config["source"].(string)
 	if !ok {
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'source' string")
+	}
+
+	lookupSource, err := compileFieldPath(source)
+	if err != nil {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("extract_field 'source' is not a valid field path: %v", err))
 	}
 
 	target, ok := config["target"].(string)
@@ -1294,13 +1346,13 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 	}
 
 	return func(state *ParseState) error {
-		value, err := extractFieldByPath(state.Fields, source)
-		if err != nil {
+		value, exists := lookupSource(state.Fields)
+		if !exists {
 			if onError == "skip" {
 				return nil
 			}
 
-			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to extract field '%s' in extract_field step: %w", source, err))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in extract_field step", source))
 		}
 
 		// Type conversion - handles string→number, etc per ADR-005
@@ -1320,9 +1372,12 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 }
 
 // makeComputeFieldStep computes derived fields.
-// In: config[operation,target,...] - operation "concat" (fields array) or
+// In: config[operation,target,...] - operation "concat" (fields array),
 //
-//	"split" (source, separator, index)
+//	"split" (source, separator, index),
+//	"hash" (source, algorithm),
+//	"slice" (source, start, optional end),
+//	"str" (source)
 //
 // Out: TransformationStep - derived string field
 // Ex: makeComputeFieldStep({"operation": "concat"}) → step
@@ -1338,14 +1393,22 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'target' string")
 	}
 
+	// $-prefixed fields ($timestamp, $table) are pipeline-internal and
+	// reserved for extract_* steps; compose table routing as concat into a
+	// plain field, then point extract_table 'source' at it.
+	if strings.HasPrefix(target, "$") {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'target' must not start with '$'; write a plain field and point extract_table 'source' at it")
+	}
+
 	switch operation {
 	case "concat":
-		fields, ok := config["fields"].([]interface{})
-		if !ok {
-			return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field 'concat' requires a 'fields' array")
+		cfg, err := parseConcatConfig(config, target)
+		if err != nil {
+			return nil, err
 		}
 
-		return makeStringConcatStep(target, fields), nil
+		return makeStringConcatStep(cfg), nil
 	case "split":
 		cfg, err := parseSplitConfig(config, target)
 		if err != nil {
@@ -1353,6 +1416,27 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 		}
 
 		return makeSplitFieldStep(cfg), nil
+	case "hash":
+		cfg, err := parseHashConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeHashFieldStep(cfg), nil
+	case "slice":
+		cfg, err := parseSliceConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeSliceFieldStep(cfg), nil
+	case "str":
+		cfg, err := parseStrConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeStrFieldStep(cfg), nil
 	default:
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("unsupported operation in compute_field step: %s", operation))
@@ -1360,7 +1444,7 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 }
 
 // makeSafeParseNumberStep parses numbers gracefully.
-// In: config[source,target,on_error] - field names
+// In: config[source,target,on_error] - source is a compiled dot-path
 // Out: TransformationStep - null/skip/fail on error
 // Ex: makeSafeParseNumberStep({"on_error": "null"}) → step
 // Per ADR-005: graceful error handling pattern
@@ -1368,6 +1452,12 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 	source, ok := config["source"].(string)
 	if !ok {
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "safe_parse_number step requires 'source' string")
+	}
+
+	lookupSource, err := compileFieldPath(source)
+	if err != nil {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("safe_parse_number 'source' is not a valid field path: %v", err))
 	}
 
 	target, ok := config["target"].(string)
@@ -1381,7 +1471,7 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 	}
 
 	return func(state *ParseState) error {
-		value, exists := state.Fields[source]
+		value, exists := lookupSource(state.Fields)
 		if !exists {
 			if onError == "skip" {
 				return nil
@@ -1429,10 +1519,117 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 	}, nil
 }
 
-// makeStringConcatStep concatenates field values.
-// In: target, fields[] - output field, inputs
-// Out: TransformationStep - joins strings
-// Ex: makeStringConcatStep("tag_id", [facility,":",tag]) → step
+// compileSourceOption reads and compiles the required 'source' dot-path
+// option of a compute_field operation.
+// In: config map - raw step config, operation - name for error messages
+// Out: (original path, compiled lookup closure) or config error
+// Ex: compileSourceOption({"source": "a.b"}, "hash") → ("a.b", lookup, nil)
+func compileSourceOption(config map[string]interface{}, operation string) (source string, lookup func(fields map[string]interface{}) (interface{}, bool), err error) {
+	source, ok := config["source"].(string)
+	if !ok || source == "" {
+		return "", nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("compute_field '%s' requires a 'source' string option", operation))
+	}
+
+	lookupSource, err := compileFieldPath(source)
+	if err != nil {
+		return "", nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("compute_field '%s' source is not a valid field path: %v", operation, err))
+	}
+
+	return source, lookupSource, nil
+}
+
+// requireStringSource resolves a compiled source lookup and requires a
+// string value. A missing or wrong-typed value is a per-message parsing
+// error (non-structural → OutcomePartial), never a silent coercion.
+// In: lookup - compiled dot-path closure, source - original path for errors,
+//
+//	operation - compute_field operation name, fields - message fields
+//
+// Out: string value or ParsingFailed error
+// Ex: requireStringSource(lookup, "stream_id", "hash", fields) → "skf-cxrn:..."
+func requireStringSource(lookup func(fields map[string]interface{}) (interface{}, bool), source, operation string, fields map[string]interface{}) (string, error) {
+	value, exists := lookup(fields)
+	if !exists {
+		return "", connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("field '%s' not found in compute_field %s step", source, operation))
+	}
+
+	s, ok := value.(string)
+	if !ok {
+		return "", connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("compute_field %s source '%s' has type %T, want string", operation, source, value))
+	}
+
+	return s, nil
+}
+
+// concatPart: one compiled entry of a concat fields[] array. A nil lookup
+// means the entry is a literal; otherwise it is a compiled dot-path.
+type concatPart struct {
+	literal string
+	source  string // original dot-path, for error messages
+	lookup  func(fields map[string]interface{}) (interface{}, bool)
+}
+
+// concatFieldConfig: compile-time configuration of a compute_field concat.
+type concatFieldConfig struct {
+	target string
+	parts  []concatPart
+}
+
+// parseConcatConfig validates compute_field concat options and classifies
+// each fields[] entry at config time: a `"quoted"` entry is a literal
+// (quotes stripped), anything else is a compiled dot-path whose resolved
+// value must be a string per message.
+// In: config["fields"] - non-empty array of string entries
+//
+//	target string - already-validated output field name
+//
+// Out: concatFieldConfig - validated config
+// Ex: parseConcatConfig({"fields": ['"skf/"', "shard"]}, "table_name") → cfg
+func parseConcatConfig(config map[string]interface{}, target string) (concatFieldConfig, error) {
+	fields, ok := config["fields"].([]interface{})
+	if !ok || len(fields) == 0 {
+		return concatFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'concat' requires a non-empty 'fields' array")
+	}
+
+	parts := make([]concatPart, 0, len(fields))
+
+	for _, field := range fields {
+		f, ok := field.(string)
+		if !ok {
+			return concatFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("compute_field 'concat' fields entries must be strings, got %T", field))
+		}
+
+		if len(f) >= 2 && strings.HasPrefix(f, "\"") && strings.HasSuffix(f, "\"") {
+			parts = append(parts, concatPart{literal: f[1 : len(f)-1]})
+
+			continue
+		}
+
+		lookup, err := compileFieldPath(f)
+		if err != nil {
+			return concatFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("compute_field 'concat' fields entry is not a valid field path: %v", err))
+		}
+
+		parts = append(parts, concatPart{source: f, lookup: lookup})
+	}
+
+	return concatFieldConfig{target: target, parts: parts}, nil
+}
+
+// makeStringConcatStep concatenates literal and field-valued parts. Field
+// parts must resolve to strings; a missing or non-string value is a
+// per-message parsing error (non-structural → OutcomePartial), never a
+// silent coercion or fallback.
+// In: cfg concatFieldConfig - validated config
+// Out: TransformationStep - writes the joined string to cfg.target
+// Ex: makeStringConcatStep({parts: ["skf/", shard], target: "table_name"}) → step
 //
 // MEMORY PINNING WARNING:
 // ======================
@@ -1448,30 +1645,26 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 // - runtime.Pinner memory stabilization
 //
 // Any string created here will be written to QuasarDB tables and MUST remain pinnable.
-func makeStringConcatStep(target string, fields []interface{}) TransformationStep {
+func makeStringConcatStep(cfg concatFieldConfig) TransformationStep {
 	return func(state *ParseState) error {
 		var result string // Direct concatenation - QuasarDB memory-safe
 
-		for _, field := range fields {
-			switch f := field.(type) {
-			case string:
-				// Check if it's a literal string (contains no field references)
-				if strings.HasPrefix(f, "\"") && strings.HasSuffix(f, "\"") {
-					// Literal string - strip quotes for direct value
-					result += f[1 : len(f)-1]
-				} else if value, exists := state.Fields[f]; exists {
-					// Field reference - lookup and format value
-					result += fmt.Sprintf("%v", value)
-				} else {
-					// Missing field - use literal as fallback per ADR-005
-					result += f
-				}
-			default:
-				result += fmt.Sprintf("%v", field)
+		for _, part := range cfg.parts {
+			if part.lookup == nil {
+				result += part.literal
+
+				continue
 			}
+
+			s, err := requireStringSource(part.lookup, part.source, "concat", state.Fields)
+			if err != nil {
+				return err
+			}
+
+			result += s
 		}
 
-		state.Fields[target] = result
+		state.Fields[cfg.target] = result
 
 		return nil
 	}
@@ -1479,14 +1672,15 @@ func makeStringConcatStep(target string, fields []interface{}) TransformationSte
 
 // splitFieldConfig: compile-time configuration of a compute_field split.
 type splitFieldConfig struct {
-	source    string
-	separator string
-	target    string
-	index     int // negative = from the end
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	separator    string
+	target       string
+	index        int // negative = from the end
 }
 
 // parseSplitConfig validates compute_field split options.
-// In: config["source"] - input field name (direct lookup, not a dot-path)
+// In: config["source"] - input dot-path, compiled here
 //
 //	config["separator"] - non-empty split separator
 //	config["index"] - required int, negative = from the end
@@ -1495,10 +1689,9 @@ type splitFieldConfig struct {
 // Out: splitFieldConfig - validated config
 // Ex: parseSplitConfig({"source": "stream_id", "separator": ":", "index": -1}, "revision_raw") → cfg
 func parseSplitConfig(config map[string]interface{}, target string) (splitFieldConfig, error) {
-	source, ok := config["source"].(string)
-	if !ok || source == "" {
-		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
-			"compute_field 'split' requires a 'source' string option")
+	source, lookupSource, err := compileSourceOption(config, "split")
+	if err != nil {
+		return splitFieldConfig{}, err
 	}
 
 	separator, ok := config["separator"].(string)
@@ -1513,7 +1706,7 @@ func parseSplitConfig(config map[string]interface{}, target string) (splitFieldC
 			"compute_field 'split' requires an integer 'index' option")
 	}
 
-	return splitFieldConfig{source: source, separator: separator, target: target, index: index}, nil
+	return splitFieldConfig{source: source, lookupSource: lookupSource, separator: separator, target: target, index: index}, nil
 }
 
 // makeSplitFieldStep creates a compute_field split step: strings.Split the
@@ -1531,16 +1724,9 @@ func parseSplitConfig(config map[string]interface{}, target string) (splitFieldC
 // Ex: makeSplitFieldStep({source: "stream_id", separator: ":", index: -1, target: "revision_raw"}) → step
 func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
 	return func(state *ParseState) error {
-		value, exists := state.Fields[cfg.source]
-		if !exists {
-			return connectorErrors.NewParsingFailedError("yaml_parser",
-				fmt.Errorf("field '%s' not found in compute_field split step", cfg.source))
-		}
-
-		s, ok := value.(string)
-		if !ok {
-			return connectorErrors.NewParsingFailedError("yaml_parser",
-				fmt.Errorf("compute_field split source '%s' has type %T, want string", cfg.source, value))
+		s, err := requireStringSource(cfg.lookupSource, cfg.source, "split", state.Fields)
+		if err != nil {
+			return err
 		}
 
 		parts := strings.Split(s, cfg.separator)
@@ -1559,26 +1745,6 @@ func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
 
 		return nil
 	}
-}
-
-// validateFieldPath checks dot-path format: non-empty, no leading/trailing
-// or consecutive dots. Used at config compile time for fail-fast validation
-// and by extractFieldByPath at runtime.
-// In: path "a.b.c" - dot notation
-// Out: error - nil when well-formed
-// Ex: validateFieldPath("a..b") → error
-func validateFieldPath(path string) error {
-	if path == "" {
-		return fmt.Errorf("empty field path")
-	}
-	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
-		return fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
-	}
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("invalid field path format: consecutive dots not allowed")
-	}
-
-	return nil
 }
 
 // parseIntOption reads an optional integer config value. YAML integer
@@ -1602,50 +1768,236 @@ func parseIntOption(config map[string]interface{}, key string) (value int, prese
 	}
 }
 
-// extractFieldByPath navigates nested maps by path.
-// In: fields map, path "a.b.c" - dot notation
-// Out: interface{} - value at path
-// Ex: extractFieldByPath(data, "sensors.temp") → 23.5
-func extractFieldByPath(fields map[string]interface{}, path string) (interface{}, error) {
-	err := validateFieldPath(path)
+// hashFieldConfig: compile-time configuration of a compute_field hash.
+type hashFieldConfig struct {
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	target       string
+	digestHex    func(data []byte) string // algorithm resolved at config time
+}
+
+// parseHashConfig validates compute_field hash options and resolves the
+// algorithm to a digest closure at config time.
+// In: config["source"] - input dot-path, compiled here
+//
+//	config["algorithm"] - "sha1" or "sha256"
+//	target string - already-validated output field name
+//
+// Out: hashFieldConfig - validated config
+// Ex: parseHashConfig({"source": "stream_id", "algorithm": "sha1"}, "stream_id_hashed") → cfg
+func parseHashConfig(config map[string]interface{}, target string) (hashFieldConfig, error) {
+	source, lookupSource, err := compileSourceOption(config, "hash")
 	if err != nil {
-		return nil, err
+		return hashFieldConfig{}, err
 	}
 
-	parts := strings.Split(path, ".")
-	current := fields
+	algorithm, ok := config["algorithm"].(string)
+	if !ok {
+		return hashFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'hash' requires an 'algorithm' string option")
+	}
 
-	for i, part := range parts {
-		// Validate each part to prevent empty path segments
-		if part == "" {
-			return nil, fmt.Errorf("invalid field path format: empty path segment")
+	var digestHex func(data []byte) string
+
+	switch algorithm {
+	case "sha1":
+		digestHex = func(data []byte) string {
+			d := sha1.Sum(data) //nolint:gosec // sharding scheme, not cryptographic use
+
+			return hex.EncodeToString(d[:])
+		}
+	case "sha256":
+		digestHex = func(data []byte) string {
+			d := sha256.Sum256(data)
+
+			return hex.EncodeToString(d[:])
+		}
+	default:
+		return hashFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("unsupported algorithm in compute_field hash step: %s", algorithm))
+	}
+
+	return hashFieldConfig{source: source, lookupSource: lookupSource, target: target, digestHex: digestHex}, nil
+}
+
+// makeHashFieldStep creates a compute_field hash step: digest the source
+// string and write the full lowercase hex digest. Truncation is not this
+// operation's job; compose with slice. hex.EncodeToString returns a fresh
+// contiguous allocation, pinning-safe (see makeStringConcatStep contract
+// above).
+//
+// Non-structural: missing/non-string source follows the normal per-step
+// error flow → OutcomePartial.
+//
+// In: cfg hashFieldConfig - validated config
+// Out: TransformationStep - writes the hex digest to cfg.target
+// Ex: makeHashFieldStep({source: "stream_id", target: "stream_id_hashed"}) → step
+func makeHashFieldStep(cfg hashFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		s, err := requireStringSource(cfg.lookupSource, cfg.source, "hash", state.Fields)
+		if err != nil {
+			return err
 		}
 
-		if i == len(parts)-1 {
-			// Last part - return the value at final key
-			value, exists := current[part]
-			if !exists {
-				return nil, fmt.Errorf("field '%s' not found", part)
-			}
+		state.Fields[cfg.target] = cfg.digestHex([]byte(s))
 
-			return value, nil
+		return nil
+	}
+}
+
+// sliceFieldConfig: compile-time configuration of a compute_field slice.
+type sliceFieldConfig struct {
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	target       string
+	start        int
+	end          int
+	hasEnd       bool // omitted end = end of string
+}
+
+// parseSliceConfig validates compute_field slice options.
+// In: config["source"] - input dot-path, compiled here
+//
+//	config["start"] - required int, negative = from the end
+//	config["end"] - optional int, negative = from the end
+//	target string - already-validated output field name
+//
+// Out: sliceFieldConfig - validated config
+// Ex: parseSliceConfig({"source": "stream_id_hashed", "start": 0, "end": 4}, "shard") → cfg
+func parseSliceConfig(config map[string]interface{}, target string) (sliceFieldConfig, error) {
+	source, lookupSource, err := compileSourceOption(config, "slice")
+	if err != nil {
+		return sliceFieldConfig{}, err
+	}
+
+	start, present, err := parseIntOption(config, "start")
+	if err != nil || !present {
+		return sliceFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'slice' requires an integer 'start' option")
+	}
+
+	end, hasEnd, err := parseIntOption(config, "end")
+	if err != nil {
+		return sliceFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'slice' 'end' option must be an integer")
+	}
+
+	return sliceFieldConfig{source: source, lookupSource: lookupSource, target: target, start: start, end: end, hasEnd: hasEnd}, nil
+}
+
+// clampSliceIndex resolves a Python slice index against a string of length
+// n: negative counts from the end, out-of-range clamps to [0, n].
+// In: idx - raw index, n - string length in bytes
+// Out: resolved index in [0, n]
+// Ex: clampSliceIndex(-1, 3) → 2; clampSliceIndex(10, 3) → 3
+func clampSliceIndex(idx, n int) int {
+	if idx < 0 {
+		idx += n
+	}
+
+	return min(max(idx, 0), n)
+}
+
+// makeSliceFieldStep creates a compute_field slice step with Python slice
+// semantics on the source string: negative indices count from the end,
+// out-of-range indices clamp ("abc"[0:10] → "abc", never an error), and
+// inverted ranges yield "". Indexing is byte-based (like split) - fine for
+// hex digests and ASCII identifiers. The output is a Go substring of the
+// source: contiguous and pinning-safe (see makeStringConcatStep contract
+// above).
+//
+// Non-structural: missing/non-string source follows the normal per-step
+// error flow → OutcomePartial.
+//
+// In: cfg sliceFieldConfig - validated config
+// Out: TransformationStep - writes the substring to cfg.target
+// Ex: makeSliceFieldStep({source: "stream_id_hashed", start: 0, end: 4, target: "shard"}) → step
+func makeSliceFieldStep(cfg sliceFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		s, err := requireStringSource(cfg.lookupSource, cfg.source, "slice", state.Fields)
+		if err != nil {
+			return err
 		}
 
-		// Navigate deeper - traverse nested maps
-		next, exists := current[part]
+		lo := clampSliceIndex(cfg.start, len(s))
+
+		hi := len(s)
+		if cfg.hasEnd {
+			hi = clampSliceIndex(cfg.end, len(s))
+		}
+
+		if lo >= hi {
+			state.Fields[cfg.target] = ""
+
+			return nil
+		}
+
+		state.Fields[cfg.target] = s[lo:hi]
+
+		return nil
+	}
+}
+
+// strFieldConfig: compile-time configuration of a compute_field str.
+type strFieldConfig struct {
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	target       string
+}
+
+// parseStrConfig validates compute_field str options.
+// In: config["source"] - input dot-path, compiled here
+//
+//	target string - already-validated output field name
+//
+// Out: strFieldConfig - validated config
+// Ex: parseStrConfig({"source": "floor"}, "floor_str") → cfg
+func parseStrConfig(config map[string]interface{}, target string) (strFieldConfig, error) {
+	source, lookupSource, err := compileSourceOption(config, "str")
+	if err != nil {
+		return strFieldConfig{}, err
+	}
+
+	return strFieldConfig{source: source, lookupSource: lookupSource, target: target}, nil
+}
+
+// makeStrFieldStep creates a compute_field str step: strictly-typed
+// conversion to string via strconv - the single sanctioned escape hatch
+// that keeps every other operation strict. Accepts exactly int64, float64,
+// bool, and string; anything else is a per-message parsing error. strconv
+// results are fresh contiguous allocations, pinning-safe (see
+// makeStringConcatStep contract above).
+//
+// Non-structural: missing/unsupported source follows the normal per-step
+// error flow → OutcomePartial.
+//
+// In: cfg strFieldConfig - validated config
+// Out: TransformationStep - writes the string form to cfg.target
+// Ex: makeStrFieldStep({source: "floor", target: "floor_str"}) → step
+func makeStrFieldStep(cfg strFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		value, exists := cfg.lookupSource(state.Fields)
 		if !exists {
-			return nil, fmt.Errorf("field '%s' not found in path", part)
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("field '%s' not found in compute_field str step", cfg.source))
 		}
 
-		nextMap, ok := next.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("field '%s' is not a map", part)
+		switch v := value.(type) {
+		case string:
+			state.Fields[cfg.target] = v
+		case int64:
+			state.Fields[cfg.target] = strconv.FormatInt(v, 10)
+		case float64:
+			state.Fields[cfg.target] = strconv.FormatFloat(v, 'g', -1, 64)
+		case bool:
+			state.Fields[cfg.target] = strconv.FormatBool(v)
+		default:
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("compute_field str source '%s' has unsupported type %T", cfg.source, value))
 		}
 
-		current = nextMap
+		return nil
 	}
-
-	return nil, fmt.Errorf("empty path")
 }
 
 // convertFieldValue casts to target type.

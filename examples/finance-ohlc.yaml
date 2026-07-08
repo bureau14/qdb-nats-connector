@@ -1,13 +1,18 @@
 # Finance OHLC market data YAML parser configuration
 # Routes data to exchange-specific tables: finance.{exchange}.{symbol}
 # Demonstrates dynamic table routing based on message content,
-# a symbol column (stock_id) and a timestamp value column (event_time)
+# a string column (stock_id) and a timestamp value column (event_time)
 # Example: AAPL on NASDAQ -> "finance.NASDAQ.AAPL", MSFT on NYSE -> "finance.NYSE.MSFT"
+#
+# stock_id is a STRING column, not SYMBOL: concurrent first pushes into a
+# fresh symtable intermittently fail with qdb_e_invalid_argument from the
+# client-side symbol resolution (QDB-19359 follow-up); string columns write
+# identical values without the symtable dependency.
 
 output:
   columns:
     - name: "stock_id"
-      type: "symbol"
+      type: "string"
     - name: "open"
       type: "double"
     - name: "high"

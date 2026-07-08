@@ -435,6 +435,16 @@ func (o *Options) DeduplicationMode() qdb.WriterDeduplicationMode {
 	return o.parsedSinkOptions.DeduplicationMode
 }
 
+// PushMode returns QDB writer push mode
+// In: none
+// Out: qdb.WriterPushMode - transactional|async|fast
+// Ex: PushMode() → WriterPushModeAsync
+func (o *Options) PushMode() qdb.WriterPushMode {
+	o.ensureInitialized()
+
+	return o.parsedSinkOptions.PushMode
+}
+
 // ClientMaxParallelism returns max QDB threads
 // In: none
 // Out: *uint - nil=default
@@ -603,13 +613,16 @@ func (o *Options) parseAndSetFields(v *viper.Viper) error {
 		o.parsedSinkOptions.Encryption = &enc
 	}
 
-	// Parse push mode
+	// Parse push mode; an unset value must resolve to the documented async
+	// default, not the zero value of qdb.WriterPushMode (transactional).
 	if o.QdbPushMode != "" {
 		pushMode, err := parsePushMode(o.QdbPushMode)
 		if err != nil {
 			return err
 		}
 		o.parsedSinkOptions.PushMode = pushMode
+	} else {
+		o.parsedSinkOptions.PushMode = qdb.WriterPushModeAsync
 	}
 
 	// Parse deduplication mode

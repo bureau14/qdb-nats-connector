@@ -1176,10 +1176,14 @@ func makeExtractTimestampStep(config map[string]interface{}) (TransformationStep
 	return makeTimestampExtraction("extract_timestamp", source, target, format), nil
 }
 
-// makeExtractTableStep creates table name extraction step.
-// In: config[value,source] - static value or field name
+// makeExtractTableStep creates table name extraction step. Always
+// configure exactly one of value/source explicitly: computed table names
+// concat into a plain field, then point source at it (compute_field
+// rejects $-prefixed targets, so the legacy "$table" default source is
+// only reachable by a message that literally carries a "$table" key).
+// In: config[value,source] - static value or source field
 // Out: TransformationStep - sets state.Fields["$table"]
-// Ex: makeExtractTableStep({"value": "sensors"}) → step
+// Ex: makeExtractTableStep({"source": "table_name"}) → step
 func makeExtractTableStep(config map[string]interface{}) (TransformationStep, error) {
 	// Two modes:
 	// 1. value: "static_table_name" - for static tables
@@ -1218,7 +1222,7 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 				return connectorErrors.NewParsingFailedError("yaml_parser",
 					fmt.Errorf("source field '%s' not found in extract_table", source))
 			}
-			// Security fix: only allow string fields to prevent injection
+			// Strictly typed: the routed value must already be a string
 			if fieldStr, ok := field.(string); ok {
 				// CRITICAL: Create defensive copy with null terminator.
 				// Same reasoning as above for dynamic routing.
@@ -1229,9 +1233,9 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 			}
 		}
 
-		// Security validation: prevent injection attacks
-		// Note: We validate before the null terminator is added conceptually,
-		// but since we add it inline above, we need to exclude it from validation
+		// Minimal table-name contract (non-empty, alphanumeric first char;
+		// see validateTableName). The \x00 terminator added above is
+		// excluded from validation.
 		if tableName != "" && tableName[len(tableName)-1] == 0 {
 			err := validateTableName(tableName[:len(tableName)-1])
 			if err != nil {

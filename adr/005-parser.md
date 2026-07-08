@@ -102,7 +102,7 @@ transformations:
     config:
       operation: "concat"
       target: "tag_id"
-      fields: ["facility_code", ":", "tagname"]
+      fields: ["facility_code", '":"', "tagname"] # quoted entry = literal
 ```
 
 ### Core Components
@@ -114,7 +114,7 @@ transformations:
      `extract_timestamp` (a regular timestamp value column) share one
      conversion helper; formats: `rfc3339` (default), `rfc3339nano`,
      `unix`, `unix_ms`, `unix_us`, `unix_ns`, or a custom Go time layout
-   - **String Operations**: Concatenation, formatting, case conversion
+   - **String Operations**: Concatenation, splitting, slicing, hashing, explicit string conversion
    - **Compression**: GZIP decompression, future support for zstd
    - **Computed Fields**: Combine multiple fields, conditional logic
    - **Batch Operations**: Process arrays within JSON messages
@@ -164,6 +164,50 @@ symtable from the pre-created table schema), so any step that produces a
 string can populate a symbol column. Tables with symbol columns must be
 created with a symtable name, e.g. `SYMBOL(my_symtable)` in qdbsh DDL.
 
+### Compute Operations: Strict Typing (Amended 2026-07-08)
+
+`compute_field` is a type-agnostic dispatcher; the operations under it are
+strictly typed:
+
+| operation | config keys                                     | in -> out                           |
+| --------- | ----------------------------------------------- | ----------------------------------- |
+| `concat`  | `fields[]`: `'"literal"'` or dot-path           | strings -> string                   |
+| `split`   | `source`, `separator`, `index` (neg = from end) | string -> string                    |
+| `hash`    | `source`, `algorithm` (`sha1`\|`sha256`)        | string -> full lowercase hex digest |
+| `slice`   | `source`, `start`, optional `end`               | string -> string (Python semantics) |
+| `str`     | `source`                                        | int64/float64/bool/string -> string |
+
+Rules:
+
+- **No coercion.** An operation whose source is missing or of the wrong
+  type raises a per-message parsing error (-> `Partial` outcome, see
+  Error-Action Policy below), never a silent conversion or fallback.
+  `str` is the single sanctioned escape hatch for non-string inputs
+  (implemented with `strconv`; anything beyond int64/float64/bool/string
+  is a per-message error). This replaced an earlier `concat` behavior
+  that coerced any value with `fmt.Sprintf("%v")` and silently treated
+  missing fields as literals.
+- **Literals are quoted.** In `concat` `fields[]`, a double-quoted entry
+  (YAML spellings `'"skf/"'` and `"\"skf/\""` are equivalent) is a
+  literal with the quotes stripped; any other entry is a field lookup.
+- **Dot-path sources, compiled at config time.** Every operation `source`
+  navigates nested maps like `extract_field` (`a.b.c`); paths are
+  validated and split into segments once at pipeline compile, so a
+  malformed path is a startup error, not a per-message one. Targets are
+  flat top-level names.
+- **`$`-prefixed targets are rejected** at compile time -- writes to `$`
+  fields (`$table`, `$timestamp`) are reserved for `extract_*` steps.
+  Table routing composes as: concat into a plain field (e.g.
+  `table_name`), then `extract_table` `source:` at it (see ADR-006).
+- **Config errors are compile-time.** Unknown operation, unknown hash
+  algorithm, missing required keys, malformed paths: all fail at startup
+  with `ErrCodeInvalidConfig`.
+- **Memory pinning.** Every string that may reach QuasarDB must be a
+  contiguous allocation: direct `+=` concatenation, Go substring
+  slicing, `hex.EncodeToString`, and `strconv.Format*` are safe;
+  `strings.Builder` is banned (see the warning blocks in
+  `internal/parser/yaml.go`).
+
 ## Performance Characteristics
 
 The building block approach achieves near-native performance through:
@@ -183,6 +227,11 @@ Building Block Architecture:
 └─────────────┘    └─────────────┘    └─────────────┘
      ~2%              ~3%               ~1%
 ```
+
+**Measured:** `BenchmarkComputeFieldPipeline` (the per-message
+`hash(sha1) -> slice -> concat` sharded-routing chain) costs 381 ns/op,
+776 B/op, 10 allocs/op on Apple Silicon -- comfortably inside the <5%
+overhead target at observed message rates.
 
 **Performance Benefits:**
 

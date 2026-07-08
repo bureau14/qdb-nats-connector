@@ -786,7 +786,7 @@ func TestYAMLParserComputeField(t *testing.T) {
 			{Step: "compute_field", Config: map[string]interface{}{
 				"operation": "concat",
 				"target":    "tag_id",
-				"fields":    []interface{}{"facility", ":", "tag"},
+				"fields":    []interface{}{"facility", "\":\"", "tag"},
 			}},
 			{Step: "extract_field", Config: map[string]interface{}{
 				"source": "val",
@@ -1665,7 +1665,7 @@ func TestYAMLParser_ExtractTableFromComputedField(t *testing.T) {
 			{Step: "compute_field", Config: map[string]interface{}{
 				"operation": "concat",
 				"target":    "table_name",
-				"fields":    []interface{}{"finance", ".", "exchange", ".", "symbol"},
+				"fields":    []interface{}{"\"finance\"", "\".\"", "exchange", "\".\"", "symbol"},
 			}},
 			{Step: "extract_table", Config: map[string]interface{}{
 				"source": "table_name", // Uses computed table name
@@ -2071,6 +2071,21 @@ func TestComputeFieldFactoryErrors(t *testing.T) {
 		}},
 		{"reserved $-prefixed target", map[string]interface{}{
 			"operation": "concat", "target": "$table", "fields": []interface{}{"\"x\""},
+		}},
+		{"concat missing fields", map[string]interface{}{
+			"operation": "concat", "target": "t",
+		}},
+		{"concat non-array fields", map[string]interface{}{
+			"operation": "concat", "target": "t", "fields": "a",
+		}},
+		{"concat empty fields", map[string]interface{}{
+			"operation": "concat", "target": "t", "fields": []interface{}{},
+		}},
+		{"concat non-string fields entry", map[string]interface{}{
+			"operation": "concat", "target": "t", "fields": []interface{}{"a", 5},
+		}},
+		{"concat invalid field path entry", map[string]interface{}{
+			"operation": "concat", "target": "t", "fields": []interface{}{"a..b"},
 		}},
 		{"hash missing source", map[string]interface{}{
 			"operation": "hash", "target": "t", "algorithm": "sha1",
@@ -2510,6 +2525,63 @@ func TestComputeFieldStr(t *testing.T) {
 	})
 }
 
+// concatConfig returns a valid compute_field concat config over fields[].
+func concatConfig(fields ...interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"operation": "concat",
+		"target":    "out",
+		"fields":    fields,
+	}
+}
+
+// TestComputeFieldConcat covers strict concat semantics: quoted entries are
+// literals, unquoted entries are dot-path lookups that must resolve to a
+// string -- no coercion, no missing-field fallback.
+func TestComputeFieldConcat(t *testing.T) {
+	t.Run("literals only", func(t *testing.T) {
+		state, err := runComputeFieldStep(t, concatConfig("\"skf\"", "\"/\"", "\"b831\""), map[string]interface{}{})
+		require.NoError(t, err)
+		assert.Equal(t, "skf/b831", state.Fields["out"])
+	})
+
+	t.Run("empty quoted literal", func(t *testing.T) {
+		state, err := runComputeFieldStep(t, concatConfig("\"\"", "\"x\""), map[string]interface{}{})
+		require.NoError(t, err)
+		assert.Equal(t, "x", state.Fields["out"])
+	})
+
+	t.Run("literals and fields mixed", func(t *testing.T) {
+		fields := map[string]interface{}{"facility": "plant1", "tag": "sensor01"}
+		state, err := runComputeFieldStep(t, concatConfig("facility", "\":\"", "tag"), fields)
+		require.NoError(t, err)
+		assert.Equal(t, "plant1:sensor01", state.Fields["out"])
+	})
+
+	t.Run("nested dot-path source", func(t *testing.T) {
+		fields := map[string]interface{}{
+			"market": map[string]interface{}{"exchange": "NASDAQ"},
+		}
+		state, err := runComputeFieldStep(t, concatConfig("\"finance.\"", "market.exchange"), fields)
+		require.NoError(t, err)
+		assert.Equal(t, "finance.NASDAQ", state.Fields["out"])
+	})
+
+	t.Run("missing field is a parsing error, not a literal", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, concatConfig("absent"), map[string]interface{}{})
+		requireParsingFailedError(t, err)
+	})
+
+	t.Run("non-string field is a parsing error, not coerced", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, concatConfig("num"), map[string]interface{}{"num": 42.5})
+		requireParsingFailedError(t, err)
+	})
+
+	t.Run("lone quote is a field lookup, not a panic", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, concatConfig("\""), map[string]interface{}{})
+		requireParsingFailedError(t, err)
+	})
+}
+
 // TestYAMLParser_ShardedTableRouting chains hash → slice → concat →
 // extract_table: the GP poor-man's-sharding composition. The revision pair
 // pins the accepted property that hashing the full stream_id as-is moves a
@@ -2571,6 +2643,56 @@ func TestYAMLParser_ShardedTableRouting(t *testing.T) {
 		assert.Equal(t, OutcomeOK, res.Outcome)
 		require.Len(t, res.Tables, 1)
 		assert.Equal(t, table, stripNullTerminator(res.Tables[0].TableName))
+	}
+
+	// A message without a stream_id cannot produce a shard: hash fails,
+	// $table is never set, and the structural floor drops the message.
+	t.Run("missing stream_id is unusable", func(t *testing.T) {
+		msg := &nats.Msg{
+			Subject: "test.subject",
+			Data:    []byte(`{"value": 1.5}`),
+		}
+
+		res, err := parser.Parse(msg)
+		requireUnusable(t, res, err)
+	})
+}
+
+// BenchmarkComputeFieldPipeline measures the per-message cost of the GP
+// sharded-routing composition: SHA-1 hash → slice 0:4 → concat "skf/"+shard.
+// ADR-005 claims <5% pipeline overhead for computed fields; this produces
+// the actual number.
+func BenchmarkComputeFieldPipeline(b *testing.B) {
+	configs := []map[string]interface{}{
+		{"operation": "hash", "algorithm": "sha1", "source": "stream_id", "target": "stream_id_hashed"},
+		{"operation": "slice", "source": "stream_id_hashed", "target": "shard", "start": 0, "end": 4},
+		{"operation": "concat", "target": "table_name", "fields": []interface{}{"\"skf/\"", "shard"}},
+	}
+
+	steps := make([]TransformationStep, 0, len(configs))
+
+	for _, config := range configs {
+		step, err := makeComputeFieldStep(config)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		steps = append(steps, step)
+	}
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		state := &ParseState{Fields: map[string]interface{}{
+			"stream_id": "skf-cxrn:tenant1:ion-stream:ABC123:1",
+		}}
+
+		for _, step := range steps {
+			err := step(state)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
 	}
 }
 

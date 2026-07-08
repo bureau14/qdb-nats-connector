@@ -1399,12 +1399,12 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 
 	switch operation {
 	case "concat":
-		fields, ok := config["fields"].([]interface{})
-		if !ok {
-			return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field 'concat' requires a 'fields' array")
+		cfg, err := parseConcatConfig(config, target)
+		if err != nil {
+			return nil, err
 		}
 
-		return makeStringConcatStep(target, fields), nil
+		return makeStringConcatStep(cfg), nil
 	case "split":
 		cfg, err := parseSplitConfig(config, target)
 		if err != nil {
@@ -1515,166 +1515,6 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 	}, nil
 }
 
-// makeStringConcatStep concatenates field values.
-// In: target, fields[] - output field, inputs
-// Out: TransformationStep - joins strings
-// Ex: makeStringConcatStep("tag_id", [facility,":",tag]) → step
-//
-// MEMORY PINNING WARNING:
-// ======================
-// This function uses direct string concatenation (+= operator) which is SAFE for QuasarDB.
-//
-// DO NOT REFACTOR TO USE strings.Builder!
-// strings.Builder may use internal optimizations that create non-contiguous memory regions,
-// which will cause SEGMENTATION FAULTS when QuasarDB tries to pin the memory for C++ access.
-//
-// The current implementation guarantees contiguous memory allocation required by:
-// - QuasarDB's PinToC() method
-// - unsafe.StringData() pointer access
-// - runtime.Pinner memory stabilization
-//
-// Any string created here will be written to QuasarDB tables and MUST remain pinnable.
-func makeStringConcatStep(target string, fields []interface{}) TransformationStep {
-	return func(state *ParseState) error {
-		var result string // Direct concatenation - QuasarDB memory-safe
-
-		for _, field := range fields {
-			switch f := field.(type) {
-			case string:
-				// Check if it's a literal string (contains no field references)
-				if strings.HasPrefix(f, "\"") && strings.HasSuffix(f, "\"") {
-					// Literal string - strip quotes for direct value
-					result += f[1 : len(f)-1]
-				} else if value, exists := state.Fields[f]; exists {
-					// Field reference - lookup and format value
-					result += fmt.Sprintf("%v", value)
-				} else {
-					// Missing field - use literal as fallback per ADR-005
-					result += f
-				}
-			default:
-				result += fmt.Sprintf("%v", field)
-			}
-		}
-
-		state.Fields[target] = result
-
-		return nil
-	}
-}
-
-// splitFieldConfig: compile-time configuration of a compute_field split.
-type splitFieldConfig struct {
-	source       string // original dot-path, for error messages
-	lookupSource func(fields map[string]interface{}) (interface{}, bool)
-	separator    string
-	target       string
-	index        int // negative = from the end
-}
-
-// parseSplitConfig validates compute_field split options.
-// In: config["source"] - input dot-path, compiled here
-//
-//	config["separator"] - non-empty split separator
-//	config["index"] - required int, negative = from the end
-//	target string - already-validated output field name
-//
-// Out: splitFieldConfig - validated config
-// Ex: parseSplitConfig({"source": "stream_id", "separator": ":", "index": -1}, "revision_raw") → cfg
-func parseSplitConfig(config map[string]interface{}, target string) (splitFieldConfig, error) {
-	source, ok := config["source"].(string)
-	if !ok || source == "" {
-		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
-			"compute_field 'split' requires a 'source' string option")
-	}
-
-	lookupSource, err := compileFieldPath(source)
-	if err != nil {
-		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
-			fmt.Sprintf("compute_field 'split' source is not a valid field path: %v", err))
-	}
-
-	separator, ok := config["separator"].(string)
-	if !ok || separator == "" {
-		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
-			"compute_field 'split' requires a non-empty 'separator' string option")
-	}
-
-	index, present, err := parseIntOption(config, "index")
-	if err != nil || !present {
-		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
-			"compute_field 'split' requires an integer 'index' option")
-	}
-
-	return splitFieldConfig{source: source, lookupSource: lookupSource, separator: separator, target: target, index: index}, nil
-}
-
-// makeSplitFieldStep creates a compute_field split step: strings.Split the
-// source value and select one part. Pure Go split semantics: a separator
-// absent from the value yields a single part, so index 0 and -1 both
-// resolve to the whole string. The output is a string; int64 coercion
-// happens downstream via extract_field/safe_parse_number. Substrings are
-// contiguous and pinning-safe (see makeStringConcatStep contract above).
-//
-// Non-structural: missing/non-string source and out-of-range index follow
-// the normal per-step error flow → OutcomePartial.
-//
-// In: cfg splitFieldConfig - validated config
-// Out: TransformationStep - writes the selected part to cfg.target
-// Ex: makeSplitFieldStep({source: "stream_id", separator: ":", index: -1, target: "revision_raw"}) → step
-func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
-	return func(state *ParseState) error {
-		value, exists := cfg.lookupSource(state.Fields)
-		if !exists {
-			return connectorErrors.NewParsingFailedError("yaml_parser",
-				fmt.Errorf("field '%s' not found in compute_field split step", cfg.source))
-		}
-
-		s, ok := value.(string)
-		if !ok {
-			return connectorErrors.NewParsingFailedError("yaml_parser",
-				fmt.Errorf("compute_field split source '%s' has type %T, want string", cfg.source, value))
-		}
-
-		parts := strings.Split(s, cfg.separator)
-
-		idx := cfg.index
-		if idx < 0 {
-			idx += len(parts)
-		}
-
-		if idx < 0 || idx >= len(parts) {
-			return connectorErrors.NewParsingFailedError("yaml_parser",
-				fmt.Errorf("split index %d out of range (%d parts) in compute_field step", cfg.index, len(parts)))
-		}
-
-		state.Fields[cfg.target] = parts[idx]
-
-		return nil
-	}
-}
-
-// parseIntOption reads an optional integer config value. YAML integer
-// literals arrive as int (yaml.v3); Go-literal test configs may pass int64.
-// In: config map - raw step config, key - option name
-// Out: (value, present, error) - error on a present non-integer
-// Ex: parseIntOption({"segment": -2}, "segment") → (-2, true, nil)
-func parseIntOption(config map[string]interface{}, key string) (value int, present bool, err error) {
-	raw, present := config[key]
-	if !present {
-		return 0, false, nil
-	}
-
-	switch v := raw.(type) {
-	case int:
-		return v, true, nil
-	case int64:
-		return int(v), true, nil
-	default:
-		return 0, false, fmt.Errorf("'%s' must be an integer, got %T", key, raw)
-	}
-}
-
 // compileSourceOption reads and compiles the required 'source' dot-path
 // option of a compute_field operation.
 // In: config map - raw step config, operation - name for error messages
@@ -1719,6 +1559,209 @@ func requireStringSource(lookup func(fields map[string]interface{}) (interface{}
 	}
 
 	return s, nil
+}
+
+// concatPart: one compiled entry of a concat fields[] array. A nil lookup
+// means the entry is a literal; otherwise it is a compiled dot-path.
+type concatPart struct {
+	literal string
+	source  string // original dot-path, for error messages
+	lookup  func(fields map[string]interface{}) (interface{}, bool)
+}
+
+// concatFieldConfig: compile-time configuration of a compute_field concat.
+type concatFieldConfig struct {
+	target string
+	parts  []concatPart
+}
+
+// parseConcatConfig validates compute_field concat options and classifies
+// each fields[] entry at config time: a `"quoted"` entry is a literal
+// (quotes stripped), anything else is a compiled dot-path whose resolved
+// value must be a string per message.
+// In: config["fields"] - non-empty array of string entries
+//
+//	target string - already-validated output field name
+//
+// Out: concatFieldConfig - validated config
+// Ex: parseConcatConfig({"fields": ['"skf/"', "shard"]}, "table_name") → cfg
+func parseConcatConfig(config map[string]interface{}, target string) (concatFieldConfig, error) {
+	fields, ok := config["fields"].([]interface{})
+	if !ok || len(fields) == 0 {
+		return concatFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'concat' requires a non-empty 'fields' array")
+	}
+
+	parts := make([]concatPart, 0, len(fields))
+
+	for _, field := range fields {
+		f, ok := field.(string)
+		if !ok {
+			return concatFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("compute_field 'concat' fields entries must be strings, got %T", field))
+		}
+
+		if len(f) >= 2 && strings.HasPrefix(f, "\"") && strings.HasSuffix(f, "\"") {
+			parts = append(parts, concatPart{literal: f[1 : len(f)-1]})
+
+			continue
+		}
+
+		lookup, err := compileFieldPath(f)
+		if err != nil {
+			return concatFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+				fmt.Sprintf("compute_field 'concat' fields entry is not a valid field path: %v", err))
+		}
+
+		parts = append(parts, concatPart{source: f, lookup: lookup})
+	}
+
+	return concatFieldConfig{target: target, parts: parts}, nil
+}
+
+// makeStringConcatStep concatenates literal and field-valued parts. Field
+// parts must resolve to strings; a missing or non-string value is a
+// per-message parsing error (non-structural → OutcomePartial), never a
+// silent coercion or fallback.
+// In: cfg concatFieldConfig - validated config
+// Out: TransformationStep - writes the joined string to cfg.target
+// Ex: makeStringConcatStep({parts: ["skf/", shard], target: "table_name"}) → step
+//
+// MEMORY PINNING WARNING:
+// ======================
+// This function uses direct string concatenation (+= operator) which is SAFE for QuasarDB.
+//
+// DO NOT REFACTOR TO USE strings.Builder!
+// strings.Builder may use internal optimizations that create non-contiguous memory regions,
+// which will cause SEGMENTATION FAULTS when QuasarDB tries to pin the memory for C++ access.
+//
+// The current implementation guarantees contiguous memory allocation required by:
+// - QuasarDB's PinToC() method
+// - unsafe.StringData() pointer access
+// - runtime.Pinner memory stabilization
+//
+// Any string created here will be written to QuasarDB tables and MUST remain pinnable.
+func makeStringConcatStep(cfg concatFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		var result string // Direct concatenation - QuasarDB memory-safe
+
+		for _, part := range cfg.parts {
+			if part.lookup == nil {
+				result += part.literal
+
+				continue
+			}
+
+			s, err := requireStringSource(part.lookup, part.source, "concat", state.Fields)
+			if err != nil {
+				return err
+			}
+
+			result += s
+		}
+
+		state.Fields[cfg.target] = result
+
+		return nil
+	}
+}
+
+// splitFieldConfig: compile-time configuration of a compute_field split.
+type splitFieldConfig struct {
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	separator    string
+	target       string
+	index        int // negative = from the end
+}
+
+// parseSplitConfig validates compute_field split options.
+// In: config["source"] - input dot-path, compiled here
+//
+//	config["separator"] - non-empty split separator
+//	config["index"] - required int, negative = from the end
+//	target string - already-validated output field name
+//
+// Out: splitFieldConfig - validated config
+// Ex: parseSplitConfig({"source": "stream_id", "separator": ":", "index": -1}, "revision_raw") → cfg
+func parseSplitConfig(config map[string]interface{}, target string) (splitFieldConfig, error) {
+	source, lookupSource, err := compileSourceOption(config, "split")
+	if err != nil {
+		return splitFieldConfig{}, err
+	}
+
+	separator, ok := config["separator"].(string)
+	if !ok || separator == "" {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires a non-empty 'separator' string option")
+	}
+
+	index, present, err := parseIntOption(config, "index")
+	if err != nil || !present {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'split' requires an integer 'index' option")
+	}
+
+	return splitFieldConfig{source: source, lookupSource: lookupSource, separator: separator, target: target, index: index}, nil
+}
+
+// makeSplitFieldStep creates a compute_field split step: strings.Split the
+// source value and select one part. Pure Go split semantics: a separator
+// absent from the value yields a single part, so index 0 and -1 both
+// resolve to the whole string. The output is a string; int64 coercion
+// happens downstream via extract_field/safe_parse_number. Substrings are
+// contiguous and pinning-safe (see makeStringConcatStep contract above).
+//
+// Non-structural: missing/non-string source and out-of-range index follow
+// the normal per-step error flow → OutcomePartial.
+//
+// In: cfg splitFieldConfig - validated config
+// Out: TransformationStep - writes the selected part to cfg.target
+// Ex: makeSplitFieldStep({source: "stream_id", separator: ":", index: -1, target: "revision_raw"}) → step
+func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		s, err := requireStringSource(cfg.lookupSource, cfg.source, "split", state.Fields)
+		if err != nil {
+			return err
+		}
+
+		parts := strings.Split(s, cfg.separator)
+
+		idx := cfg.index
+		if idx < 0 {
+			idx += len(parts)
+		}
+
+		if idx < 0 || idx >= len(parts) {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("split index %d out of range (%d parts) in compute_field step", cfg.index, len(parts)))
+		}
+
+		state.Fields[cfg.target] = parts[idx]
+
+		return nil
+	}
+}
+
+// parseIntOption reads an optional integer config value. YAML integer
+// literals arrive as int (yaml.v3); Go-literal test configs may pass int64.
+// In: config map - raw step config, key - option name
+// Out: (value, present, error) - error on a present non-integer
+// Ex: parseIntOption({"segment": -2}, "segment") → (-2, true, nil)
+func parseIntOption(config map[string]interface{}, key string) (value int, present bool, err error) {
+	raw, present := config[key]
+	if !present {
+		return 0, false, nil
+	}
+
+	switch v := raw.(type) {
+	case int:
+		return v, true, nil
+	case int64:
+		return int(v), true, nil
+	default:
+		return 0, false, fmt.Errorf("'%s' must be an integer, got %T", key, raw)
+	}
 }
 
 // hashFieldConfig: compile-time configuration of a compute_field hash.

@@ -57,7 +57,7 @@ transformations:
     config:
       operation: "concat"
       target: "table_name"
-      fields: ["finance", ".", "exchange", ".", "stock_id"]
+      fields: ['"finance"', '"."', "exchange", '"."', "stock_id"]
 
   # Extract the computed table name for dynamic routing
   - step: "extract_table"
@@ -114,4 +114,4 @@ transformations:
     config:
       operation: "concat"
       target: "trading_pair"
-      fields: ["exchange", ":", "stock_id"]
+      fields: ["exchange", '":"', "stock_id"]

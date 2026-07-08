@@ -36,7 +36,7 @@ transformations:
     config:
       operation: "concat"
       target: "table_name"
-      fields: ["industrial.", "building", ".", "floor"]
+      fields: ['"industrial."', "building", '"."', "floor"]
 
   # Extract table name (required by YAML parser)
   - step: "extract_table"
@@ -68,7 +68,7 @@ transformations:
     config:
       operation: "concat"
       target: "sensor_tag"
-      fields: ["building", "-", "floor", "-", "sensor_id"]
+      fields: ["building", '"-"', "floor", '"-"', "sensor_id"]
 
   # Extract the data-type indicator consumed by the row filter below
   - step: "extract_field"

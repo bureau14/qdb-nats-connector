@@ -422,6 +422,50 @@ count_qdb_rows() {
     echo "$total"
 }
 
+# Export one table to CSV, retrying until the export catches up with
+# SELECT COUNT(*). qdb_export reads through the bulk-reader path, which for
+# async-pushed data trails the query engine: rows become scan-visible per
+# async-pipeline flush, up to seconds after COUNT(*) already reports them.
+# The caller only exports after wait_for_qdb_rows confirmed the expected
+# total via COUNT(*), so a short export means the bulk reader is lagging,
+# not that data is missing -- re-running the export is sufficient.
+# Note: qdb_export writes no header row; every CSV line is a data row.
+# Usage: export_table_csv <table> <csv_file>
+# Env: EXPORT_SYNC_ATTEMPTS (default 10), EXPORT_SYNC_INTERVAL (default 1s)
+export_table_csv() {
+    local table="$1" csv_file="$2"
+    local attempts="${EXPORT_SYNC_ATTEMPTS:-10}" interval="${EXPORT_SYNC_INTERVAL:-1}"
+    local attempt expected exported
+
+    for (( attempt = 1; attempt <= attempts; attempt++ )); do
+        # Query COUNT(*) directly rather than via count_qdb_rows: that helper
+        # maps a failed query to 0, which here would make a short export pass
+        # the catch-up check. An empty result means the query failed (e.g. a
+        # transient error under write load) and must be retried; a literal 0
+        # is a genuinely empty table.
+        expected=$("$QDBSH" -c "SELECT COUNT(*) FROM \"$table\"" 2>/dev/null \
+            | awk '/^-{3,}$/{getline; print $1; exit}' | tr -d ',')
+        if [[ -z "$expected" ]]; then
+            log_info "COUNT(*) query for $table failed; retrying ($attempt/$attempts)"
+            sleep "$interval"
+            continue
+        fi
+
+        if ! "$QDB_EXPORT" --ts "$table" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
+            die "Failed to export table $table"
+        fi
+        exported=$(wc -l < "$csv_file" | tr -d ' ')
+        if [[ $exported -ge $expected ]]; then
+            log_debug "Exported $exported rows from $table (COUNT(*)=$expected, attempt $attempt)"
+            return 0
+        fi
+        log_info "Export of $table returned $exported rows but COUNT(*) reports $expected; retrying ($attempt/$attempts)"
+        sleep "$interval"
+    done
+
+    die "Export of $table did not catch up with COUNT(*) after $attempts attempts (last export: ${exported:-n/a} rows, last COUNT(*): ${expected:-n/a})"
+}
+
 # Dump connector crash diagnostics to stderr.
 #
 # A Go runtime crash (panic, fatal error, or CGO SIGSEGV) prints a full

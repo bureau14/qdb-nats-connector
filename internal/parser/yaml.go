@@ -59,6 +59,9 @@ package parser
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha1" //nolint:gosec // sharding scheme, not cryptographic use
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1365,9 +1368,12 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 }
 
 // makeComputeFieldStep computes derived fields.
-// In: config[operation,target,...] - operation "concat" (fields array) or
+// In: config[operation,target,...] - operation "concat" (fields array),
 //
-//	"split" (source, separator, index)
+//	"split" (source, separator, index),
+//	"hash" (source, algorithm),
+//	"slice" (source, start, optional end),
+//	"str" (source)
 //
 // Out: TransformationStep - derived string field
 // Ex: makeComputeFieldStep({"operation": "concat"}) → step
@@ -1406,6 +1412,27 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 		}
 
 		return makeSplitFieldStep(cfg), nil
+	case "hash":
+		cfg, err := parseHashConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeHashFieldStep(cfg), nil
+	case "slice":
+		cfg, err := parseSliceConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeSliceFieldStep(cfg), nil
+	case "str":
+		cfg, err := parseStrConfig(config, target)
+		if err != nil {
+			return nil, err
+		}
+
+		return makeStrFieldStep(cfg), nil
 	default:
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("unsupported operation in compute_field step: %s", operation))
@@ -1645,6 +1672,284 @@ func parseIntOption(config map[string]interface{}, key string) (value int, prese
 		return int(v), true, nil
 	default:
 		return 0, false, fmt.Errorf("'%s' must be an integer, got %T", key, raw)
+	}
+}
+
+// compileSourceOption reads and compiles the required 'source' dot-path
+// option of a compute_field operation.
+// In: config map - raw step config, operation - name for error messages
+// Out: (original path, compiled lookup closure) or config error
+// Ex: compileSourceOption({"source": "a.b"}, "hash") → ("a.b", lookup, nil)
+func compileSourceOption(config map[string]interface{}, operation string) (source string, lookup func(fields map[string]interface{}) (interface{}, bool), err error) {
+	source, ok := config["source"].(string)
+	if !ok || source == "" {
+		return "", nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("compute_field '%s' requires a 'source' string option", operation))
+	}
+
+	lookupSource, err := compileFieldPath(source)
+	if err != nil {
+		return "", nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("compute_field '%s' source is not a valid field path: %v", operation, err))
+	}
+
+	return source, lookupSource, nil
+}
+
+// requireStringSource resolves a compiled source lookup and requires a
+// string value. A missing or wrong-typed value is a per-message parsing
+// error (non-structural → OutcomePartial), never a silent coercion.
+// In: lookup - compiled dot-path closure, source - original path for errors,
+//
+//	operation - compute_field operation name, fields - message fields
+//
+// Out: string value or ParsingFailed error
+// Ex: requireStringSource(lookup, "stream_id", "hash", fields) → "skf-cxrn:..."
+func requireStringSource(lookup func(fields map[string]interface{}) (interface{}, bool), source, operation string, fields map[string]interface{}) (string, error) {
+	value, exists := lookup(fields)
+	if !exists {
+		return "", connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("field '%s' not found in compute_field %s step", source, operation))
+	}
+
+	s, ok := value.(string)
+	if !ok {
+		return "", connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("compute_field %s source '%s' has type %T, want string", operation, source, value))
+	}
+
+	return s, nil
+}
+
+// hashFieldConfig: compile-time configuration of a compute_field hash.
+type hashFieldConfig struct {
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	target       string
+	digestHex    func(data []byte) string // algorithm resolved at config time
+}
+
+// parseHashConfig validates compute_field hash options and resolves the
+// algorithm to a digest closure at config time.
+// In: config["source"] - input dot-path, compiled here
+//
+//	config["algorithm"] - "sha1" or "sha256"
+//	target string - already-validated output field name
+//
+// Out: hashFieldConfig - validated config
+// Ex: parseHashConfig({"source": "stream_id", "algorithm": "sha1"}, "stream_id_hashed") → cfg
+func parseHashConfig(config map[string]interface{}, target string) (hashFieldConfig, error) {
+	source, lookupSource, err := compileSourceOption(config, "hash")
+	if err != nil {
+		return hashFieldConfig{}, err
+	}
+
+	algorithm, ok := config["algorithm"].(string)
+	if !ok {
+		return hashFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'hash' requires an 'algorithm' string option")
+	}
+
+	var digestHex func(data []byte) string
+
+	switch algorithm {
+	case "sha1":
+		digestHex = func(data []byte) string {
+			d := sha1.Sum(data) //nolint:gosec // sharding scheme, not cryptographic use
+
+			return hex.EncodeToString(d[:])
+		}
+	case "sha256":
+		digestHex = func(data []byte) string {
+			d := sha256.Sum256(data)
+
+			return hex.EncodeToString(d[:])
+		}
+	default:
+		return hashFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("unsupported algorithm in compute_field hash step: %s", algorithm))
+	}
+
+	return hashFieldConfig{source: source, lookupSource: lookupSource, target: target, digestHex: digestHex}, nil
+}
+
+// makeHashFieldStep creates a compute_field hash step: digest the source
+// string and write the full lowercase hex digest. Truncation is not this
+// operation's job; compose with slice. hex.EncodeToString returns a fresh
+// contiguous allocation, pinning-safe (see makeStringConcatStep contract
+// above).
+//
+// Non-structural: missing/non-string source follows the normal per-step
+// error flow → OutcomePartial.
+//
+// In: cfg hashFieldConfig - validated config
+// Out: TransformationStep - writes the hex digest to cfg.target
+// Ex: makeHashFieldStep({source: "stream_id", target: "stream_id_hashed"}) → step
+func makeHashFieldStep(cfg hashFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		s, err := requireStringSource(cfg.lookupSource, cfg.source, "hash", state.Fields)
+		if err != nil {
+			return err
+		}
+
+		state.Fields[cfg.target] = cfg.digestHex([]byte(s))
+
+		return nil
+	}
+}
+
+// sliceFieldConfig: compile-time configuration of a compute_field slice.
+type sliceFieldConfig struct {
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	target       string
+	start        int
+	end          int
+	hasEnd       bool // omitted end = end of string
+}
+
+// parseSliceConfig validates compute_field slice options.
+// In: config["source"] - input dot-path, compiled here
+//
+//	config["start"] - required int, negative = from the end
+//	config["end"] - optional int, negative = from the end
+//	target string - already-validated output field name
+//
+// Out: sliceFieldConfig - validated config
+// Ex: parseSliceConfig({"source": "stream_id_hashed", "start": 0, "end": 4}, "shard") → cfg
+func parseSliceConfig(config map[string]interface{}, target string) (sliceFieldConfig, error) {
+	source, lookupSource, err := compileSourceOption(config, "slice")
+	if err != nil {
+		return sliceFieldConfig{}, err
+	}
+
+	start, present, err := parseIntOption(config, "start")
+	if err != nil || !present {
+		return sliceFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'slice' requires an integer 'start' option")
+	}
+
+	end, hasEnd, err := parseIntOption(config, "end")
+	if err != nil {
+		return sliceFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'slice' 'end' option must be an integer")
+	}
+
+	return sliceFieldConfig{source: source, lookupSource: lookupSource, target: target, start: start, end: end, hasEnd: hasEnd}, nil
+}
+
+// clampSliceIndex resolves a Python slice index against a string of length
+// n: negative counts from the end, out-of-range clamps to [0, n].
+// In: idx - raw index, n - string length in bytes
+// Out: resolved index in [0, n]
+// Ex: clampSliceIndex(-1, 3) → 2; clampSliceIndex(10, 3) → 3
+func clampSliceIndex(idx, n int) int {
+	if idx < 0 {
+		idx += n
+	}
+
+	return min(max(idx, 0), n)
+}
+
+// makeSliceFieldStep creates a compute_field slice step with Python slice
+// semantics on the source string: negative indices count from the end,
+// out-of-range indices clamp ("abc"[0:10] → "abc", never an error), and
+// inverted ranges yield "". Indexing is byte-based (like split) - fine for
+// hex digests and ASCII identifiers. The output is a Go substring of the
+// source: contiguous and pinning-safe (see makeStringConcatStep contract
+// above).
+//
+// Non-structural: missing/non-string source follows the normal per-step
+// error flow → OutcomePartial.
+//
+// In: cfg sliceFieldConfig - validated config
+// Out: TransformationStep - writes the substring to cfg.target
+// Ex: makeSliceFieldStep({source: "stream_id_hashed", start: 0, end: 4, target: "shard"}) → step
+func makeSliceFieldStep(cfg sliceFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		s, err := requireStringSource(cfg.lookupSource, cfg.source, "slice", state.Fields)
+		if err != nil {
+			return err
+		}
+
+		lo := clampSliceIndex(cfg.start, len(s))
+
+		hi := len(s)
+		if cfg.hasEnd {
+			hi = clampSliceIndex(cfg.end, len(s))
+		}
+
+		if lo >= hi {
+			state.Fields[cfg.target] = ""
+
+			return nil
+		}
+
+		state.Fields[cfg.target] = s[lo:hi]
+
+		return nil
+	}
+}
+
+// strFieldConfig: compile-time configuration of a compute_field str.
+type strFieldConfig struct {
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	target       string
+}
+
+// parseStrConfig validates compute_field str options.
+// In: config["source"] - input dot-path, compiled here
+//
+//	target string - already-validated output field name
+//
+// Out: strFieldConfig - validated config
+// Ex: parseStrConfig({"source": "floor"}, "floor_str") → cfg
+func parseStrConfig(config map[string]interface{}, target string) (strFieldConfig, error) {
+	source, lookupSource, err := compileSourceOption(config, "str")
+	if err != nil {
+		return strFieldConfig{}, err
+	}
+
+	return strFieldConfig{source: source, lookupSource: lookupSource, target: target}, nil
+}
+
+// makeStrFieldStep creates a compute_field str step: strictly-typed
+// conversion to string via strconv - the single sanctioned escape hatch
+// that keeps every other operation strict. Accepts exactly int64, float64,
+// bool, and string; anything else is a per-message parsing error. strconv
+// results are fresh contiguous allocations, pinning-safe (see
+// makeStringConcatStep contract above).
+//
+// Non-structural: missing/unsupported source follows the normal per-step
+// error flow → OutcomePartial.
+//
+// In: cfg strFieldConfig - validated config
+// Out: TransformationStep - writes the string form to cfg.target
+// Ex: makeStrFieldStep({source: "floor", target: "floor_str"}) → step
+func makeStrFieldStep(cfg strFieldConfig) TransformationStep {
+	return func(state *ParseState) error {
+		value, exists := cfg.lookupSource(state.Fields)
+		if !exists {
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("field '%s' not found in compute_field str step", cfg.source))
+		}
+
+		switch v := value.(type) {
+		case string:
+			state.Fields[cfg.target] = v
+		case int64:
+			state.Fields[cfg.target] = strconv.FormatInt(v, 10)
+		case float64:
+			state.Fields[cfg.target] = strconv.FormatFloat(v, 'g', -1, 64)
+		case bool:
+			state.Fields[cfg.target] = strconv.FormatBool(v)
+		default:
+			return connectorErrors.NewParsingFailedError("yaml_parser",
+				fmt.Errorf("compute_field str source '%s' has unsupported type %T", cfg.source, value))
+		}
+
+		return nil
 	}
 }
 

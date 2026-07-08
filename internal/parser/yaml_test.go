@@ -7,6 +7,9 @@ package parser
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha1" //nolint:gosec // reference digests for the sharding scheme, not cryptographic use
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -2015,8 +2018,8 @@ func TestYAMLParserFilterValidation(t *testing.T) {
 	})
 }
 
-// runSplitStep compiles a compute_field split step and runs it.
-func runSplitStep(t *testing.T, config, fields map[string]interface{}) (*ParseState, error) {
+// runComputeFieldStep compiles a compute_field step and runs it.
+func runComputeFieldStep(t *testing.T, config, fields map[string]interface{}) (*ParseState, error) {
 	t.Helper()
 
 	step, err := makeComputeFieldStep(config)
@@ -2038,8 +2041,9 @@ func splitBaseConfig(index int) map[string]interface{} {
 	}
 }
 
-// TestComputeFieldSplitFactoryErrors validates fail-fast config handling
-func TestComputeFieldSplitFactoryErrors(t *testing.T) {
+// TestComputeFieldFactoryErrors validates fail-fast config handling across
+// all compute_field operations
+func TestComputeFieldFactoryErrors(t *testing.T) {
 	cases := []struct {
 		name   string
 		config map[string]interface{}
@@ -2068,6 +2072,45 @@ func TestComputeFieldSplitFactoryErrors(t *testing.T) {
 		{"reserved $-prefixed target", map[string]interface{}{
 			"operation": "concat", "target": "$table", "fields": []interface{}{"\"x\""},
 		}},
+		{"hash missing source", map[string]interface{}{
+			"operation": "hash", "target": "t", "algorithm": "sha1",
+		}},
+		{"hash empty source", map[string]interface{}{
+			"operation": "hash", "target": "t", "source": "", "algorithm": "sha1",
+		}},
+		{"hash invalid source path", map[string]interface{}{
+			"operation": "hash", "target": "t", "source": "a..b", "algorithm": "sha1",
+		}},
+		{"hash missing algorithm", map[string]interface{}{
+			"operation": "hash", "target": "t", "source": "s",
+		}},
+		{"hash non-string algorithm", map[string]interface{}{
+			"operation": "hash", "target": "t", "source": "s", "algorithm": 5,
+		}},
+		{"hash unknown algorithm", map[string]interface{}{
+			"operation": "hash", "target": "t", "source": "s", "algorithm": "md5",
+		}},
+		{"slice missing source", map[string]interface{}{
+			"operation": "slice", "target": "t", "start": 0,
+		}},
+		{"slice invalid source path", map[string]interface{}{
+			"operation": "slice", "target": "t", "source": ".a", "start": 0,
+		}},
+		{"slice missing start", map[string]interface{}{
+			"operation": "slice", "target": "t", "source": "s",
+		}},
+		{"slice non-integer start", map[string]interface{}{
+			"operation": "slice", "target": "t", "source": "s", "start": "0",
+		}},
+		{"slice non-integer end", map[string]interface{}{
+			"operation": "slice", "target": "t", "source": "s", "start": 0, "end": 4.5,
+		}},
+		{"str missing source", map[string]interface{}{
+			"operation": "str", "target": "t",
+		}},
+		{"str invalid source path", map[string]interface{}{
+			"operation": "str", "target": "t", "source": "a..b",
+		}},
 	}
 
 	for _, tc := range cases {
@@ -2090,13 +2133,13 @@ func TestComputeFieldSplit(t *testing.T) {
 	streamID := map[string]interface{}{"stream_id": "skf-cxrn:123:ion-stream:TOKEN:7"}
 
 	t.Run("positive index", func(t *testing.T) {
-		state, err := runSplitStep(t, splitBaseConfig(1), streamID)
+		state, err := runComputeFieldStep(t, splitBaseConfig(1), streamID)
 		require.NoError(t, err)
 		assert.Equal(t, "123", state.Fields["revision_raw"])
 	})
 
 	t.Run("negative index", func(t *testing.T) {
-		state, err := runSplitStep(t, splitBaseConfig(-1), streamID)
+		state, err := runComputeFieldStep(t, splitBaseConfig(-1), streamID)
 		require.NoError(t, err)
 		assert.Equal(t, "7", state.Fields["revision_raw"])
 	})
@@ -2105,31 +2148,31 @@ func TestComputeFieldSplit(t *testing.T) {
 		noSep := map[string]interface{}{"stream_id": "abc"}
 
 		for _, index := range []int{0, -1} {
-			state, err := runSplitStep(t, splitBaseConfig(index), map[string]interface{}{"stream_id": "abc"})
+			state, err := runComputeFieldStep(t, splitBaseConfig(index), map[string]interface{}{"stream_id": "abc"})
 			require.NoError(t, err)
 			assert.Equal(t, "abc", state.Fields["revision_raw"])
 		}
 
 		for _, index := range []int{1, -2} {
-			_, err := runSplitStep(t, splitBaseConfig(index), noSep)
+			_, err := runComputeFieldStep(t, splitBaseConfig(index), noSep)
 			requireParsingFailedError(t, err)
 		}
 	})
 
 	t.Run("out of range", func(t *testing.T) {
 		for _, index := range []int{5, -6} {
-			_, err := runSplitStep(t, splitBaseConfig(index), streamID)
+			_, err := runComputeFieldStep(t, splitBaseConfig(index), streamID)
 			requireParsingFailedError(t, err)
 		}
 	})
 
 	t.Run("missing source field", func(t *testing.T) {
-		_, err := runSplitStep(t, splitBaseConfig(0), map[string]interface{}{})
+		_, err := runComputeFieldStep(t, splitBaseConfig(0), map[string]interface{}{})
 		requireParsingFailedError(t, err)
 	})
 
 	t.Run("non-string source", func(t *testing.T) {
-		_, err := runSplitStep(t, splitBaseConfig(0), map[string]interface{}{"stream_id": int64(7)})
+		_, err := runComputeFieldStep(t, splitBaseConfig(0), map[string]interface{}{"stream_id": int64(7)})
 		requireParsingFailedError(t, err)
 	})
 
@@ -2137,7 +2180,7 @@ func TestComputeFieldSplit(t *testing.T) {
 		config := splitBaseConfig(-1)
 		config["source"] = "envelope.stream_id"
 
-		state, err := runSplitStep(t, config, map[string]interface{}{
+		state, err := runComputeFieldStep(t, config, map[string]interface{}{
 			"envelope": map[string]interface{}{"stream_id": "a:b:c"},
 		})
 		require.NoError(t, err)
@@ -2180,6 +2223,355 @@ func TestComputeFieldSplitProperties(t *testing.T) {
 			require.Error(rt, err)
 		}
 	})
+}
+
+// hashConfig returns a valid compute_field hash config over the "in" field.
+func hashConfig(algorithm string) map[string]interface{} {
+	return map[string]interface{}{
+		"operation": "hash",
+		"target":    "out",
+		"source":    "in",
+		"algorithm": algorithm,
+	}
+}
+
+// TestComputeFieldHash pins the golden GP sharding vectors (SHA-1 digest,
+// first 4 hex chars = shard) and runtime failures
+func TestComputeFieldHash(t *testing.T) {
+	t.Run("sha1 golden shard vectors", func(t *testing.T) {
+		shards := map[string]string{
+			"sensor1234":                           "4c93",
+			"Brunswick_724_1038":                   "7e14",
+			"Monticello_1_2":                       "2f6b",
+			"Cedar_Springs_10_20":                  "6d55",
+			"test":                                 "a94a",
+			"skf-cxrn:tenant1:ion-stream:ABC123:1": "b831",
+			"skf-cxrn:tenant1:ion-stream:ABC123:2": "b4a9",
+		}
+
+		for input, shard := range shards {
+			state, err := runComputeFieldStep(t, hashConfig("sha1"), map[string]interface{}{"in": input})
+			require.NoError(t, err)
+
+			digest, ok := state.Fields["out"].(string)
+			require.True(t, ok)
+			require.Len(t, digest, 40)
+			assert.Equal(t, shard, digest[:4], "input %q", input)
+		}
+	})
+
+	t.Run("sha1 full digest", func(t *testing.T) {
+		state, err := runComputeFieldStep(t, hashConfig("sha1"), map[string]interface{}{"in": "test"})
+		require.NoError(t, err)
+		assert.Equal(t, "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3", state.Fields["out"])
+	})
+
+	t.Run("sha256 full digest", func(t *testing.T) {
+		state, err := runComputeFieldStep(t, hashConfig("sha256"), map[string]interface{}{"in": "test"})
+		require.NoError(t, err)
+		assert.Equal(t, "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", state.Fields["out"])
+	})
+
+	t.Run("nested dot-path source", func(t *testing.T) {
+		config := hashConfig("sha1")
+		config["source"] = "envelope.stream_id"
+
+		state, err := runComputeFieldStep(t, config, map[string]interface{}{
+			"envelope": map[string]interface{}{"stream_id": "test"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3", state.Fields["out"])
+	})
+
+	t.Run("missing source field", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, hashConfig("sha1"), map[string]interface{}{})
+		requireParsingFailedError(t, err)
+	})
+
+	t.Run("non-string source", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, hashConfig("sha1"), map[string]interface{}{"in": int64(7)})
+		requireParsingFailedError(t, err)
+	})
+}
+
+// TestComputeFieldHashProperties pins agreement with the crypto/sha1 and
+// crypto/sha256 reference digests against generated inputs
+func TestComputeFieldHashProperties(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		value := rapid.String().Draw(rt, "value")
+		algorithm := rapid.SampledFrom([]string{"sha1", "sha256"}).Draw(rt, "algorithm")
+
+		step, err := makeComputeFieldStep(hashConfig(algorithm))
+		require.NoError(rt, err)
+
+		state := &ParseState{Fields: map[string]interface{}{"in": value}}
+		require.NoError(rt, step(state))
+
+		var want string
+
+		if algorithm == "sha1" {
+			d := sha1.Sum([]byte(value)) //nolint:gosec // reference digest for the sharding scheme
+			want = hex.EncodeToString(d[:])
+		} else {
+			d := sha256.Sum256([]byte(value))
+			want = hex.EncodeToString(d[:])
+		}
+
+		require.Equal(rt, want, state.Fields["out"])
+	})
+}
+
+// sliceConfig returns a compute_field slice config over the "in" field;
+// omit end for open-ended slices.
+func sliceConfig(start int, end ...int) map[string]interface{} {
+	config := map[string]interface{}{
+		"operation": "slice",
+		"target":    "out",
+		"source":    "in",
+		"start":     start,
+	}
+
+	if len(end) > 0 {
+		config["end"] = end[0]
+	}
+
+	return config
+}
+
+// TestComputeFieldSlice covers Python slice semantics (negative indices,
+// clamping, inverted ranges, omitted end) and runtime failures
+func TestComputeFieldSlice(t *testing.T) {
+	cases := []struct {
+		name   string
+		config map[string]interface{}
+		want   string
+	}{
+		{"basic", sliceConfig(0, 4), "abcd"},
+		{"omitted end", sliceConfig(2), "cdef"},
+		{"negative start", sliceConfig(-2), "ef"},
+		{"negative end", sliceConfig(0, -1), "abcde"},
+		{"end clamped past length", sliceConfig(0, 10), "abcdef"},
+		{"negative start clamped", sliceConfig(-10, 2), "ab"},
+		{"inverted range", sliceConfig(4, 2), ""},
+		{"start beyond length", sliceConfig(10, 20), ""},
+		{"zero-width", sliceConfig(3, 3), ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := runComputeFieldStep(t, tc.config, map[string]interface{}{"in": "abcdef"})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, state.Fields["out"])
+		})
+	}
+
+	t.Run("empty source string", func(t *testing.T) {
+		state, err := runComputeFieldStep(t, sliceConfig(0, 4), map[string]interface{}{"in": ""})
+		require.NoError(t, err)
+		assert.Equal(t, "", state.Fields["out"])
+	})
+
+	t.Run("nested dot-path source", func(t *testing.T) {
+		config := sliceConfig(0, 4)
+		config["source"] = "envelope.digest"
+
+		state, err := runComputeFieldStep(t, config, map[string]interface{}{
+			"envelope": map[string]interface{}{"digest": "b831ff00"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "b831", state.Fields["out"])
+	})
+
+	t.Run("missing source field", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, sliceConfig(0, 4), map[string]interface{}{})
+		requireParsingFailedError(t, err)
+	})
+
+	t.Run("non-string source", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, sliceConfig(0, 4), map[string]interface{}{"in": 1.5})
+		requireParsingFailedError(t, err)
+	})
+}
+
+// pythonSliceRef is an inline Python-slice-semantics reference: negative
+// indices count from the end, indices clamp to [0, len], inverted
+// ranges yield "".
+func pythonSliceRef(s string, start, end int, hasEnd bool) string {
+	norm := func(idx int) int {
+		if idx < 0 {
+			idx += len(s)
+		}
+
+		if idx < 0 {
+			return 0
+		}
+
+		if idx > len(s) {
+			return len(s)
+		}
+
+		return idx
+	}
+
+	lo, hi := norm(start), len(s)
+	if hasEnd {
+		hi = norm(end)
+	}
+
+	if lo >= hi {
+		return ""
+	}
+
+	return s[lo:hi]
+}
+
+// TestComputeFieldSliceProperties pins panic-freedom and agreement with the
+// Python-semantics reference against generated inputs
+func TestComputeFieldSliceProperties(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		value := rapid.String().Draw(rt, "value")
+		start := rapid.IntRange(-20, 20).Draw(rt, "start")
+		hasEnd := rapid.Bool().Draw(rt, "hasEnd")
+
+		config := sliceConfig(start)
+
+		end := 0
+		if hasEnd {
+			end = rapid.IntRange(-20, 20).Draw(rt, "end")
+			config["end"] = end
+		}
+
+		step, err := makeComputeFieldStep(config)
+		require.NoError(rt, err)
+
+		state := &ParseState{Fields: map[string]interface{}{"in": value}}
+		require.NoError(rt, step(state))
+
+		require.Equal(rt, pythonSliceRef(value, start, end, hasEnd), state.Fields["out"])
+	})
+}
+
+// strConfig returns a valid compute_field str config over the "in" field.
+func strConfig() map[string]interface{} {
+	return map[string]interface{}{
+		"operation": "str",
+		"target":    "out",
+		"source":    "in",
+	}
+}
+
+// TestComputeFieldStr pins the strconv outputs per supported type and the
+// strict per-message error on anything else
+func TestComputeFieldStr(t *testing.T) {
+	supported := []struct {
+		name  string
+		value interface{}
+		want  string
+	}{
+		{"int64", int64(42), "42"},
+		{"negative int64", int64(-7), "-7"},
+		{"float64", 2.5, "2.5"},
+		{"float64 integral", 100.0, "100"},
+		{"float64 scientific", 1e21, "1e+21"},
+		{"bool true", true, "true"},
+		{"bool false", false, "false"},
+		{"string passthrough", "already", "already"},
+	}
+
+	for _, tc := range supported {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := runComputeFieldStep(t, strConfig(), map[string]interface{}{"in": tc.value})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, state.Fields["out"])
+		})
+	}
+
+	unsupported := []struct {
+		name  string
+		value interface{}
+	}{
+		{"int", 7},
+		{"nil", nil},
+		{"map", map[string]interface{}{}},
+		{"slice", []interface{}{}},
+		{"time", time.Time{}},
+	}
+
+	for _, tc := range unsupported {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := runComputeFieldStep(t, strConfig(), map[string]interface{}{"in": tc.value})
+			requireParsingFailedError(t, err)
+		})
+	}
+
+	t.Run("missing source field", func(t *testing.T) {
+		_, err := runComputeFieldStep(t, strConfig(), map[string]interface{}{})
+		requireParsingFailedError(t, err)
+	})
+}
+
+// TestYAMLParser_ShardedTableRouting chains hash → slice → concat →
+// extract_table: the GP poor-man's-sharding composition. The revision pair
+// pins the accepted property that hashing the full stream_id as-is moves a
+// revision bump to a different shard.
+func TestYAMLParser_ShardedTableRouting(t *testing.T) {
+	config := YAMLConfig{
+		Output: OutputSchema{
+			Columns: []ColumnSchema{
+				{Name: "value", Type: "double"},
+			},
+		},
+		Transformations: []TransformSpec{
+			{Step: "parse_json"},
+			{Step: "compute_field", Config: map[string]interface{}{
+				"operation": "hash",
+				"algorithm": "sha1",
+				"source":    "stream_id",
+				"target":    "stream_id_hashed",
+			}},
+			{Step: "compute_field", Config: map[string]interface{}{
+				"operation": "slice",
+				"source":    "stream_id_hashed",
+				"target":    "shard",
+				"start":     0,
+				"end":       4,
+			}},
+			{Step: "compute_field", Config: map[string]interface{}{
+				"operation": "concat",
+				"target":    "table_name",
+				"fields":    []interface{}{"\"skf/\"", "shard"},
+			}},
+			{Step: "extract_table", Config: map[string]interface{}{
+				"source": "table_name",
+			}},
+			{Step: "extract_field", Config: map[string]interface{}{
+				"source": "value",
+				"target": "value",
+				"type":   "float64",
+			}},
+		},
+	}
+
+	parser, err := NewYAMLParserFromConfig(config)
+	require.NoError(t, err)
+
+	shards := map[string]string{
+		"skf-cxrn:tenant1:ion-stream:ABC123:1": "skf/b831",
+		"skf-cxrn:tenant1:ion-stream:ABC123:2": "skf/b4a9",
+	}
+
+	for streamID, table := range shards {
+		msg := &nats.Msg{
+			Subject: "test.subject",
+			Data:    []byte(`{"stream_id": "` + streamID + `", "value": 1.5}`),
+		}
+
+		res, err := parser.Parse(msg)
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeOK, res.Outcome)
+		require.Len(t, res.Tables, 1)
+		assert.Equal(t, table, stripNullTerminator(res.Tables[0].TableName))
+	}
 }
 
 // TestCompileFieldPath covers config-time path validation and the compiled

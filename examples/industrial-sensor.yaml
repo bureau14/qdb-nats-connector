@@ -35,13 +35,13 @@ transformations:
   - step: "compute_field"
     config:
       operation: "concat"
-      target: "$table"
+      target: "table_name"
       fields: ["industrial.", "building", ".", "floor"]
 
   # Extract table name (required by YAML parser)
   - step: "extract_table"
     config:
-      source: "$table"
+      source: "table_name"
 
   # Extract and convert timestamp field (custom format)
   - step: "extract_index"

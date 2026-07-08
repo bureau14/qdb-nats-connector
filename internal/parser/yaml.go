@@ -1247,8 +1247,61 @@ func makeExtractTableStep(config map[string]interface{}) (TransformationStep, er
 	}, nil
 }
 
+// validateFieldPath checks dot-path format: non-empty, no leading/trailing
+// or consecutive dots. Called by compileFieldPath at config compile time.
+// In: path "a.b.c" - dot notation
+// Out: error - nil when well-formed
+// Ex: validateFieldPath("a..b") → error
+func validateFieldPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty field path")
+	}
+	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
+		return fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("invalid field path format: consecutive dots not allowed")
+	}
+
+	return nil
+}
+
+// compileFieldPath validates a dot-path at config time and returns a
+// per-message lookup closure. Segments are split once, here; the closure
+// only walks nested maps. A missing key or a non-map intermediate resolves
+// to (nil, false). Known accepted wart: a flat field whose literal name
+// contains a dot is unaddressable.
+// In: path "a.b.c" - dot notation
+// Out: lookup closure over state.Fields, or a path-format error
+// Ex: compileFieldPath("sensors.temp") → lookup; lookup(fields) → (23.5, true)
+func compileFieldPath(path string) (func(fields map[string]interface{}) (interface{}, bool), error) {
+	err := validateFieldPath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	segments := strings.Split(path, ".")
+
+	return func(fields map[string]interface{}) (interface{}, bool) {
+		current := fields
+
+		for _, segment := range segments[:len(segments)-1] {
+			next, ok := current[segment].(map[string]interface{})
+			if !ok {
+				return nil, false
+			}
+
+			current = next
+		}
+
+		value, ok := current[segments[len(segments)-1]]
+
+		return value, ok
+	}, nil
+}
+
 // makeExtractFieldStep extracts nested fields.
-// In: config[source,target,type,on_error] - paths
+// In: config[source,target,type,on_error] - source is a compiled dot-path
 // Out: TransformationStep - dot notation extraction
 // Ex: makeExtractFieldStep({"source": "data.temp"}) → step
 // Per ADR-005: supports JSON path navigation
@@ -1256,6 +1309,12 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 	source, ok := config["source"].(string)
 	if !ok {
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "extract_field step requires 'source' string")
+	}
+
+	lookupSource, err := compileFieldPath(source)
+	if err != nil {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("extract_field 'source' is not a valid field path: %v", err))
 	}
 
 	target, ok := config["target"].(string)
@@ -1280,13 +1339,13 @@ func makeExtractFieldStep(config map[string]interface{}) (TransformationStep, er
 	}
 
 	return func(state *ParseState) error {
-		value, err := extractFieldByPath(state.Fields, source)
-		if err != nil {
+		value, exists := lookupSource(state.Fields)
+		if !exists {
 			if onError == "skip" {
 				return nil
 			}
 
-			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("failed to extract field '%s' in extract_field step: %w", source, err))
+			return connectorErrors.NewParsingFailedError("yaml_parser", fmt.Errorf("source field '%s' not found in extract_field step", source))
 		}
 
 		// Type conversion - handles string→number, etc per ADR-005
@@ -1324,6 +1383,14 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "compute_field step requires 'target' string")
 	}
 
+	// $-prefixed fields ($timestamp, $table) are pipeline-internal and
+	// reserved for extract_* steps; compose table routing as concat into a
+	// plain field, then point extract_table 'source' at it.
+	if strings.HasPrefix(target, "$") {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			"compute_field 'target' must not start with '$'; write a plain field and point extract_table 'source' at it")
+	}
+
 	switch operation {
 	case "concat":
 		fields, ok := config["fields"].([]interface{})
@@ -1346,7 +1413,7 @@ func makeComputeFieldStep(config map[string]interface{}) (TransformationStep, er
 }
 
 // makeSafeParseNumberStep parses numbers gracefully.
-// In: config[source,target,on_error] - field names
+// In: config[source,target,on_error] - source is a compiled dot-path
 // Out: TransformationStep - null/skip/fail on error
 // Ex: makeSafeParseNumberStep({"on_error": "null"}) → step
 // Per ADR-005: graceful error handling pattern
@@ -1354,6 +1421,12 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 	source, ok := config["source"].(string)
 	if !ok {
 		return nil, connectorErrors.NewInvalidConfigError("yaml_parser", "safe_parse_number step requires 'source' string")
+	}
+
+	lookupSource, err := compileFieldPath(source)
+	if err != nil {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("safe_parse_number 'source' is not a valid field path: %v", err))
 	}
 
 	target, ok := config["target"].(string)
@@ -1367,7 +1440,7 @@ func makeSafeParseNumberStep(config map[string]interface{}) (TransformationStep,
 	}
 
 	return func(state *ParseState) error {
-		value, exists := state.Fields[source]
+		value, exists := lookupSource(state.Fields)
 		if !exists {
 			if onError == "skip" {
 				return nil
@@ -1465,14 +1538,15 @@ func makeStringConcatStep(target string, fields []interface{}) TransformationSte
 
 // splitFieldConfig: compile-time configuration of a compute_field split.
 type splitFieldConfig struct {
-	source    string
-	separator string
-	target    string
-	index     int // negative = from the end
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	separator    string
+	target       string
+	index        int // negative = from the end
 }
 
 // parseSplitConfig validates compute_field split options.
-// In: config["source"] - input field name (direct lookup, not a dot-path)
+// In: config["source"] - input dot-path, compiled here
 //
 //	config["separator"] - non-empty split separator
 //	config["index"] - required int, negative = from the end
@@ -1487,6 +1561,12 @@ func parseSplitConfig(config map[string]interface{}, target string) (splitFieldC
 			"compute_field 'split' requires a 'source' string option")
 	}
 
+	lookupSource, err := compileFieldPath(source)
+	if err != nil {
+		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("compute_field 'split' source is not a valid field path: %v", err))
+	}
+
 	separator, ok := config["separator"].(string)
 	if !ok || separator == "" {
 		return splitFieldConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
@@ -1499,7 +1579,7 @@ func parseSplitConfig(config map[string]interface{}, target string) (splitFieldC
 			"compute_field 'split' requires an integer 'index' option")
 	}
 
-	return splitFieldConfig{source: source, separator: separator, target: target, index: index}, nil
+	return splitFieldConfig{source: source, lookupSource: lookupSource, separator: separator, target: target, index: index}, nil
 }
 
 // makeSplitFieldStep creates a compute_field split step: strings.Split the
@@ -1517,7 +1597,7 @@ func parseSplitConfig(config map[string]interface{}, target string) (splitFieldC
 // Ex: makeSplitFieldStep({source: "stream_id", separator: ":", index: -1, target: "revision_raw"}) → step
 func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
 	return func(state *ParseState) error {
-		value, exists := state.Fields[cfg.source]
+		value, exists := cfg.lookupSource(state.Fields)
 		if !exists {
 			return connectorErrors.NewParsingFailedError("yaml_parser",
 				fmt.Errorf("field '%s' not found in compute_field split step", cfg.source))
@@ -1547,26 +1627,6 @@ func makeSplitFieldStep(cfg splitFieldConfig) TransformationStep {
 	}
 }
 
-// validateFieldPath checks dot-path format: non-empty, no leading/trailing
-// or consecutive dots. Used at config compile time for fail-fast validation
-// and by extractFieldByPath at runtime.
-// In: path "a.b.c" - dot notation
-// Out: error - nil when well-formed
-// Ex: validateFieldPath("a..b") → error
-func validateFieldPath(path string) error {
-	if path == "" {
-		return fmt.Errorf("empty field path")
-	}
-	if strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
-		return fmt.Errorf("invalid field path format: leading/trailing dots not allowed")
-	}
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("invalid field path format: consecutive dots not allowed")
-	}
-
-	return nil
-}
-
 // parseIntOption reads an optional integer config value. YAML integer
 // literals arrive as int (yaml.v3); Go-literal test configs may pass int64.
 // In: config map - raw step config, key - option name
@@ -1586,52 +1646,6 @@ func parseIntOption(config map[string]interface{}, key string) (value int, prese
 	default:
 		return 0, false, fmt.Errorf("'%s' must be an integer, got %T", key, raw)
 	}
-}
-
-// extractFieldByPath navigates nested maps by path.
-// In: fields map, path "a.b.c" - dot notation
-// Out: interface{} - value at path
-// Ex: extractFieldByPath(data, "sensors.temp") → 23.5
-func extractFieldByPath(fields map[string]interface{}, path string) (interface{}, error) {
-	err := validateFieldPath(path)
-	if err != nil {
-		return nil, err
-	}
-
-	parts := strings.Split(path, ".")
-	current := fields
-
-	for i, part := range parts {
-		// Validate each part to prevent empty path segments
-		if part == "" {
-			return nil, fmt.Errorf("invalid field path format: empty path segment")
-		}
-
-		if i == len(parts)-1 {
-			// Last part - return the value at final key
-			value, exists := current[part]
-			if !exists {
-				return nil, fmt.Errorf("field '%s' not found", part)
-			}
-
-			return value, nil
-		}
-
-		// Navigate deeper - traverse nested maps
-		next, exists := current[part]
-		if !exists {
-			return nil, fmt.Errorf("field '%s' not found in path", part)
-		}
-
-		nextMap, ok := next.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("field '%s' is not a map", part)
-		}
-
-		current = nextMap
-	}
-
-	return nil, fmt.Errorf("empty path")
 }
 
 // convertFieldValue casts to target type.

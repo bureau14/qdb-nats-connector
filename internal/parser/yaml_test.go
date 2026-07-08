@@ -1661,10 +1661,12 @@ func TestYAMLParser_ExtractTableFromComputedField(t *testing.T) {
 			}},
 			{Step: "compute_field", Config: map[string]interface{}{
 				"operation": "concat",
-				"target":    "$table",
+				"target":    "table_name",
 				"fields":    []interface{}{"finance", ".", "exchange", ".", "symbol"},
 			}},
-			{Step: "extract_table"}, // Uses computed table name
+			{Step: "extract_table", Config: map[string]interface{}{
+				"source": "table_name", // Uses computed table name
+			}},
 			{Step: "extract_field", Config: map[string]interface{}{
 				"source": "price",
 				"target": "price",
@@ -2060,6 +2062,12 @@ func TestComputeFieldSplitFactoryErrors(t *testing.T) {
 		{"unsupported operation", map[string]interface{}{
 			"operation": "reverse", "target": "t",
 		}},
+		{"invalid source path", map[string]interface{}{
+			"operation": "split", "target": "t", "source": "a..b", "separator": ":", "index": 0,
+		}},
+		{"reserved $-prefixed target", map[string]interface{}{
+			"operation": "concat", "target": "$table", "fields": []interface{}{"\"x\""},
+		}},
 	}
 
 	for _, tc := range cases {
@@ -2124,6 +2132,17 @@ func TestComputeFieldSplit(t *testing.T) {
 		_, err := runSplitStep(t, splitBaseConfig(0), map[string]interface{}{"stream_id": int64(7)})
 		requireParsingFailedError(t, err)
 	})
+
+	t.Run("nested dot-path source", func(t *testing.T) {
+		config := splitBaseConfig(-1)
+		config["source"] = "envelope.stream_id"
+
+		state, err := runSplitStep(t, config, map[string]interface{}{
+			"envelope": map[string]interface{}{"stream_id": "a:b:c"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "c", state.Fields["revision_raw"])
+	})
 }
 
 // TestComputeFieldSplitProperties pins panic-freedom and agreement with the
@@ -2161,6 +2180,93 @@ func TestComputeFieldSplitProperties(t *testing.T) {
 			require.Error(rt, err)
 		}
 	})
+}
+
+// TestCompileFieldPath covers config-time path validation and the compiled
+// lookup closure: nested resolution, missing keys, non-map intermediates.
+func TestCompileFieldPath(t *testing.T) {
+	t.Run("invalid path formats fail at compile time", func(t *testing.T) {
+		for _, path := range []string{"", ".a", "a.", "a..b"} {
+			lookup, err := compileFieldPath(path)
+			assert.Nil(t, lookup)
+			require.Error(t, err, "path %q must be rejected", path)
+		}
+	})
+
+	fields := map[string]interface{}{
+		"flat": "v",
+		"nested": map[string]interface{}{
+			"inner": map[string]interface{}{"leaf": 42.5},
+		},
+		"scalar": "not-a-map",
+	}
+
+	cases := []struct {
+		name  string
+		path  string
+		value interface{}
+		found bool
+	}{
+		{"flat hit", "flat", "v", true},
+		{"nested hit", "nested.inner.leaf", 42.5, true},
+		{"missing leaf", "nested.inner.absent", nil, false},
+		{"missing intermediate", "nested.absent.leaf", nil, false},
+		{"non-map intermediate", "scalar.leaf", nil, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lookup, err := compileFieldPath(tc.path)
+			require.NoError(t, err)
+
+			value, found := lookup(fields)
+			assert.Equal(t, tc.found, found)
+			assert.Equal(t, tc.value, value)
+		})
+	}
+}
+
+// TestSafeParseNumberDotPath pins the compiled dot-path retrofit: nested
+// sources resolve, malformed paths fail at compile time.
+func TestSafeParseNumberDotPath(t *testing.T) {
+	t.Run("invalid source path fails at compile time", func(t *testing.T) {
+		step, err := makeSafeParseNumberStep(map[string]interface{}{
+			"source": "a..b", "target": "out",
+		})
+		assert.Nil(t, step)
+		require.Error(t, err)
+
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	})
+
+	t.Run("nested source resolves", func(t *testing.T) {
+		step, err := makeSafeParseNumberStep(map[string]interface{}{
+			"source": "metrics.raw", "target": "out",
+		})
+		require.NoError(t, err)
+
+		state := &ParseState{Fields: map[string]interface{}{
+			"metrics": map[string]interface{}{"raw": "42.5"},
+		}}
+		require.NoError(t, step(state))
+		assert.Equal(t, 42.5, state.Fields["out"])
+	})
+}
+
+// TestExtractFieldInvalidPathCompileError pins the fail-fast change: a
+// malformed extract_field source is a startup error, not a per-message one.
+func TestExtractFieldInvalidPathCompileError(t *testing.T) {
+	step, err := makeExtractFieldStep(map[string]interface{}{
+		"source": ".bad", "target": "out", "type": "auto",
+	})
+	assert.Nil(t, step)
+	require.Error(t, err)
+
+	var connErr *connectorErrors.ConnectorError
+	require.True(t, errors.As(err, &connErr))
+	assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
 }
 
 // TestExtractFieldTypeRequired pins the compile-time requirement: omitting

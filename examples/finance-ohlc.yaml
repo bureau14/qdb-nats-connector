@@ -56,12 +56,13 @@ transformations:
   - step: "compute_field"
     config:
       operation: "concat"
-      target: "$table"
+      target: "table_name"
       fields: ["finance", ".", "exchange", ".", "stock_id"]
 
   # Extract the computed table name for dynamic routing
   - step: "extract_table"
-    # Uses default source: "$table"
+    config:
+      source: "table_name"
 
   # Extract and convert timestamp field (ISO8601 format)
   - step: "extract_index"

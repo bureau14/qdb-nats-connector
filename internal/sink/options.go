@@ -246,6 +246,8 @@ type OptionsProvider interface {
 	Compression() qdb.Compression
 	// DeduplicationMode returns how duplicate timestamps are handled
 	DeduplicationMode() qdb.WriterDeduplicationMode
+	// PushMode returns the writer push mode (transactional, async, or fast)
+	PushMode() qdb.WriterPushMode
 	// ClientMaxParallelism returns max client threads (nil for default)
 	ClientMaxParallelism() *uint
 	// ClientMaxInBufSize returns max input buffer size in bytes (nil for default)
@@ -267,6 +269,7 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithEncryption(p.Encryption()),
 		WithCompression(p.Compression()),
 		WithDeduplicationMode(p.DeduplicationMode()),
+		WithPushMode(p.PushMode()),
 	}
 
 	// Use Go 1.21+ slice operations for conditional appends

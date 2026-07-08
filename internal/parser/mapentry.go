@@ -18,11 +18,12 @@ import (
 
 // mapEntryStepConfig: compile-time configuration of an extract_map_entry step.
 type mapEntryStepConfig struct {
-	source      string          // dot-path to a map[string]interface{}
-	keyTarget   string          // field receiving the (coerced) entry key
-	valueTarget string          // field receiving the entry value
-	onMultiple  string          // "first" | "fail"; omitted = "fail"
-	allowedKeys map[string]bool // nil = no filtering
+	source       string // original dot-path, for error messages
+	lookupSource func(fields map[string]interface{}) (interface{}, bool)
+	keyTarget    string          // field receiving the (coerced) entry key
+	valueTarget  string          // field receiving the entry value
+	onMultiple   string          // "first" | "fail"; omitted = "fail"
+	allowedKeys  map[string]bool // nil = no filtering
 }
 
 // parseAllowedKeys builds the allowed-key set from a config list. YAML
@@ -118,11 +119,12 @@ func parseMapEntryConfig(config map[string]interface{}) (mapEntryStepConfig, err
 		*dst = value
 	}
 
-	err := validateFieldPath(cfg.source)
+	lookupSource, err := compileFieldPath(cfg.source)
 	if err != nil {
 		return mapEntryStepConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
 			fmt.Sprintf("extract_map_entry 'source' is not a valid field path: %v", err))
 	}
+	cfg.lookupSource = lookupSource
 
 	err = parseMapEntryOptions(config, &cfg)
 	if err != nil {
@@ -205,10 +207,10 @@ func makeExtractMapEntryStep(config map[string]interface{}) (TransformationStep,
 	}
 
 	return func(state *ParseState) error {
-		value, err := extractFieldByPath(state.Fields, cfg.source)
-		if err != nil {
+		value, ok := cfg.lookupSource(state.Fields)
+		if !ok {
 			return connectorErrors.NewParsingFailedError("yaml_parser",
-				fmt.Errorf("failed to resolve extract_map_entry source '%s': %w", cfg.source, err))
+				fmt.Errorf("source field '%s' not found in extract_map_entry step", cfg.source))
 		}
 
 		m, ok := value.(map[string]interface{})

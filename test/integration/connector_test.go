@@ -132,7 +132,7 @@ transformations:
     config:
       operation: "concat"
       target: "device_path"
-      fields: ["datacenter", "/", "rack", "/", "device_id"]
+      fields: ["datacenter", '"/"', "rack", '"/"', "device_id"]
 `
 
 	// Write config to temp file

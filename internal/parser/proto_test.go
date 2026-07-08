@@ -319,8 +319,10 @@ func TestParseProtobufTarget(t *testing.T) {
 	assert.Equal(t, "deg", nested["unit"])
 
 	// nested values stay dot-path addressable for extract_field
-	reading, err := extractFieldByPath(state.Fields, "attr.reading")
+	lookupReading, err := compileFieldPath("attr.reading")
 	require.NoError(t, err)
+	reading, found := lookupReading(state.Fields)
+	require.True(t, found)
 	assert.Equal(t, 1.5, reading)
 
 	// decoded fields must not leak to the root when target is set
@@ -397,8 +399,10 @@ func TestParseProtobufScalarMapping(t *testing.T) {
 	assert.Equal(t, map[string]interface{}{"3": []byte{0xAA}}, fields["blobs"])
 
 	// Nested messages are dot-path addressable by extract_field.
-	unit, err := extractFieldByPath(fields, "inner.unit")
+	lookupUnit, err := compileFieldPath("inner.unit")
 	require.NoError(t, err)
+	unit, found := lookupUnit(fields)
+	require.True(t, found)
 	assert.Equal(t, "mm", unit)
 }
 

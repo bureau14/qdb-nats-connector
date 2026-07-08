@@ -482,13 +482,7 @@ action_export() {
     local csv_file="$ACTUAL_DIR/${TABLE_NAME}.csv"
     log_info "Exporting table $TABLE_NAME to $csv_file"
 
-    if ! "$QDB_EXPORT" --ts "$TABLE_NAME" --start-date "2000-01-01T00:00:00" --end-date "2100-01-01T00:00:00" -f "$csv_file" -c "$QDB_URI"; then
-        die "Failed to export table $TABLE_NAME"
-    fi
-
-    local row_count
-    row_count=$(tail -n +2 "$csv_file" | wc -l)  # Skip header row
-    log_debug "Exported $row_count rows from $TABLE_NAME"
+    export_table_csv "$TABLE_NAME" "$csv_file"
 
     log_info "Export completed to directory: $ACTUAL_DIR"
 }

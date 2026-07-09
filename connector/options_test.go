@@ -52,3 +52,45 @@ func TestLoadConfigNatsSecurityDefaultsEmpty(t *testing.T) {
 		t.Errorf("TLSCAFile() = %q, want empty", opts.TLSCAFile())
 	}
 }
+
+func TestLoadConfigHTTPAddrDefault(t *testing.T) {
+	opts, err := LoadConfig([]string{"--stream", "STREAM"}, func() {})
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if opts.HTTPAddr != ":9100" {
+		t.Errorf("HTTPAddr = %q, want :9100", opts.HTTPAddr)
+	}
+}
+
+func TestLoadConfigHTTPAddrEmptyDisables(t *testing.T) {
+	opts, err := LoadConfig([]string{"--stream", "STREAM", "--http-addr", ""}, func() {})
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if opts.HTTPAddr != "" {
+		t.Errorf("HTTPAddr = %q, want empty", opts.HTTPAddr)
+	}
+}
+
+func TestLoadConfigHTTPAddrRejectsMissingPort(t *testing.T) {
+	_, err := LoadConfig([]string{"--stream", "STREAM", "--http-addr", "9100"}, func() {})
+	if err == nil {
+		t.Fatal("LoadConfig accepted http-addr without host:port form")
+	}
+}
+
+func TestLoadConfigHTTPAddrEnvVar(t *testing.T) {
+	t.Setenv("QDB_NATS_HTTP_ADDR", "127.0.0.1:9200")
+
+	opts, err := LoadConfig([]string{"--stream", "STREAM"}, func() {})
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if opts.HTTPAddr != "127.0.0.1:9200" {
+		t.Errorf("HTTPAddr = %q, want 127.0.0.1:9200", opts.HTTPAddr)
+	}
+}

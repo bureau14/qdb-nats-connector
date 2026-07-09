@@ -6,6 +6,7 @@ package connector
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -64,6 +65,9 @@ type Options struct {
 	// unhealthy. Idle is never unhealthy; deliberately NOT derived from
 	// batch-timeout.
 	HealthStuckThreshold time.Duration `mapstructure:"health-stuck-threshold"`
+
+	// HTTPAddr: probe HTTP listen address; empty disables the server.
+	HTTPAddr string `mapstructure:"http-addr"`
 
 	// Parser configuration
 	Parser           string `mapstructure:"parser"`
@@ -140,6 +144,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("circuit-breaker-half-open-base", 1)
 	v.SetDefault("circuit-breaker-half-open-max", 32)
 	v.SetDefault("health-stuck-threshold", 5*time.Minute)
+	v.SetDefault("http-addr", ":9100")
 	v.SetDefault("parser", "noop")
 	v.SetDefault("parser-config", "")
 	v.SetDefault("parse-error-action", "drop")
@@ -187,6 +192,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	// Health monitoring flags
 	fs.Duration("health-stuck-threshold", 5*time.Minute,
 		"Age past which a blocked pipeline stage or persistently failing fetch is reported unhealthy")
+	fs.String("http-addr", ":9100", "Probe HTTP listen address (empty disables)")
 
 	// Parser flags
 	fs.String("parser", "noop", "Parser type: yaml|noop")
@@ -321,6 +327,14 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 
 	if opts.HealthStuckThreshold <= 0 {
 		return errors.NewInvalidConfigError("connector", "health stuck threshold must be positive")
+	}
+
+	if opts.HTTPAddr != "" {
+		_, _, err := net.SplitHostPort(opts.HTTPAddr)
+		if err != nil {
+			return errors.NewInvalidConfigError("connector",
+				fmt.Sprintf("invalid http-addr %q (want host:port or :port): %v", opts.HTTPAddr, err))
+		}
 	}
 
 	// Validate parser configuration

@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/bureau14/qdb-nats-connector/connector"
 	"github.com/bureau14/qdb-nats-connector/internal/logging"
+	"github.com/bureau14/qdb-nats-connector/internal/telemetry"
 )
 
 // Version information - populated by ldflags at build time
@@ -141,6 +143,14 @@ func runMain() int {
 	}
 	defer c.Close()
 
+	// 2. Serve probes (/livez, /readyz) around the connector lifetime
+	tel, err := startTelemetry(opts.HTTPAddr, c)
+	if err != nil {
+		slog.Error("Unable to start telemetry server", "error", err)
+
+		return 1
+	}
+
 	slog.Info("Starting connector")
 
 	// Create root context for the application
@@ -148,6 +158,7 @@ func runMain() int {
 
 	// 3. Run connector: blocks until shutdown|error
 	err = c.RunWithContext(ctx)
+	stopTelemetry(tel)
 	if err != nil && err != context.Canceled {
 		slog.Error("Connector failed", "error", err)
 
@@ -155,4 +166,41 @@ func runMain() int {
 	}
 
 	return 0
+}
+
+// startTelemetry binds and serves the probe server; nil when disabled.
+// In: addr string - listen address ("" = disabled), c *connector.Connector
+// Out: *telemetry.Server, error - running server, nil/nil when disabled
+// Ex: startTelemetry(":9100", c) → srv, nil
+func startTelemetry(addr string, c *connector.Connector) (*telemetry.Server, error) {
+	if addr == "" {
+		return nil, nil
+	}
+
+	srv, err := telemetry.NewServer(addr, c, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+	srv.Start()
+	slog.Info("Telemetry server listening", "addr", srv.Addr())
+
+	return srv, nil
+}
+
+// stopTelemetry gracefully stops the probe server (nil-safe).
+// In: srv *telemetry.Server - running server or nil
+// Out: none - shutdown failures are logged, never fatal
+// Ex: stopTelemetry(srv) → probe listener closed
+func stopTelemetry(srv *telemetry.Server) {
+	if srv == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := srv.Shutdown(ctx)
+	if err != nil {
+		slog.Warn("Telemetry shutdown failed", "error", err)
+	}
 }

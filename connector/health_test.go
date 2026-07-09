@@ -6,6 +6,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
@@ -275,4 +276,42 @@ func TestHealthSummaryKeepsBreakerAndFetchSeparate(t *testing.T) {
 	summary = c.Health()
 	assert.False(t, summary.FetchHealthy)
 	assert.Contains(t, summary.Conditions, condFetchStalled)
+}
+
+func TestHealthSummaryStageStuck(t *testing.T) {
+	assert.True(t, HealthSummary{
+		Conditions: []string{condStuckPrefix + "worker-0"},
+	}.StageStuck())
+	assert.True(t, HealthSummary{
+		Conditions: []string{condFetchStalled, condStuckPrefix + "fetch-loop"},
+	}.StageStuck())
+
+	assert.False(t, HealthSummary{}.StageStuck())
+	assert.False(t, HealthSummary{
+		Conditions: []string{condFetchStalled, condRebinding},
+	}.StageStuck())
+}
+
+func TestHealthSummaryJSONSnakeCase(t *testing.T) {
+	summary := HealthSummary{
+		Healthy:          true,
+		FetchHealthy:     true,
+		Conditions:       []string{},
+		LastFetchSuccess: time.Now(),
+		BreakerOpen:      false,
+		BreakerStates:    map[string]string{"worker-0": "CLOSED"},
+	}
+
+	data, err := json.Marshal(summary)
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	for _, key := range []string{
+		"healthy", "fetch_healthy", "conditions",
+		"last_fetch_success", "breaker_open", "breaker_states",
+	} {
+		assert.Contains(t, decoded, key)
+	}
 }

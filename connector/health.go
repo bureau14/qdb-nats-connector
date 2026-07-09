@@ -7,6 +7,7 @@ package connector
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -228,17 +229,32 @@ func (m *healthMonitor) evaluate(now time.Time) {
 // signals cannot be conflated.
 type HealthSummary struct {
 	// Healthy: FetchHealthy && !BreakerOpen.
-	Healthy bool
+	Healthy bool `json:"healthy"`
 	// FetchHealthy: no active unhealthy conditions (fetch side).
-	FetchHealthy bool
-	// Conditions: active condition keys (empty when FetchHealthy).
-	Conditions []string
+	FetchHealthy bool `json:"fetch_healthy"`
+	// Conditions: active condition keys (empty when FetchHealthy);
+	// stage-stuck entries carry the "stage-stuck:" prefix.
+	Conditions []string `json:"conditions"`
 	// LastFetchSuccess: last successful FetchBatch return (incl. empty).
-	LastFetchSuccess time.Time
+	LastFetchSuccess time.Time `json:"last_fetch_success"`
 	// BreakerOpen: any worker's circuit breaker is not closed.
-	BreakerOpen bool
+	BreakerOpen bool `json:"breaker_open"`
 	// BreakerStates: per-worker breaker state ("worker-0" → "CLOSED").
-	BreakerStates map[string]string
+	BreakerStates map[string]string `json:"breaker_states"`
+}
+
+// StageStuck reports whether any stage-stuck condition is active.
+// In: none
+// Out: bool - true when a probed goroutine is wedged past the threshold
+// Ex: HealthSummary{Conditions: []string{"stage-stuck:worker-0"}}.StageStuck() → true
+func (s HealthSummary) StageStuck() bool {
+	for _, c := range s.Conditions {
+		if strings.HasPrefix(c, condStuckPrefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Health returns the aggregate health summary.

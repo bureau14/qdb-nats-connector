@@ -373,7 +373,7 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 // Ex: s.PendingMessages(ctx, 10*time.Second) -> 1523, nil
 func (s *Source) PendingMessages(ctx context.Context, maxAge time.Duration) (uint64, error) {
 	cachedAt := s.pendingAt.Load()
-	if cachedAt != 0 && time.Since(time.Unix(0, cachedAt)) <= maxAge {
+	if cachedAt != 0 && time.Since(time.Unix(0, cachedAt)) < maxAge {
 		return s.pendingCount.Load(), nil
 	}
 

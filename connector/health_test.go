@@ -135,6 +135,51 @@ func TestHealthStuckProbeLogsOncePerTransition(t *testing.T) {
 	assert.NotEmpty(t, attrValue(infos[0], "downtime"))
 }
 
+func TestHealthRetryProgressPreventsStageStuck(t *testing.T) {
+	var probe Probe
+	monitor, capture := newTestMonitor(5*time.Minute,
+		probeRef{owner: "worker-0", probe: &probe})
+
+	// A worker deep in a >threshold sink retry ladder: entered "process"
+	// long ago, but the retry loop keeps reporting progress via Touch
+	// (exactly what sink.Options.OnRetryProgress does). Never stuck.
+	probe.Begin("process")
+	for range 3 {
+		probe.mu.Lock()
+		probe.since = time.Now().Add(-6 * time.Minute)
+		probe.mu.Unlock()
+
+		probe.Touch()
+		monitor.health.recordFetchSuccess()
+		monitor.evaluate(time.Now())
+	}
+
+	assert.Empty(t, capture.byLevel(slog.LevelError))
+
+	conditions, _ := monitor.health.snapshot()
+	assert.Empty(t, conditions)
+}
+
+func TestHealthBlockedWriteWithoutProgressStillTrips(t *testing.T) {
+	var probe Probe
+	monitor, capture := newTestMonitor(5*time.Minute,
+		probeRef{owner: "worker-0", probe: &probe})
+
+	// Same shape, but a hard-wedged write never reaches a retry boundary:
+	// no Touch, so the stuck condition must fire at the threshold.
+	probe.Begin("process")
+	probe.mu.Lock()
+	probe.since = time.Now().Add(-6 * time.Minute)
+	probe.mu.Unlock()
+
+	monitor.health.recordFetchSuccess()
+	monitor.evaluate(time.Now())
+
+	errors := capture.byLevel(slog.LevelError)
+	require.Len(t, errors, 1)
+	assert.Equal(t, condStuckPrefix+"worker-0", attrValue(errors[0], "reason"))
+}
+
 func TestHealthIdleProbeNeverFlagged(t *testing.T) {
 	var probe Probe
 	monitor, capture := newTestMonitor(time.Nanosecond,

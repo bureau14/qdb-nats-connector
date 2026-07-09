@@ -79,12 +79,6 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		return nil, err
 	}
 
-	// Create sink
-	qdbSink, err := sink.NewSink(sink.FromOptionsProvider(opts))
-	if err != nil {
-		return nil, err
-	}
-
 	// Ensure hooks is never nil to simplify worker code
 	if opts.Hooks == nil {
 		opts.Hooks = hooks.NewHookRegistry()
@@ -109,17 +103,30 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		)
 	}
 
-	return &Worker{
+	w := &Worker{
 		id:               id,
 		workerID:         workerID,
 		workCh:           workCh,
 		parser:           messageParser,
 		rowFilter:        rowFilter,
-		sink:             qdbSink,
 		circuitBreaker:   circuitBreaker,
 		hooks:            opts.Hooks,
 		parseErrorAction: opts.ParseErrorAction,
-	}, nil
+	}
+
+	// Create sink after the worker so its retry loop can report progress to
+	// the worker's liveness probe: each retry boundary refreshes the probe,
+	// keeping a legitimately retrying worker distinct from a wedged one.
+	// The method value binds &w.probe here, after heap allocation.
+	sinkOpts := sink.FromOptionsProvider(opts)
+	sinkOpts.OnRetryProgress = w.probe.Touch
+	qdbSink, err := sink.NewSink(sinkOpts)
+	if err != nil {
+		return nil, err
+	}
+	w.sink = qdbSink
+
+	return w, nil
 }
 
 // Run starts worker message processing loop.

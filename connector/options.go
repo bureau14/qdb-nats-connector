@@ -70,6 +70,11 @@ type Options struct {
 	// HTTPAddr: probe HTTP listen address; empty disables the server.
 	HTTPAddr string `mapstructure:"http-addr"`
 
+	// StatsInterval: console stats period; 0 disables the stats line.
+	// The per-table top-10 window is a fixed 5 minutes regardless of
+	// this interval.
+	StatsInterval time.Duration `mapstructure:"stats-interval"`
+
 	// Metrics histogram buckets: exponential series start*factor^i,
 	// i in [0, count) -- prometheus.ExponentialBuckets knobs for the
 	// message-lag and write-duration histograms.
@@ -161,6 +166,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("circuit-breaker-half-open-max", 32)
 	v.SetDefault("health-stuck-threshold", 5*time.Minute)
 	v.SetDefault("http-addr", ":9100")
+	v.SetDefault("stats-interval", time.Minute)
 	v.SetDefault("metrics-lag-bucket-start", time.Millisecond)
 	v.SetDefault("metrics-lag-bucket-factor", 2.0)
 	v.SetDefault("metrics-lag-bucket-count", 20)
@@ -215,6 +221,7 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.Duration("health-stuck-threshold", 5*time.Minute,
 		"Age past which a blocked pipeline stage or persistently failing fetch is reported unhealthy")
 	fs.String("http-addr", ":9100", "Probe HTTP listen address (empty disables)")
+	fs.Duration("stats-interval", time.Minute, "Console stats period (0 disables)")
 
 	// Metrics histogram bucket flags
 	fs.Duration("metrics-lag-bucket-start", time.Millisecond, "Message-lag histogram: first bucket bound")
@@ -357,6 +364,10 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 
 	if opts.HealthStuckThreshold <= 0 {
 		return errors.NewInvalidConfigError("connector", "health stuck threshold must be positive")
+	}
+
+	if opts.StatsInterval < 0 {
+		return errors.NewInvalidConfigError("connector", "stats interval cannot be negative (0 disables)")
 	}
 
 	if opts.HTTPAddr != "" {

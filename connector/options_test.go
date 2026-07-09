@@ -100,6 +100,48 @@ func TestLoadConfigHTTPAddrEnvVar(t *testing.T) {
 	}
 }
 
+func TestLoadConfigStatsIntervalDefault(t *testing.T) {
+	opts, err := LoadConfig([]string{"--stream", "STREAM"}, func() {})
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if opts.StatsInterval != time.Minute {
+		t.Errorf("StatsInterval = %v, want 1m", opts.StatsInterval)
+	}
+}
+
+func TestLoadConfigStatsIntervalZeroDisables(t *testing.T) {
+	opts, err := LoadConfig([]string{"--stream", "STREAM", "--stats-interval", "0"}, func() {})
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if opts.StatsInterval != 0 {
+		t.Errorf("StatsInterval = %v, want 0", opts.StatsInterval)
+	}
+}
+
+func TestLoadConfigStatsIntervalRejectsNegative(t *testing.T) {
+	_, err := LoadConfig([]string{"--stream", "STREAM", "--stats-interval", "-1s"}, func() {})
+	if err == nil {
+		t.Fatal("LoadConfig accepted a negative stats-interval")
+	}
+}
+
+func TestLoadConfigStatsIntervalEnvVar(t *testing.T) {
+	t.Setenv("QDB_NATS_STATS_INTERVAL", "30s")
+
+	opts, err := LoadConfig([]string{"--stream", "STREAM"}, func() {})
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if opts.StatsInterval != 30*time.Second {
+		t.Errorf("StatsInterval = %v, want 30s", opts.StatsInterval)
+	}
+}
+
 func TestLoadConfigMetricsBucketDefaults(t *testing.T) {
 	opts, err := LoadConfig([]string{"--stream", "STREAM"}, func() {})
 	if err != nil {

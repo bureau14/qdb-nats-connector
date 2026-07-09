@@ -15,7 +15,9 @@ import (
 
 	"github.com/bureau14/qdb-nats-connector/connector"
 	"github.com/bureau14/qdb-nats-connector/internal/logging"
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 	"github.com/bureau14/qdb-nats-connector/internal/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Version information - populated by ldflags at build time
@@ -134,6 +136,15 @@ func runMain() int {
 
 	slog.Info("Parsed configuration options", "options", opts)
 
+	// 2. Build the metrics registry and inject the hot-path histograms
+	// into Options before the connector (and its workers) exist.
+	reg, err := buildMetrics(opts)
+	if err != nil {
+		slog.Error("Unable to build metrics registry", "error", err)
+
+		return 1
+	}
+
 	// Create connector (parser is created internally by workers)
 	c, err := connector.NewConnector(opts)
 	if err != nil {
@@ -143,8 +154,8 @@ func runMain() int {
 	}
 	defer c.Close()
 
-	// 2. Serve probes (/livez, /readyz) around the connector lifetime
-	tel, err := startTelemetry(opts.HTTPAddr, c)
+	// 3. Serve probes (/livez, /readyz) + /metrics around the connector
+	tel, err := startTelemetry(opts.HTTPAddr, c, reg)
 	if err != nil {
 		slog.Error("Unable to start telemetry server", "error", err)
 
@@ -156,7 +167,7 @@ func runMain() int {
 	// Create root context for the application
 	ctx := context.Background()
 
-	// 3. Run connector: blocks until shutdown|error
+	// 4. Run connector: blocks until shutdown|error
 	err = c.RunWithContext(ctx)
 	stopTelemetry(tel)
 	if err != nil && err != context.Canceled {
@@ -168,16 +179,55 @@ func runMain() int {
 	return 0
 }
 
-// startTelemetry binds and serves the probe server; nil when disabled.
-// In: addr string - listen address ("" = disabled), c *connector.Connector
+// buildMetrics creates the registry, hot-path histograms, and build-info
+// gauge; nil registry when telemetry is disabled (opts.Metrics stays nil
+// and every observation is a no-op).
+// In: opts *connector.Options - HTTPAddr gate + bucket config; Metrics
+// field is set as a side effect
+// Out: *prometheus.Registry, error - registry for /metrics, nil when off
+// Ex: reg, _ := buildMetrics(opts) → opts.Metrics wired
+func buildMetrics(opts *connector.Options) (*prometheus.Registry, error) {
+	if opts.HTTPAddr == "" {
+		return nil, nil
+	}
+
+	reg := prometheus.NewRegistry()
+
+	m, err := metrics.New(reg, opts.MetricsConfig())
+	if err != nil {
+		return nil, err
+	}
+	opts.Metrics = m
+
+	err = metrics.RegisterBuildInfo(reg, version, commit)
+	if err != nil {
+		return nil, err
+	}
+
+	return reg, nil
+}
+
+// startTelemetry binds and serves the probe + metrics server; nil when
+// disabled. The collector reads the connector at scrape time.
+// In: addr string - listen address ("" = disabled), c - probe + stats
+// source, reg *prometheus.Registry - /metrics registry (nil = no route)
 // Out: *telemetry.Server, error - running server, nil/nil when disabled
-// Ex: startTelemetry(":9100", c) → srv, nil
-func startTelemetry(addr string, c *connector.Connector) (*telemetry.Server, error) {
+// Ex: startTelemetry(":9100", c, reg) → srv, nil
+func startTelemetry(addr string, c *connector.Connector, reg *prometheus.Registry) (*telemetry.Server, error) {
 	if addr == "" {
 		return nil, nil
 	}
 
-	srv, err := telemetry.NewServer(addr, c, nil, slog.Default())
+	var gatherer prometheus.Gatherer
+	if reg != nil {
+		err := reg.Register(telemetry.NewCollector(c, slog.Default()))
+		if err != nil {
+			return nil, err
+		}
+		gatherer = reg
+	}
+
+	srv, err := telemetry.NewServer(addr, c, gatherer, slog.Default())
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,10 @@
 // Package source: NATS JetStream connection & batch fetching
 // Types: Source, Options, OptionsProvider, MessageBatch, MessageInfo
 // Ex: source.NewSource(opts).FetchBatch(ctx) → messages flow
+//
+// Redelivery policy (AckWait, MaxDeliver) is owned by the operator-created
+// durable consumer; the connector only binds (nats.Bind) and never creates
+// or configures consumers.
 package source
 
 import (

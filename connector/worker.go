@@ -207,10 +207,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Topic:     "all",
 		Timestamp: time.Now(),
 	}
-	err := w.hooks.Execute(ctx, "PreRead", preReadData)
-	if err != nil {
-		return err
-	}
+	w.hooks.Execute(ctx, "PreRead", preReadData)
 
 	// PostRead hook
 	messageCount := 0
@@ -228,10 +225,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Error:        nil,
 		Timestamp:    time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PostRead", postReadData)
-	if err != nil {
-		slog.Error("PostRead hook failed", "worker_id", w.id, "error", err)
-	}
+	w.hooks.Execute(ctx, "PostRead", postReadData)
 
 	if len(batch.Messages) == 0 {
 		return nil
@@ -296,10 +290,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 			Tables:     tables,
 			Timestamp:  time.Now(),
 		}
-		err = w.hooks.Execute(ctx, "PreWrite", preWriteData)
-		if err != nil {
-			return err
-		}
+		w.hooks.Execute(ctx, "PreWrite", preWriteData)
 
 		writeStart := time.Now()
 		writeErr := w.circuitBreaker.Execute(func() error {
@@ -325,10 +316,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 			Error:         writeErr,
 			Timestamp:     time.Now(),
 		}
-		hookErr := w.hooks.Execute(ctx, "PostWrite", postWriteData)
-		if hookErr != nil {
-			slog.Error("PostWrite hook failed", "worker_id", w.id, "error", hookErr)
-		}
+		w.hooks.Execute(ctx, "PostWrite", postWriteData)
 
 		if writeErr != nil {
 			return w.handleWriteFailure(ctx, batch, validSequences, writeErr)
@@ -349,11 +337,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Count:     len(validSequences),
 		Timestamp: time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PreAck", preAckData)
-	if err != nil {
-		// Log the error but continue with ACK to prevent infinite redelivery
-		slog.Error("PreAck hook failed, continuing with ACK", "worker_id", w.id, "error", err)
-	}
+	w.hooks.Execute(ctx, "PreAck", preAckData)
 
 	ackErr := batch.AckFunc(validSequences)
 
@@ -371,10 +355,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Error:       ackErr,
 		Timestamp:   time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PostAck", postAckData)
-	if err != nil {
-		slog.Error("PostAck hook failed", "worker_id", w.id, "error", err)
-	}
+	w.hooks.Execute(ctx, "PostAck", postAckData)
 
 	if ackErr != nil {
 		slog.Error("Failed to ACK after write success", "worker_id", w.id, "error", ackErr)
@@ -472,11 +453,7 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 		Count:     len(validSequences),
 		Timestamp: time.Now(),
 	}
-	hookErr := w.hooks.Execute(ctx, "PreAck", preAckData)
-	if hookErr != nil {
-		// Log the error but continue with NACK to prevent infinite redelivery
-		slog.Error("PreAck hook failed, continuing with NACK", "worker_id", w.id, "error", hookErr)
-	}
+	w.hooks.Execute(ctx, "PreAck", preAckData)
 
 	cbErr := batch.NackFunc(validSequences)
 
@@ -494,10 +471,7 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 		Error:       cbErr,
 		Timestamp:   time.Now(),
 	}
-	hookErr = w.hooks.Execute(ctx, "PostAck", postAckData)
-	if hookErr != nil {
-		slog.Error("PostAck hook failed", "worker_id", w.id, "error", hookErr)
-	}
+	w.hooks.Execute(ctx, "PostAck", postAckData)
 
 	if cbErr != nil {
 		slog.Error("Failed to NACK after write failure", "worker_id", w.id, "error", cbErr)

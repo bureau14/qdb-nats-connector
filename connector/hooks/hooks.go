@@ -12,7 +12,6 @@ package hooks
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -24,10 +23,12 @@ const (
 	PostHookWarningThreshold = 500 * time.Microsecond
 )
 
-// HookFunc signature - all hooks must match this.
+// HookFunc signature - all hooks must match this. Hooks are observational:
+// they cannot fail the pipeline (no error return), and a panicking hook is
+// recovered, logged, and never propagated.
 // IMPORTANT: Hook functions must execute quickly to avoid blocking the worker.
 // See timing thresholds above for warning levels.
-type HookFunc func(ctx context.Context, data interface{}) error
+type HookFunc func(ctx context.Context, data interface{})
 
 // HookRegistry manages all registered hooks
 type HookRegistry struct {
@@ -52,14 +53,15 @@ func (r *HookRegistry) Register(name string, fn HookFunc) {
 
 // Execute runs all registered hooks for the given name synchronously with timing measurement.
 // Logs warnings if hooks exceed timing thresholds (see constants above).
-// Returns error on first hook failure (fail-fast)
-func (r *HookRegistry) Execute(ctx context.Context, name string, data interface{}) error {
+// A panicking hook is recovered and logged; execution continues with the
+// remaining hooks -- hook outcome never reaches the caller.
+func (r *HookRegistry) Execute(ctx context.Context, name string, data interface{}) {
 	r.mu.RLock()
 	hooks, exists := r.hooks[name]
 	r.mu.RUnlock()
 
 	if !exists {
-		return nil
+		return
 	}
 
 	// Determine warning threshold based on hook type
@@ -71,7 +73,7 @@ func (r *HookRegistry) Execute(ctx context.Context, name string, data interface{
 	for i, hook := range hooks {
 		// Measure individual hook execution time
 		hookStart := time.Now()
-		err := r.executeHookWithRecovery(ctx, hook, data)
+		r.executeHookWithRecovery(ctx, hook, data)
 		hookDuration := time.Since(hookStart)
 
 		// Log warning if hook exceeds threshold
@@ -81,10 +83,6 @@ func (r *HookRegistry) Execute(ctx context.Context, name string, data interface{
 				"hook_index", i,
 				"execution_time", hookDuration,
 				"threshold", threshold)
-		}
-
-		if err != nil {
-			return err
 		}
 	}
 
@@ -99,20 +97,17 @@ func (r *HookRegistry) Execute(ctx context.Context, name string, data interface{
 				"hook_count", len(hooks))
 		}
 	}
-
-	return nil
 }
 
 // executeHookWithRecovery executes a hook with panic recovery
-func (r *HookRegistry) executeHookWithRecovery(ctx context.Context, hook HookFunc, data interface{}) (err error) {
+func (r *HookRegistry) executeHookWithRecovery(ctx context.Context, hook HookFunc, data interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("hook panic: %v", r)
 			slog.Error("Hook panic recovered", "panic", r)
 		}
 	}()
 
-	return hook(ctx, data)
+	hook(ctx, data)
 }
 
 // getWarningThreshold returns the appropriate warning threshold based on hook name

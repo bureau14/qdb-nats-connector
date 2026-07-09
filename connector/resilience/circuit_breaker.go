@@ -249,7 +249,7 @@ func (cb *CircuitBreaker) applyJitterDelay() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 			defer cancel()
 
-			_ = cb.hooks.Execute(ctx, "PreCircuitBreakerJitter", event)
+			cb.hooks.Execute(ctx, "PreCircuitBreakerJitter", event)
 		}
 
 		time.Sleep(jitter)
@@ -531,7 +531,7 @@ func (cb *CircuitBreaker) firePreStateChangeHookLocked(newState State, reason st
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	_ = cb.hooks.Execute(ctx, "PreCircuitBreakerStateChange", event)
+	cb.hooks.Execute(ctx, "PreCircuitBreakerStateChange", event)
 }
 
 // firePostStateChangeHookLocked fires post-state change hook (assumes lock held)
@@ -563,7 +563,7 @@ func (cb *CircuitBreaker) firePostStateChangeHookLocked(oldState, newState State
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_ = cb.hooks.Execute(ctx, "PostCircuitBreakerStateChange", event)
+	cb.hooks.Execute(ctx, "PostCircuitBreakerStateChange", event)
 }
 
 // fireRejectionHookLocked fires request rejection hook (assumes lock held)
@@ -583,7 +583,7 @@ func (cb *CircuitBreaker) fireRejectionHookLocked(reason string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	_ = cb.hooks.Execute(ctx, "PostCircuitBreakerRequestRejected", event)
+	cb.hooks.Execute(ctx, "PostCircuitBreakerRequestRejected", event)
 }
 
 // progressToNextLevelLocked: doubles allowed requests (lock held)

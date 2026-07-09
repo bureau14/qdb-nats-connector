@@ -254,6 +254,8 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		nackErr := batch.NackFunc(failedSequenceNumbers)
 		if nackErr != nil {
 			slog.Error("Failed to NACK parse failures", "worker_id", w.id, "error", nackErr)
+		} else {
+			w.nacks.Add(uint64(len(failedSequenceNumbers)))
 		}
 	}
 
@@ -306,6 +308,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 				rowsWritten += table.RowCount()
 			}
 			tablesWritten = len(tables)
+			w.rowsWritten.Add(uint64(rowsWritten))
 		}
 		postWriteData := &hooks.PostWriteData{
 			WorkerID:      w.workerID,
@@ -346,6 +349,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 	nackedCount := 0
 	if ackErr == nil {
 		ackedCount = len(validSequences)
+		w.acks.Add(uint64(ackedCount))
 	}
 	postAckData := &hooks.PostAckData{
 		WorkerID:    fmt.Sprintf("worker-%d", w.id),
@@ -462,6 +466,7 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 	nackedCount := 0
 	if cbErr == nil {
 		nackedCount = len(validSequences)
+		w.nacks.Add(uint64(nackedCount))
 	}
 	postAckData := &hooks.PostAckData{
 		WorkerID:    w.workerID,

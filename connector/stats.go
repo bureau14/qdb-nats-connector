@@ -19,6 +19,12 @@ type WorkerStats struct {
 	// MessagesDropped: structurally-unusable messages discarded in drop
 	// mode (ACKed without a row).
 	MessagesDropped uint64
+	// RowsWritten: rows successfully written to QuasarDB.
+	RowsWritten uint64
+	// Acks: messages acknowledged after a successful pipeline pass.
+	Acks uint64
+	// Nacks: messages negatively acknowledged (parse or write failure).
+	Nacks uint64
 }
 
 // workerCounters: atomic counters updated on the message hot path.
@@ -28,6 +34,9 @@ type workerCounters struct {
 	parseFailures     atomic.Uint64
 	writeFailures     atomic.Uint64
 	messagesDropped   atomic.Uint64
+	rowsWritten       atomic.Uint64
+	acks              atomic.Uint64
+	nacks             atomic.Uint64
 }
 
 // snapshot returns a point-in-time copy of the counters.
@@ -38,6 +47,9 @@ func (c *workerCounters) snapshot() WorkerStats {
 		ParseFailures:     c.parseFailures.Load(),
 		WriteFailures:     c.writeFailures.Load(),
 		MessagesDropped:   c.messagesDropped.Load(),
+		RowsWritten:       c.rowsWritten.Load(),
+		Acks:              c.acks.Load(),
+		Nacks:             c.nacks.Load(),
 	}
 }
 
@@ -49,6 +61,9 @@ func accumulateStats(stats []WorkerStats) WorkerStats {
 		total.ParseFailures += s.ParseFailures
 		total.WriteFailures += s.WriteFailures
 		total.MessagesDropped += s.MessagesDropped
+		total.RowsWritten += s.RowsWritten
+		total.Acks += s.Acks
+		total.Nacks += s.Nacks
 	}
 
 	return total
@@ -67,4 +82,29 @@ func (c *Connector) Stats() WorkerStats {
 	}
 
 	return accumulateStats(stats)
+}
+
+// WorkerStatsSnapshot: one worker's counters with its stable identity
+// ("worker-0", ...), matching HealthSummary.BreakerStates keys so
+// per-worker metric series join across families.
+type WorkerStatsSnapshot struct {
+	Worker string
+	Stats  WorkerStats
+}
+
+// PerWorkerStats snapshots every worker's counters individually, in
+// worker order. Same monitoring-grade semantics as Stats.
+// In: none
+// Out: []WorkerStatsSnapshot - one entry per worker
+// Ex: c.PerWorkerStats()[0] -> {Worker: "worker-0", Stats: {...}}
+func (c *Connector) PerWorkerStats() []WorkerStatsSnapshot {
+	snapshots := make([]WorkerStatsSnapshot, len(c.workers))
+	for i, w := range c.workers {
+		snapshots[i] = WorkerStatsSnapshot{
+			Worker: w.workerID,
+			Stats:  w.GetStats(),
+		}
+	}
+
+	return snapshots
 }

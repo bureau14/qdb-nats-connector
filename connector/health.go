@@ -24,9 +24,11 @@ const (
 	// pipeline stage past the stuck threshold.
 	condStuckPrefix = "stage-stuck:"
 
-	// monitorInterval: health evaluation cadence. Not configuration;
+	// MonitorInterval: health evaluation cadence. Not configuration;
 	// tests inject a shorter interval on healthMonitor directly.
-	monitorInterval = 30 * time.Second
+	// Exported so internal/telemetry derives the /livez heartbeat
+	// staleness bound (3x) without a duplicated constant.
+	MonitorInterval = 30 * time.Second
 )
 
 // healthState: connector-level health with per-condition edge-triggered
@@ -38,6 +40,7 @@ type healthState struct {
 	mu               sync.Mutex
 	logger           *slog.Logger
 	lastFetchSuccess time.Time
+	lastEvaluate     time.Time
 	active           map[string]time.Time // condition → since
 }
 
@@ -73,6 +76,28 @@ func (h *healthState) fetchSuccessAge(now time.Time) time.Duration {
 	defer h.mu.Unlock()
 
 	return now.Sub(h.lastFetchSuccess)
+}
+
+// recordEvaluate marks one completed health-monitor evaluation pass.
+// In: now time.Time - evaluation instant
+// Out: none
+// Ex: recordEvaluate(time.Now()) → heartbeat refreshed
+func (h *healthState) recordEvaluate(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.lastEvaluate = now
+}
+
+// lastEvaluateAt returns the last completed evaluation instant.
+// In: none
+// Out: time.Time - zero until the monitor's first pass
+// Ex: lastEvaluateAt() → 2026-07-09T10:00:00Z
+func (h *healthState) lastEvaluateAt() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.lastEvaluate
 }
 
 // set activates a condition; logs one ERROR on the inactive→active edge.
@@ -174,7 +199,7 @@ func (c *Connector) newHealthMonitor() *healthMonitor {
 		health:         c.health,
 		probes:         probes,
 		stuckThreshold: c.stuckThreshold,
-		interval:       monitorInterval,
+		interval:       MonitorInterval,
 	}
 }
 
@@ -185,6 +210,11 @@ func (c *Connector) newHealthMonitor() *healthMonitor {
 func (m *healthMonitor) run(ctx context.Context) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
+
+	// Arm the heartbeat immediately: the first ticker fire is a full
+	// interval away, and /livez staleness must measure from monitor
+	// start, not from the first tick.
+	m.evaluate(time.Now())
 
 	for {
 		select {
@@ -222,6 +252,9 @@ func (m *healthMonitor) evaluate(now time.Time) {
 	} else {
 		m.health.clear(condFetchStalled)
 	}
+
+	// Recorded last: the heartbeat proves a completed pass.
+	m.health.recordEvaluate(now)
 }
 
 // HealthSummary: point-in-time connector health, keeping fetch liveness
@@ -292,4 +325,29 @@ func (c *Connector) Health() HealthSummary {
 // Ex: c.Healthy() → true
 func (c *Connector) Healthy() bool {
 	return c.Health().Healthy
+}
+
+// LastHealthEvaluate returns the health monitor's last completed
+// evaluation; zero before RunWithContext starts the monitor.
+// In: none
+// Out: time.Time - heartbeat instant
+// Ex: c.LastHealthEvaluate() → 2026-07-09T10:00:00Z
+func (c *Connector) LastHealthEvaluate() time.Time {
+	return c.health.lastEvaluateAt()
+}
+
+// NatsConnected reports whether the NATS connection is currently up.
+// False until Connect completes; the natsReady gate also orders the
+// NatsConn write in Connect before reads from HTTP handler goroutines.
+// In: none
+// Out: bool - live NATS connection
+// Ex: c.NatsConnected() → true
+func (c *Connector) NatsConnected() bool {
+	if !c.natsReady.Load() {
+		return false
+	}
+
+	nc := c.source.NatsConn
+
+	return nc != nil && nc.IsConnected()
 }

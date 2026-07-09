@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,9 +50,12 @@ type Connector struct {
 	// Health: fetch-loop liveness probe (fetch + dispatch stages),
 	// transition-logged health state, and the stuck threshold shared by
 	// all probes. Re-bind retry parameters are fields (not constants at
-	// use sites) so in-package tests can shrink them.
+	// use sites) so in-package tests can shrink them. natsReady gates
+	// NatsConnected: it orders source.Connect's NatsConn write before
+	// reads from HTTP handler goroutines.
 	fetchProbe     Probe
 	health         *healthState
+	natsReady      atomic.Bool
 	stuckThreshold time.Duration
 	rebindBase     time.Duration
 	rebindMax      time.Duration
@@ -177,6 +181,7 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 		return err
 	}
 	defer c.source.Close()
+	c.natsReady.Store(true)
 
 	// Arm fetch liveness so a connector that never completes a single
 	// fetch is flagged once the stuck threshold elapses.

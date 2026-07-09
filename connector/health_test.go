@@ -80,7 +80,7 @@ func newTestMonitor(threshold time.Duration, probes ...probeRef) (*healthMonitor
 		health:         health,
 		probes:         probes,
 		stuckThreshold: threshold,
-		interval:       monitorInterval,
+		interval:       MonitorInterval,
 	}, capture
 }
 
@@ -276,6 +276,29 @@ func TestHealthSummaryKeepsBreakerAndFetchSeparate(t *testing.T) {
 	summary = c.Health()
 	assert.False(t, summary.FetchHealthy)
 	assert.Contains(t, summary.Conditions, condFetchStalled)
+}
+
+func TestHealthEvaluateRecordsHeartbeat(t *testing.T) {
+	monitor, _ := newTestMonitor(5 * time.Minute)
+
+	assert.True(t, monitor.health.lastEvaluateAt().IsZero())
+
+	now := time.Now()
+	monitor.evaluate(now)
+	assert.Equal(t, now, monitor.health.lastEvaluateAt())
+}
+
+func TestHealthMonitorRunEvaluatesImmediately(t *testing.T) {
+	monitor, _ := newTestMonitor(5 * time.Minute)
+	monitor.interval = time.Hour
+
+	// A pre-cancelled context returns run() before the first tick; the
+	// initial evaluate must still have armed the heartbeat.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	monitor.run(ctx)
+
+	assert.False(t, monitor.health.lastEvaluateAt().IsZero())
 }
 
 func TestHealthSummaryStageStuck(t *testing.T) {

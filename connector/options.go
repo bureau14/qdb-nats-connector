@@ -70,6 +70,16 @@ type Options struct {
 	// HTTPAddr: probe HTTP listen address; empty disables the server.
 	HTTPAddr string `mapstructure:"http-addr"`
 
+	// Metrics histogram buckets: exponential series start*factor^i,
+	// i in [0, count) -- prometheus.ExponentialBuckets knobs for the
+	// message-lag and write-duration histograms.
+	MetricsLagBucketStart    time.Duration `mapstructure:"metrics-lag-bucket-start"`
+	MetricsLagBucketFactor   float64       `mapstructure:"metrics-lag-bucket-factor"`
+	MetricsLagBucketCount    int           `mapstructure:"metrics-lag-bucket-count"`
+	MetricsWriteBucketStart  time.Duration `mapstructure:"metrics-write-bucket-start"`
+	MetricsWriteBucketFactor float64       `mapstructure:"metrics-write-bucket-factor"`
+	MetricsWriteBucketCount  int           `mapstructure:"metrics-write-bucket-count"`
+
 	// Parser configuration
 	Parser           string `mapstructure:"parser"`
 	ParserConfig     string `mapstructure:"parser-config"`
@@ -151,6 +161,12 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("circuit-breaker-half-open-max", 32)
 	v.SetDefault("health-stuck-threshold", 5*time.Minute)
 	v.SetDefault("http-addr", ":9100")
+	v.SetDefault("metrics-lag-bucket-start", time.Millisecond)
+	v.SetDefault("metrics-lag-bucket-factor", 2.0)
+	v.SetDefault("metrics-lag-bucket-count", 20)
+	v.SetDefault("metrics-write-bucket-start", time.Millisecond)
+	v.SetDefault("metrics-write-bucket-factor", 2.0)
+	v.SetDefault("metrics-write-bucket-count", 20)
 	v.SetDefault("parser", "noop")
 	v.SetDefault("parser-config", "")
 	v.SetDefault("parse-error-action", "drop")
@@ -199,6 +215,14 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.Duration("health-stuck-threshold", 5*time.Minute,
 		"Age past which a blocked pipeline stage or persistently failing fetch is reported unhealthy")
 	fs.String("http-addr", ":9100", "Probe HTTP listen address (empty disables)")
+
+	// Metrics histogram bucket flags
+	fs.Duration("metrics-lag-bucket-start", time.Millisecond, "Message-lag histogram: first bucket bound")
+	fs.Float64("metrics-lag-bucket-factor", 2.0, "Message-lag histogram: bucket growth factor")
+	fs.Int("metrics-lag-bucket-count", 20, "Message-lag histogram: bucket count")
+	fs.Duration("metrics-write-bucket-start", time.Millisecond, "Write-duration histogram: first bucket bound")
+	fs.Float64("metrics-write-bucket-factor", 2.0, "Write-duration histogram: bucket growth factor")
+	fs.Int("metrics-write-bucket-count", 20, "Write-duration histogram: bucket count")
 
 	// Parser flags
 	fs.String("parser", "noop", "Parser type: yaml|noop")
@@ -343,6 +367,18 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 		}
 	}
 
+	bucketErr := validateBucketConfig("metrics-lag-bucket",
+		opts.MetricsLagBucketStart, opts.MetricsLagBucketFactor, opts.MetricsLagBucketCount)
+	if bucketErr != nil {
+		return bucketErr
+	}
+
+	bucketErr = validateBucketConfig("metrics-write-bucket",
+		opts.MetricsWriteBucketStart, opts.MetricsWriteBucketFactor, opts.MetricsWriteBucketCount)
+	if bucketErr != nil {
+		return bucketErr
+	}
+
 	// Validate parser configuration
 	validParsers := map[string]bool{"yaml": true, "noop": true}
 	if !validParsers[opts.Parser] {
@@ -385,6 +421,49 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 	}
 
 	return nil
+}
+
+// validateBucketConfig checks one exponential bucket series.
+// In: flag string - flag prefix for the error message, start/factor/
+// count - prometheus.ExponentialBuckets knobs
+// Out: *errors.ConnectorError - nil or InvalidConfig
+// Ex: validateBucketConfig("metrics-lag-bucket", 1ms, 2.0, 20) -> nil
+func validateBucketConfig(flag string, start time.Duration, factor float64, count int) *errors.ConnectorError {
+	if start <= 0 {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("%s-start must be positive", flag))
+	}
+
+	if factor <= 1.0 {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("%s-factor must be > 1.0", flag))
+	}
+
+	if count < 1 || count > 64 {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("%s-count must be in [1, 64]", flag))
+	}
+
+	return nil
+}
+
+// MetricsConfig maps the bucket flags onto the metrics package config.
+// In: none
+// Out: metrics.Config - lag + write-duration bucket series
+// Ex: opts.MetricsConfig() -> Config{Lag: {1ms, 2.0, 20}, ...}
+func (o *Options) MetricsConfig() metrics.Config {
+	return metrics.Config{
+		Lag: metrics.BucketConfig{
+			Start:  o.MetricsLagBucketStart,
+			Factor: o.MetricsLagBucketFactor,
+			Count:  o.MetricsLagBucketCount,
+		},
+		Write: metrics.BucketConfig{
+			Start:  o.MetricsWriteBucketStart,
+			Factor: o.MetricsWriteBucketFactor,
+			Count:  o.MetricsWriteBucketCount,
+		},
+	}
 }
 
 // ClusterUri returns QuasarDB URI

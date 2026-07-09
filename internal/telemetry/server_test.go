@@ -22,7 +22,7 @@ func TestNewServerBindConflict(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = blocker.Close() }()
 
-	_, err = NewServer(blocker.Addr().String(), greenSource(), slog.Default())
+	_, err = NewServer(blocker.Addr().String(), greenSource(), nil, slog.Default())
 	require.Error(t, err)
 
 	var connErr *connectorErrors.ConnectorError
@@ -30,7 +30,7 @@ func TestNewServerBindConflict(t *testing.T) {
 }
 
 func TestServerStartServeShutdown(t *testing.T) {
-	srv, err := NewServer("127.0.0.1:0", greenSource(), slog.Default())
+	srv, err := NewServer("127.0.0.1:0", greenSource(), nil, slog.Default())
 	require.NoError(t, err)
 	srv.Start()
 

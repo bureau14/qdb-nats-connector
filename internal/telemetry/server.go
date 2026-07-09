@@ -1,9 +1,10 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package telemetry: HTTP operational surface -- liveness/readiness probes.
-// Owned by main, never imported by connector; consumes the narrow
-// HealthSource interface satisfied by *connector.Connector.
-// Types: Server, HealthSource
-// Ex: telemetry.NewServer(":9100", conn, slog.Default()) → probe server
+// Package telemetry: HTTP operational surface -- liveness/readiness
+// probes and Prometheus metrics. Owned by main, never imported by
+// connector; consumes narrow interfaces satisfied by
+// *connector.Connector.
+// Types: Server, HealthSource, StatsSource, Collector
+// Ex: telemetry.NewServer(":9100", conn, reg, slog.Default()) → server
 package telemetry
 
 import (
@@ -16,6 +17,8 @@ import (
 
 	"github.com/bureau14/qdb-nats-connector/connector"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // readHeaderTimeout: bounds header reads so a slow client cannot pin a
@@ -38,12 +41,13 @@ type Server struct {
 	logger     *slog.Logger
 }
 
-// NewServer binds addr and builds the probe mux.
+// NewServer binds addr and builds the probe + metrics mux.
 // In: addr string - listen address (":9100"), src HealthSource - probe
-// inputs, logger *slog.Logger - server-error log destination
+// inputs, gatherer prometheus.Gatherer - /metrics source (nil disables
+// the route), logger *slog.Logger - server-error log destination
 // Out: *Server, error - bound server or ConnectionFailed on bind error
-// Ex: NewServer(":9100", conn, slog.Default()) → srv, nil
-func NewServer(addr string, src HealthSource, logger *slog.Logger) (*Server, error) {
+// Ex: NewServer(":9100", conn, reg, slog.Default()) → srv, nil
+func NewServer(addr string, src HealthSource, gatherer prometheus.Gatherer, logger *slog.Logger) (*Server, error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, connectorErrors.NewConnectionFailedError("telemetry", addr, err)
@@ -57,6 +61,9 @@ func NewServer(addr string, src HealthSource, logger *slog.Logger) (*Server, err
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", handleLivez(src))
 	mux.HandleFunc("/readyz", handleReadyz(src))
+	if gatherer != nil {
+		mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	}
 
 	s.httpServer = &http.Server{
 		Handler:           mux,

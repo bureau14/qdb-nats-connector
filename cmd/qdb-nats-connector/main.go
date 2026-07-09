@@ -177,7 +177,7 @@ func startTelemetry(addr string, c *connector.Connector) (*telemetry.Server, err
 		return nil, nil
 	}
 
-	srv, err := telemetry.NewServer(addr, c, slog.Default())
+	srv, err := telemetry.NewServer(addr, c, nil, slog.Default())
 	if err != nil {
 		return nil, err
 	}

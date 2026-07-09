@@ -157,7 +157,7 @@ func TestTelemetryProbesNatsOutage(t *testing.T) {
 		"--http-addr", "", // server owned by the test, as by main
 	})
 
-	srv, err := telemetry.NewServer("127.0.0.1:0", conn, slog.Default())
+	srv, err := telemetry.NewServer("127.0.0.1:0", conn, nil, slog.Default())
 	require.NoError(t, err)
 	srv.Start()
 	t.Cleanup(func() {

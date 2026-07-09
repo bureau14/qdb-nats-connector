@@ -7,6 +7,7 @@ package connector
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,9 +24,11 @@ const (
 	// pipeline stage past the stuck threshold.
 	condStuckPrefix = "stage-stuck:"
 
-	// monitorInterval: health evaluation cadence. Not configuration;
+	// MonitorInterval: health evaluation cadence. Not configuration;
 	// tests inject a shorter interval on healthMonitor directly.
-	monitorInterval = 30 * time.Second
+	// Exported so internal/telemetry derives the /livez heartbeat
+	// staleness bound (3x) without a duplicated constant.
+	MonitorInterval = 30 * time.Second
 )
 
 // healthState: connector-level health with per-condition edge-triggered
@@ -37,6 +40,7 @@ type healthState struct {
 	mu               sync.Mutex
 	logger           *slog.Logger
 	lastFetchSuccess time.Time
+	lastEvaluate     time.Time
 	active           map[string]time.Time // condition → since
 }
 
@@ -72,6 +76,28 @@ func (h *healthState) fetchSuccessAge(now time.Time) time.Duration {
 	defer h.mu.Unlock()
 
 	return now.Sub(h.lastFetchSuccess)
+}
+
+// recordEvaluate marks one completed health-monitor evaluation pass.
+// In: now time.Time - evaluation instant
+// Out: none
+// Ex: recordEvaluate(time.Now()) → heartbeat refreshed
+func (h *healthState) recordEvaluate(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.lastEvaluate = now
+}
+
+// lastEvaluateAt returns the last completed evaluation instant.
+// In: none
+// Out: time.Time - zero until the monitor's first pass
+// Ex: lastEvaluateAt() → 2026-07-09T10:00:00Z
+func (h *healthState) lastEvaluateAt() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.lastEvaluate
 }
 
 // set activates a condition; logs one ERROR on the inactive→active edge.
@@ -173,7 +199,7 @@ func (c *Connector) newHealthMonitor() *healthMonitor {
 		health:         c.health,
 		probes:         probes,
 		stuckThreshold: c.stuckThreshold,
-		interval:       monitorInterval,
+		interval:       MonitorInterval,
 	}
 }
 
@@ -184,6 +210,11 @@ func (c *Connector) newHealthMonitor() *healthMonitor {
 func (m *healthMonitor) run(ctx context.Context) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
+
+	// Arm the heartbeat immediately: the first ticker fire is a full
+	// interval away, and /livez staleness must measure from monitor
+	// start, not from the first tick.
+	m.evaluate(time.Now())
 
 	for {
 		select {
@@ -221,6 +252,9 @@ func (m *healthMonitor) evaluate(now time.Time) {
 	} else {
 		m.health.clear(condFetchStalled)
 	}
+
+	// Recorded last: the heartbeat proves a completed pass.
+	m.health.recordEvaluate(now)
 }
 
 // HealthSummary: point-in-time connector health, keeping fetch liveness
@@ -228,17 +262,32 @@ func (m *healthMonitor) evaluate(now time.Time) {
 // signals cannot be conflated.
 type HealthSummary struct {
 	// Healthy: FetchHealthy && !BreakerOpen.
-	Healthy bool
+	Healthy bool `json:"healthy"`
 	// FetchHealthy: no active unhealthy conditions (fetch side).
-	FetchHealthy bool
-	// Conditions: active condition keys (empty when FetchHealthy).
-	Conditions []string
+	FetchHealthy bool `json:"fetch_healthy"`
+	// Conditions: active condition keys (empty when FetchHealthy);
+	// stage-stuck entries carry the "stage-stuck:" prefix.
+	Conditions []string `json:"conditions"`
 	// LastFetchSuccess: last successful FetchBatch return (incl. empty).
-	LastFetchSuccess time.Time
+	LastFetchSuccess time.Time `json:"last_fetch_success"`
 	// BreakerOpen: any worker's circuit breaker is not closed.
-	BreakerOpen bool
+	BreakerOpen bool `json:"breaker_open"`
 	// BreakerStates: per-worker breaker state ("worker-0" → "CLOSED").
-	BreakerStates map[string]string
+	BreakerStates map[string]string `json:"breaker_states"`
+}
+
+// StageStuck reports whether any stage-stuck condition is active.
+// In: none
+// Out: bool - true when a probed goroutine is wedged past the threshold
+// Ex: HealthSummary{Conditions: []string{"stage-stuck:worker-0"}}.StageStuck() → true
+func (s HealthSummary) StageStuck() bool {
+	for _, c := range s.Conditions {
+		if strings.HasPrefix(c, condStuckPrefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Health returns the aggregate health summary.
@@ -248,11 +297,11 @@ type HealthSummary struct {
 func (c *Connector) Health() HealthSummary {
 	conditions, lastFetch := c.health.snapshot()
 
-	breakerStates := make(map[string]string, len(c.workers))
+	states := c.BreakerStates()
+	breakerStates := make(map[string]string, len(states))
 	breakerOpen := false
-	for _, w := range c.workers {
-		state := w.circuitBreaker.GetState()
-		breakerStates[w.workerID] = state.String()
+	for workerID, state := range states {
+		breakerStates[workerID] = state.String()
 		if state != resilience.StateClosed {
 			breakerOpen = true
 		}
@@ -276,4 +325,45 @@ func (c *Connector) Health() HealthSummary {
 // Ex: c.Healthy() → true
 func (c *Connector) Healthy() bool {
 	return c.Health().Healthy
+}
+
+// LastHealthEvaluate returns the health monitor's last completed
+// evaluation; zero before RunWithContext starts the monitor.
+// In: none
+// Out: time.Time - heartbeat instant
+// Ex: c.LastHealthEvaluate() → 2026-07-09T10:00:00Z
+func (c *Connector) LastHealthEvaluate() time.Time {
+	return c.health.lastEvaluateAt()
+}
+
+// NatsConnected reports whether the NATS connection is currently up.
+// False until Connect completes; the natsReady gate also orders the
+// NatsConn write in Connect before reads from HTTP handler goroutines.
+// In: none
+// Out: bool - live NATS connection
+// Ex: c.NatsConnected() → true
+func (c *Connector) NatsConnected() bool {
+	if !c.natsReady.Load() {
+		return false
+	}
+
+	nc := c.source.NatsConn
+
+	return nc != nil && nc.IsConnected()
+}
+
+// BreakerStates returns each worker's circuit-breaker state as the
+// typed enum, keyed by worker identity ("worker-0", ...). Health()
+// derives its string map from this; metrics consumers map the enum to
+// gauge values without string parsing.
+// In: none
+// Out: map[string]resilience.State - breaker state per worker
+// Ex: c.BreakerStates() -> {"worker-0": resilience.StateClosed}
+func (c *Connector) BreakerStates() map[string]resilience.State {
+	states := make(map[string]resilience.State, len(c.workers))
+	for _, w := range c.workers {
+		states[w.workerID] = w.circuitBreaker.GetState()
+	}
+
+	return states
 }

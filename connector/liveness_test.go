@@ -48,11 +48,46 @@ func TestProbeReBeginResetsAge(t *testing.T) {
 	assert.Less(t, age, time.Minute)
 }
 
+func TestProbeTouchRefreshesAgeKeepsStage(t *testing.T) {
+	var p Probe
+
+	p.Begin("process")
+	p.mu.Lock()
+	p.since = time.Now().Add(-6 * time.Minute)
+	p.mu.Unlock()
+
+	p.Touch()
+	stage, age, active := p.Sample(time.Now())
+
+	assert.True(t, active)
+	assert.Equal(t, "process", stage)
+	assert.Less(t, age, time.Minute)
+}
+
+func TestProbeTouchOnClearedProbeIsNoop(t *testing.T) {
+	var p Probe
+
+	p.Touch()
+	_, _, active := p.Sample(time.Now())
+
+	assert.False(t, active)
+	p.mu.Lock()
+	assert.True(t, p.since.IsZero())
+	p.mu.Unlock()
+
+	p.Begin("process")
+	p.End()
+	p.Touch()
+	_, _, active = p.Sample(time.Now())
+
+	assert.False(t, active)
+}
+
 func TestProbeConcurrentAccess(t *testing.T) {
 	var p Probe
 	var wg sync.WaitGroup
 
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		for range 1000 {
@@ -64,6 +99,12 @@ func TestProbeConcurrentAccess(t *testing.T) {
 		defer wg.Done()
 		for range 1000 {
 			p.Sample(time.Now())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			p.Touch()
 		}
 	}()
 	wg.Wait()

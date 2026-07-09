@@ -1,12 +1,12 @@
 // Package hooks_test provides comprehensive unit tests for the hooks system.
 // This test suite covers hook registration, execution order, data sharing,
-// error handling, failure injection, and various hook lifecycle scenarios.
+// panic recovery, and various hook lifecycle scenarios. Hooks are
+// observational: they return nothing and cannot fail the pipeline.
 package hooks_test
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -15,94 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// FailureMode defines how failures should be injected
-type FailureMode int
-
-const (
-	FailureModeError FailureMode = iota // Return error
-	FailureModePanic                    // Panic
-	FailureModeExit                     // Exit process
-	FailureModeHang                     // Hang indefinitely
-)
-
-// FailureInjector allows injecting failures at specific hook points for testing
-type FailureInjector struct {
-	failurePoint   string
-	failAfterCalls int
-	failureMode    FailureMode
-	callCounts     map[string]int
-	mu             sync.Mutex
-}
-
-// NewFailureInjector creates a new failure injector
-func NewFailureInjector(failurePoint string, failAfterCalls int, mode FailureMode) *FailureInjector {
-	return &FailureInjector{
-		failurePoint:   failurePoint,
-		failAfterCalls: failAfterCalls,
-		failureMode:    mode,
-		callCounts:     make(map[string]int),
-	}
-}
-
-// RegisterHooks registers hooks for all injection points
-func (fi *FailureInjector) RegisterHooks(registry *hooks.HookRegistry) {
-	hookNames := []string{
-		"PreRead",
-		"PostRead",
-		"PreWrite",
-		"PostWrite",
-		"PreAck",
-		"PostAck",
-	}
-
-	for _, hookName := range hookNames {
-		registry.Register(hookName, fi.createHookFunc(hookName))
-	}
-}
-
-// GetCallCount returns the number of times a hook has been called
-func (fi *FailureInjector) GetCallCount(hookName string) int {
-	fi.mu.Lock()
-	defer fi.mu.Unlock()
-
-	return fi.callCounts[hookName]
-}
-
-// Reset resets all call counts
-func (fi *FailureInjector) Reset() {
-	fi.mu.Lock()
-	defer fi.mu.Unlock()
-	fi.callCounts = make(map[string]int)
-}
-
-// createHookFunc creates a hook function for a specific hook point
-func (fi *FailureInjector) createHookFunc(hookName string) hooks.HookFunc {
-	return func(ctx context.Context, data interface{}) error {
-		fi.mu.Lock()
-		defer fi.mu.Unlock()
-
-		// Increment call count for this hook
-		fi.callCounts[hookName]++
-
-		// Check if we should fail at this point
-		if hookName == fi.failurePoint && fi.callCounts[hookName] > fi.failAfterCalls {
-			switch fi.failureMode {
-			case FailureModeError:
-				return fmt.Errorf("injected failure at %s after %d calls", hookName, fi.failAfterCalls)
-			case FailureModePanic:
-				panic(fmt.Sprintf("injected panic at %s after %d calls", hookName, fi.failAfterCalls))
-			case FailureModeExit:
-				os.Exit(1)
-			case FailureModeHang:
-				// Block forever
-				select {}
-			}
-		}
-
-		return nil
-	}
-}
 
 // CounterHook is a test hook that counts how many times it's called
 type CounterHook struct {
@@ -117,13 +29,11 @@ func NewCounterHook() *CounterHook {
 	}
 }
 
-func (ch *CounterHook) Hook(ctx context.Context, data interface{}) error {
+func (ch *CounterHook) Hook(ctx context.Context, data interface{}) {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
 	ch.count++
 	ch.callData = append(ch.callData, data)
-
-	return nil
 }
 
 func (ch *CounterHook) GetCount() int {
@@ -140,19 +50,11 @@ func (ch *CounterHook) GetCallData() []interface{} {
 	return append([]interface{}{}, ch.callData...)
 }
 
-func (ch *CounterHook) Reset() {
-	ch.mu.Lock()
-	defer ch.mu.Unlock()
-	ch.count = 0
-	ch.callData = make([]interface{}, 0)
-}
-
 // OrderedHook tracks the order of hook calls
 type OrderedHook struct {
 	mu     sync.Mutex
 	calls  []string
 	panics bool
-	errors bool
 }
 
 func NewOrderedHook() *OrderedHook {
@@ -167,14 +69,8 @@ func (oh *OrderedHook) SetPanics(panics bool) {
 	oh.panics = panics
 }
 
-func (oh *OrderedHook) SetErrors(errors bool) {
-	oh.mu.Lock()
-	defer oh.mu.Unlock()
-	oh.errors = errors
-}
-
 func (oh *OrderedHook) Hook(hookName string) hooks.HookFunc {
-	return func(ctx context.Context, data interface{}) error {
+	return func(ctx context.Context, data interface{}) {
 		oh.mu.Lock()
 		defer oh.mu.Unlock()
 
@@ -183,12 +79,6 @@ func (oh *OrderedHook) Hook(hookName string) hooks.HookFunc {
 		if oh.panics {
 			panic(fmt.Sprintf("hook %s panicked", hookName))
 		}
-
-		if oh.errors {
-			return fmt.Errorf("hook %s failed", hookName)
-		}
-
-		return nil
 	}
 }
 
@@ -197,12 +87,6 @@ func (oh *OrderedHook) GetCalls() []string {
 	defer oh.mu.Unlock()
 
 	return append([]string{}, oh.calls...)
-}
-
-func (oh *OrderedHook) Reset() {
-	oh.mu.Lock()
-	defer oh.mu.Unlock()
-	oh.calls = make([]string, 0)
 }
 
 func TestHookRegistry(t *testing.T) {
@@ -217,8 +101,7 @@ func TestHookRegistry(t *testing.T) {
 	ctx := context.Background()
 	testData := "test data"
 
-	err := registry.Execute(ctx, "test", testData)
-	require.NoError(t, err)
+	registry.Execute(ctx, "test", testData)
 
 	// Should have called the hook twice
 	assert.Equal(t, 2, counter.GetCount())
@@ -230,61 +113,15 @@ func TestHookRegistry(t *testing.T) {
 	assert.Equal(t, testData, callData[1])
 }
 
-func TestHookRegistryAsync(t *testing.T) {
-	registry := hooks.NewHookRegistry()
-	counter := NewCounterHook()
-
-	registry.Register("async-test", counter.Hook)
-
-	ctx := context.Background()
-	testData := "async test data"
-
-	// Test execution
-	err := registry.Execute(ctx, "async-test", testData)
-	assert.NoError(t, err)
-
-	assert.Equal(t, 1, counter.GetCount())
-	callData := counter.GetCallData()
-	assert.Len(t, callData, 1)
-	assert.Equal(t, testData, callData[0])
-}
-
-func TestHookRegistryFailure(t *testing.T) {
-	registry := hooks.NewHookRegistry()
-
-	// Hook that always fails
-	failingHook := func(ctx context.Context, data interface{}) error {
-		return assert.AnError
-	}
-
-	passingHook := func(ctx context.Context, data interface{}) error {
-		return nil
-	}
-
-	registry.Register("fail-test", passingHook)
-	registry.Register("fail-test", failingHook)
-	registry.Register("fail-test", passingHook) // This should not be called
-
-	ctx := context.Background()
-	err := registry.Execute(ctx, "fail-test", "test")
-
-	// Should fail on the second hook
-	assert.Error(t, err)
-	assert.Equal(t, assert.AnError, err)
-}
-
 func TestHookRegistryNonExistentHook(t *testing.T) {
 	registry := hooks.NewHookRegistry()
 
 	ctx := context.Background()
 
-	// Execute non-existent hook - should not error
-	err := registry.Execute(ctx, "non-existent", "test")
-	assert.NoError(t, err)
-
-	// Execute with non-existent hook - should not error
-	err = registry.Execute(ctx, "non-existent", "test")
-	assert.NoError(t, err)
+	// Execute non-existent hook - must be a safe no-op
+	assert.NotPanics(t, func() {
+		registry.Execute(ctx, "non-existent", "test")
+	})
 }
 
 func TestHookDataTypes(t *testing.T) {
@@ -364,35 +201,6 @@ func TestHookDataTypes(t *testing.T) {
 	assert.Equal(t, 0, postAckData.NackedCount)
 }
 
-func TestFailureInjector(t *testing.T) {
-	injector := NewFailureInjector("PreRead", 2, FailureModeError)
-	registry := hooks.NewHookRegistry()
-
-	injector.RegisterHooks(registry)
-
-	ctx := context.Background()
-
-	// First two calls should succeed
-	err := registry.Execute(ctx, "PreRead", &hooks.PreReadData{})
-	assert.NoError(t, err)
-	assert.Equal(t, 1, injector.GetCallCount("PreRead"))
-
-	err = registry.Execute(ctx, "PreRead", &hooks.PreReadData{})
-	assert.NoError(t, err)
-	assert.Equal(t, 2, injector.GetCallCount("PreRead"))
-
-	// Third call should fail
-	err = registry.Execute(ctx, "PreRead", &hooks.PreReadData{})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "injected failure at PreRead after 2 calls")
-	assert.Equal(t, 3, injector.GetCallCount("PreRead"))
-
-	// Other hooks should not be affected
-	err = registry.Execute(ctx, "PreWrite", &hooks.PreWriteData{})
-	assert.NoError(t, err)
-	assert.Equal(t, 1, injector.GetCallCount("PreWrite"))
-}
-
 func TestHookExecutionOrder(t *testing.T) {
 	registry := hooks.NewHookRegistry()
 	orderedHook := NewOrderedHook()
@@ -408,42 +216,34 @@ func TestHookExecutionOrder(t *testing.T) {
 	ctx := context.Background()
 
 	// Simulate the expected order during normal message processing
-	err := registry.Execute(ctx, "PreRead", &hooks.PreReadData{
+	registry.Execute(ctx, "PreRead", &hooks.PreReadData{
 		WorkerID: "worker-1", Topic: "test", Timestamp: time.Now(),
 	})
-	require.NoError(t, err)
 
-	err = registry.Execute(ctx, "PostRead", &hooks.PostReadData{
+	registry.Execute(ctx, "PostRead", &hooks.PostReadData{
 		WorkerID: "worker-1", Topic: "test", MessageCount: 1, BatchSize: 1,
 		Duration: time.Millisecond, Timestamp: time.Now(),
 	})
-	require.NoError(t, err)
 
-	err = registry.Execute(ctx, "PreWrite", &hooks.PreWriteData{
+	registry.Execute(ctx, "PreWrite", &hooks.PreWriteData{
 		WorkerID: "worker-1", Topic: "test", TableCount: 1, RowCount: 1,
 		Timestamp: time.Now(),
 	})
-	require.NoError(t, err)
 
-	err = registry.Execute(ctx, "PostWrite", &hooks.PostWriteData{
+	registry.Execute(ctx, "PostWrite", &hooks.PostWriteData{
 		WorkerID: "worker-1", Topic: "test", Duration: time.Millisecond,
 		RowsWritten: 1, TablesWritten: 1, Timestamp: time.Now(),
 	})
-	require.NoError(t, err)
 
-	err = registry.Execute(ctx, "PreAck", &hooks.PreAckData{
+	registry.Execute(ctx, "PreAck", &hooks.PreAckData{
 		WorkerID: "worker-1", Topic: "test", Sequences: []uint64{1},
 		IsNack: false, Count: 1, Timestamp: time.Now(),
 	})
-	require.NoError(t, err)
 
-	err = registry.Execute(ctx, "PostAck", &hooks.PostAckData{
+	registry.Execute(ctx, "PostAck", &hooks.PostAckData{
 		WorkerID: "worker-1", Topic: "test", AckedCount: 1, NackedCount: 0,
 		Timestamp: time.Now(),
 	})
-	require.NoError(t, err)
-
-	// Hooks are now synchronous, no need to wait
 
 	calls := orderedHook.GetCalls()
 
@@ -468,10 +268,8 @@ func TestHookDataContainsExpectedFields(t *testing.T) {
 	registry := hooks.NewHookRegistry()
 
 	var capturedData interface{}
-	dataCapture := func(ctx context.Context, data interface{}) error {
+	dataCapture := func(ctx context.Context, data interface{}) {
 		capturedData = data
-
-		return nil
 	}
 
 	registry.Register("PreRead", dataCapture)
@@ -483,8 +281,7 @@ func TestHookDataContainsExpectedFields(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 
-	err := registry.Execute(ctx, "PreRead", testData)
-	require.NoError(t, err)
+	registry.Execute(ctx, "PreRead", testData)
 
 	// Verify the data was captured correctly
 	require.NotNil(t, capturedData)
@@ -499,10 +296,8 @@ func TestHookDataContainsExpectedFields(t *testing.T) {
 func TestSyncHooksBlockProcessing(t *testing.T) {
 	registry := hooks.NewHookRegistry()
 
-	slowHook := func(ctx context.Context, data interface{}) error {
+	slowHook := func(ctx context.Context, data interface{}) {
 		time.Sleep(100 * time.Millisecond) // Slow hook
-
-		return nil
 	}
 
 	registry.Register("PostRead", slowHook)
@@ -511,58 +306,47 @@ func TestSyncHooksBlockProcessing(t *testing.T) {
 	start := time.Now()
 
 	// This should execute synchronously and block
-	err := registry.Execute(ctx, "PostRead", &hooks.PostReadData{
+	registry.Execute(ctx, "PostRead", &hooks.PostReadData{
 		WorkerID: "worker-1", Topic: "test", MessageCount: 1, BatchSize: 1,
 		Duration: time.Millisecond, Timestamp: time.Now(),
 	})
-	require.NoError(t, err)
 
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "Sync hook should block for its duration")
 }
 
-func TestHookErrorScenarios(t *testing.T) {
+func TestHookPanicRecovery(t *testing.T) {
 	registry := hooks.NewHookRegistry()
-	orderedHook := NewOrderedHook()
+	counter := NewCounterHook()
 
-	// Test synchronous hook error
-	orderedHook.SetErrors(true)
-	registry.Register("PreRead", orderedHook.Hook("PreRead"))
+	panickingHook := func(ctx context.Context, data interface{}) {
+		panic("hook exploded")
+	}
+
+	// A panicking hook is recovered and logged; execution continues with
+	// the remaining hooks -- callers never observe hook outcome.
+	registry.Register("PreRead", panickingHook)
+	registry.Register("PreRead", counter.Hook)
 
 	ctx := context.Background()
-	err := registry.Execute(ctx, "PreRead", &hooks.PreReadData{
-		WorkerID: "worker-1", Topic: "test", Timestamp: time.Now(),
+	assert.NotPanics(t, func() {
+		registry.Execute(ctx, "PreRead", &hooks.PreReadData{
+			WorkerID: "worker-1", Topic: "test", Timestamp: time.Now(),
+		})
 	})
 
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "hook PreRead failed")
-
-	// Reset and test panic recovery
-	orderedHook.Reset()
-	orderedHook.SetErrors(false)
-	orderedHook.SetPanics(true)
-
-	err = registry.Execute(ctx, "PreRead", &hooks.PreReadData{
-		WorkerID: "worker-1", Topic: "test", Timestamp: time.Now(),
-	})
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "hook panic")
+	assert.Equal(t, 1, counter.GetCount(), "hooks after a panicking hook must still run")
 }
 
 func TestHookDataSharing(t *testing.T) {
 	registry := hooks.NewHookRegistry()
 
 	var capturedData1, capturedData2 interface{}
-	hook1 := func(ctx context.Context, data interface{}) error {
+	hook1 := func(ctx context.Context, data interface{}) {
 		capturedData1 = data
-
-		return nil
 	}
-	hook2 := func(ctx context.Context, data interface{}) error {
+	hook2 := func(ctx context.Context, data interface{}) {
 		capturedData2 = data
-
-		return nil
 	}
 
 	registry.Register("PostRead", hook1)
@@ -578,8 +362,7 @@ func TestHookDataSharing(t *testing.T) {
 		Timestamp:    time.Now(),
 	}
 
-	err := registry.Execute(ctx, "PostRead", originalData)
-	require.NoError(t, err)
+	registry.Execute(ctx, "PostRead", originalData)
 
 	// Verify both hooks got the same data
 	require.NotNil(t, capturedData1)
@@ -598,33 +381,6 @@ func TestHookDataSharing(t *testing.T) {
 
 	// Now they should be the same instance since we're synchronous
 	assert.True(t, data1 == data2, "Hook data should be the same instance for synchronous execution")
-}
-
-func TestPreAckHookErrorDoesNotPreventAck(t *testing.T) {
-	// This test validates that PreAck hook failures don't prevent ACK/NACK
-	// which would cause infinite redelivery loops
-
-	registry := hooks.NewHookRegistry()
-
-	failingHook := func(ctx context.Context, data interface{}) error {
-		return fmt.Errorf("PreAck hook failed")
-	}
-
-	registry.Register("PreAck", failingHook)
-
-	ctx := context.Background()
-
-	// This should return an error but not prevent the ACK operation
-	err := registry.Execute(ctx, "PreAck", &hooks.PreAckData{
-		WorkerID: "worker-1", Topic: "test", Sequences: []uint64{1, 2, 3},
-		IsNack: false, Count: 3, Timestamp: time.Now(),
-	})
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "PreAck hook failed")
-
-	// In the actual worker implementation, this error would be logged
-	// but the ACK/NACK would still proceed
 }
 
 // Helper function to find index of element in slice

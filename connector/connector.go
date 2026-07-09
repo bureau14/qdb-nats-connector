@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/bureau14/qdb-nats-connector/connector/resilience"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 )
 
@@ -49,13 +51,21 @@ type Connector struct {
 	// Health: fetch-loop liveness probe (fetch + dispatch stages),
 	// transition-logged health state, and the stuck threshold shared by
 	// all probes. Re-bind retry parameters are fields (not constants at
-	// use sites) so in-package tests can shrink them.
+	// use sites) so in-package tests can shrink them. natsReady gates
+	// NatsConnected: it orders source.Connect's NatsConn write before
+	// reads from HTTP handler goroutines.
 	fetchProbe     Probe
 	health         *healthState
+	natsReady      atomic.Bool
 	stuckThreshold time.Duration
 	rebindBase     time.Duration
 	rebindMax      time.Duration
 	rebindAttempts int
+
+	// Metrics: fetch-loop hot-path counters (snapshot via FetchStats)
+	// and nil-safe histograms shared with the workers.
+	fetchCounters
+	metrics *metrics.Metrics
 }
 
 // NewConnector creates NATS→QuasarDB connector.
@@ -98,6 +108,7 @@ func NewConnector(opts *Options) (*Connector, error) {
 	// Create single shared source
 	sourceOpts := source.FromOptionsProvider(opts)
 	sourceOpts.ConsumerName = opts.ConsumerName()
+	sourceOpts.Metrics = opts.Metrics
 	src, err := source.NewSource(sourceOpts)
 	if err != nil {
 		return nil, err
@@ -133,6 +144,7 @@ func NewConnector(opts *Options) (*Connector, error) {
 		rebindBase:     rebindBackoffBase,
 		rebindMax:      rebindBackoffMax,
 		rebindAttempts: rebindMaxAttempts,
+		metrics:        opts.Metrics,
 	}, nil
 }
 
@@ -177,6 +189,7 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 		return err
 	}
 	defer c.source.Close()
+	c.natsReady.Store(true)
 
 	// Arm fetch liveness so a connector that never completes a single
 	// fetch is flagged once the stuck threshold elapses.
@@ -290,6 +303,13 @@ func (c *Connector) fetchLoop(ctx context.Context, errCh chan<- error) {
 		backoff.Reset()
 		c.health.recordFetchSuccess()
 
+		c.messagesFetched.Add(uint64(len(batch.Messages)))
+		if len(batch.Messages) > 0 {
+			// Empty batches are the idle steady state; observing their
+			// zeros would swamp the size distribution.
+			c.metrics.ObserveFetchBatchSize(len(batch.Messages))
+		}
+
 		if !c.dispatch(ctx, batch) {
 			return
 		}
@@ -308,9 +328,12 @@ func (c *Connector) recoverFetch(ctx context.Context, err error, backoff *resili
 	}
 
 	if isSubscriptionFailed(err) {
+		c.subscriptionErrors.Add(1)
+
 		return c.rebindSubscription(ctx, err, errCh)
 	}
 
+	c.transientErrors.Add(1)
 	slog.Error("Failed to fetch batch", "error", err)
 
 	return backoff.Wait(ctx) == nil
@@ -383,6 +406,7 @@ func (c *Connector) rebindSubscription(ctx context.Context, cause error, errCh c
 
 	backoff := resilience.NewBackoff(c.rebindBase, c.rebindMax)
 	for attempt := 1; attempt <= c.rebindAttempts; attempt++ {
+		c.rebindsAttempted.Add(1)
 		err := c.source.Rebind(ctx)
 		if err == nil {
 			c.health.recordFetchSuccess()

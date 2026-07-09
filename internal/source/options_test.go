@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 )
 
 // stubProvider: minimal OptionsProvider for FromOptionsProvider tests
@@ -22,8 +24,6 @@ func (p stubProvider) TLSCAFile() string           { return p.tlsCAFile }
 func (p stubProvider) BatchSize() int              { return 100 }
 func (p stubProvider) BatchTimeout() time.Duration { return time.Second }
 func (p stubProvider) FetchTimeout() time.Duration { return 5 * time.Second }
-func (p stubProvider) AckWait() time.Duration      { return 30 * time.Second }
-func (p stubProvider) MaxDeliver() int             { return 3 }
 
 func TestWithCredsFileSetsField(t *testing.T) {
 	opts := NewOptions(WithCredsFile("/keys/real.creds"))
@@ -38,6 +38,15 @@ func TestWithTLSCAFileSetsField(t *testing.T) {
 
 	if opts.TLSCAFile != "/keys/ca.pem" {
 		t.Fatalf("TLSCAFile = %q, want /keys/ca.pem", opts.TLSCAFile)
+	}
+}
+
+func TestWithMetricsSetsField(t *testing.T) {
+	m := &metrics.Metrics{}
+	opts := NewOptions(WithMetrics(m))
+
+	if opts.Metrics != m {
+		t.Fatalf("Metrics = %p, want %p", opts.Metrics, m)
 	}
 }
 
@@ -60,8 +69,9 @@ func TestConnectOptionsEmptyConfig(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(natsOpts) != 0 {
-		t.Fatalf("got %d options, want 0", len(natsOpts))
+	// Lifecycle event handlers are always registered.
+	if len(natsOpts) != len(natsEventHandlers()) {
+		t.Fatalf("got %d options, want %d", len(natsOpts), len(natsEventHandlers()))
 	}
 }
 
@@ -85,8 +95,10 @@ func TestConnectOptionsValidFiles(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(natsOpts) != 2 {
-		t.Fatalf("got %d options, want 2", len(natsOpts))
+	// Creds + CA options plus the always-registered lifecycle handlers.
+	want := 2 + len(natsEventHandlers())
+	if len(natsOpts) != want {
+		t.Fatalf("got %d options, want %d", len(natsOpts), want)
 	}
 }
 

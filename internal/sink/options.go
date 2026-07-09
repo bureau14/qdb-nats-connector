@@ -44,6 +44,13 @@ type Options struct {
 	// Retry configuration
 	RetryAttempts int            `json:"retry_attempts"`
 	Timeout       *time.Duration `json:"timeout"`
+
+	// OnRetryProgress, when non-nil, is invoked at every retry boundary in
+	// writeWithRetry (post-backoff wake, retryable-error classification).
+	// Progress signal for liveness monitoring; must be fast and non-blocking.
+	// Runtime wiring set by the worker, not config: deliberately absent from
+	// OptionsProvider/FromOptionsProvider.
+	OnRetryProgress func() `json:"-"`
 }
 
 // NewOptions applies options to default sink config.
@@ -227,6 +234,18 @@ func WithRetryAttempts(attempts int) Option {
 func WithTimeout(timeout time.Duration) Option {
 	return func(o Options) Options {
 		o.Timeout = &timeout
+
+		return o
+	}
+}
+
+// WithOnRetryProgress sets the retry-boundary progress callback.
+// In: fn func() - fast, non-blocking progress signal
+// Out: Option
+// Ex: WithOnRetryProgress(probe.Touch)
+func WithOnRetryProgress(fn func()) Option {
+	return func(o Options) Options {
+		o.OnRetryProgress = fn
 
 		return o
 	}

@@ -58,8 +58,9 @@ func TestConnectOptionsEmptyConfig(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(natsOpts) != 0 {
-		t.Fatalf("got %d options, want 0", len(natsOpts))
+	// Lifecycle event handlers are always registered.
+	if len(natsOpts) != len(natsEventHandlers()) {
+		t.Fatalf("got %d options, want %d", len(natsOpts), len(natsEventHandlers()))
 	}
 }
 
@@ -83,8 +84,10 @@ func TestConnectOptionsValidFiles(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(natsOpts) != 2 {
-		t.Fatalf("got %d options, want 2", len(natsOpts))
+	// Creds + CA options plus the always-registered lifecycle handlers.
+	want := 2 + len(natsEventHandlers())
+	if len(natsOpts) != want {
+		t.Fatalf("got %d options, want %d", len(natsOpts), want)
 	}
 }
 

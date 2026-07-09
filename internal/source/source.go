@@ -129,7 +129,35 @@ func connectOptions(opts Options) ([]nats.Option, error) {
 		natsOpts = append(natsOpts, nats.RootCAs(opts.TLSCAFile))
 	}
 
+	natsOpts = append(natsOpts, natsEventHandlers()...)
+
 	return natsOpts, nil
+}
+
+// natsEventHandlers returns connection lifecycle handlers emitting one
+// structured log line per transition. Graceful Close also fires the
+// disconnect callback with a nil error -- logged at INFO, not WARN, so
+// every shutdown does not end on a spurious warning.
+// In: none
+// Out: []nats.Option - Disconnect/Reconnect/Closed handlers
+// Ex: append(natsOpts, natsEventHandlers()...)
+func natsEventHandlers() []nats.Option {
+	return []nats.Option{
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			if err != nil {
+				slog.Warn("NATS disconnected", "error", err)
+
+				return
+			}
+			slog.Info("NATS disconnected")
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			slog.Info("NATS reconnected", "url", nc.ConnectedUrl())
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			slog.Info("NATS connection closed", "last_error", nc.LastError())
+		}),
+	}
 }
 
 // consumerFilterSubject resolves the subject to bind the pull subscription

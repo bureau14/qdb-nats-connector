@@ -165,6 +165,69 @@ func TestProcessBatchUnusablePolicy(t *testing.T) {
 	}
 }
 
+// singleRowTable builds a one-row WriterTable named as given (the parser
+// convention: names carry the trailing "\x00" pinning terminator).
+func singleRowTable(t *testing.T, name string) qdb.WriterTable {
+	t.Helper()
+
+	cols := []qdb.WriterColumn{{ColumnName: "value\x00", ColumnType: qdb.TsColumnInt64}}
+	tbl, err := qdb.NewWriterTable(name, cols)
+	require.NoError(t, err)
+
+	cd := qdb.NewColumnDataInt64([]int64{1})
+	require.NoError(t, tbl.SetData(0, &cd))
+	tbl.SetIndex([]time.Time{time.Unix(0, 0)})
+
+	return tbl
+}
+
+// TestTableWritesForAggregatesAndTrims pins the per-table event contract:
+// same-name single-row tables aggregate into one event, and the "\x00"
+// pinning terminator never leaks into event names.
+func TestTableWritesForAggregatesAndTrims(t *testing.T) {
+	w := &Worker{onTableWrites: func([]TableWrite) {}}
+
+	events := w.tableWritesFor([]qdb.WriterTable{
+		singleRowTable(t, "a\x00"),
+		singleRowTable(t, "a\x00"),
+		singleRowTable(t, "b\x00"),
+	})
+
+	assert.ElementsMatch(t, []TableWrite{
+		{Table: "a", Rows: 2, Msgs: 2},
+		{Table: "b", Rows: 1, Msgs: 1},
+	}, events)
+}
+
+// TestTableWritesForNilCallback pins the disabled hot path: no callback
+// means no slice is built at all.
+func TestTableWritesForNilCallback(t *testing.T) {
+	w := &Worker{}
+
+	assert.Nil(t, w.tableWritesFor([]qdb.WriterTable{singleRowTable(t, "a\x00")}))
+}
+
+// TestEmitTableWritesGates pins that the callback only fires with a
+// non-nil callback and non-empty events.
+func TestEmitTableWritesGates(t *testing.T) {
+	var calls int
+	w := &Worker{onTableWrites: func(events []TableWrite) {
+		calls++
+		assert.NotEmpty(t, events)
+	}}
+
+	w.emitTableWrites(nil)
+	assert.Equal(t, 0, calls)
+
+	w.emitTableWrites([]TableWrite{{Table: "a", Rows: 1, Msgs: 1}})
+	assert.Equal(t, 1, calls)
+
+	unset := &Worker{}
+	assert.NotPanics(t, func() {
+		unset.emitTableWrites([]TableWrite{{Table: "a", Rows: 1, Msgs: 1}})
+	})
+}
+
 // TestParseMessagesPolicyTable pins the full mode x outcome policy matrix
 // at the parseMessages level.
 func TestParseMessagesPolicyTable(t *testing.T) {

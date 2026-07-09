@@ -122,6 +122,17 @@ func (c *Connector) PerWorkerStats() []WorkerStatsSnapshot {
 	return snapshots
 }
 
+// TableWrite: one table's contribution to a successfully written
+// batch. Msgs counts pre-merge single-row table contributions, not
+// distinct messages -- a message writing to two tables counts once in
+// each. Consumed by the console stats top-10 window via the
+// Options.OnTableWrites callback.
+type TableWrite struct {
+	Table string
+	Rows  int
+	Msgs  int
+}
+
 // FetchStats: point-in-time snapshot of the fetch-loop counters.
 // Plain values, safe to copy, compare, and serialize.
 type FetchStats struct {

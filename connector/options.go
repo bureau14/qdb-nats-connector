@@ -98,6 +98,12 @@ type Options struct {
 	// never config-derived; nil = telemetry disabled.
 	Metrics *metrics.Metrics `json:"-"`
 
+	// OnTableWrites: per-table write events after each successful batch
+	// write. Injected programmatically (like Metrics); nil = console
+	// stats disabled. MUST be non-blocking -- called on the worker hot
+	// path.
+	OnTableWrites func([]TableWrite) `json:"-"`
+
 	// Internal parsed options for OptionsProvider interface
 	parsedSinkOptions   sink.Options
 	parsedSourceOptions struct {

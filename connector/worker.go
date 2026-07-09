@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +34,10 @@ type Worker struct {
 	circuitBreaker *resilience.CircuitBreaker
 	hooks          *hooks.HookRegistry
 	metrics        *metrics.Metrics // nil-safe; nil = telemetry disabled
+
+	// onTableWrites: per-table stats events after each successful
+	// write; nil = console stats disabled (hot path pays one nil check).
+	onTableWrites func([]TableWrite)
 
 	// parseErrorAction: "drop" discards structurally-unusable messages
 	// (ACK, no row); "fail" NACKs any message with parse errors for
@@ -114,6 +119,7 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		circuitBreaker:   circuitBreaker,
 		hooks:            opts.Hooks,
 		metrics:          opts.Metrics,
+		onTableWrites:    opts.OnTableWrites,
 		parseErrorAction: opts.ParseErrorAction,
 	}
 
@@ -241,6 +247,10 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 	// where every table holds exactly one row. Nil filter = pass-through.
 	validTables = w.rowFilter.Apply(validTables)
 
+	// 2.2. Capture per-table stats pre-merge (the merge below replaces the
+	// slice); emitted only after a successful write.
+	tableWrites := w.tableWritesFor(validTables)
+
 	// 2.5. Merge tables with the same name to prevent "already exists" errors
 	if len(validTables) > 0 {
 		mergedTables, mergeErr := qdb.MergeWriterTables(validTables)
@@ -313,6 +323,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 			}
 			tablesWritten = len(tables)
 			w.rowsWritten.Add(uint64(rowsWritten))
+			w.emitTableWrites(tableWrites)
 		}
 		postWriteData := &hooks.PostWriteData{
 			WorkerID:      w.workerID,
@@ -416,6 +427,49 @@ func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.Wr
 	}
 
 	return validTables, failedSequenceNumbers
+}
+
+// tableWritesFor aggregates post-filter, pre-merge tables per name for
+// the per-table stats callback. Names are trimmed of the pinning
+// "\x00" terminator appended by extract_table. Nil when no callback is
+// registered -- the disabled hot path pays only this nil check.
+// In: tables []qdb.WriterTable - post-filter, pre-merge tables (one
+// row each under the current parsers)
+// Out: []TableWrite - one event per distinct table; nil when disabled
+// Ex: tableWritesFor(tables) → [{Table: "skf/b831", Rows: 3, Msgs: 3}]
+func (w *Worker) tableWritesFor(tables []qdb.WriterTable) []TableWrite {
+	if w.onTableWrites == nil || len(tables) == 0 {
+		return nil
+	}
+
+	counts := make(map[string]TableWrite, len(tables))
+	for i := range tables {
+		name := strings.TrimSuffix(tables[i].GetName(), "\x00")
+		c := counts[name]
+		c.Table = name
+		c.Rows += tables[i].RowCount()
+		c.Msgs++
+		counts[name] = c
+	}
+
+	events := make([]TableWrite, 0, len(counts))
+	for _, c := range counts {
+		events = append(events, c)
+	}
+
+	return events
+}
+
+// emitTableWrites invokes the injected per-table stats callback.
+// In: events []TableWrite - pre-computed per-table tallies
+// Out: none - no-op when the callback is unset or events are empty
+// Ex: emitTableWrites(events) → callback invoked once
+func (w *Worker) emitTableWrites(events []TableWrite) {
+	if w.onTableWrites == nil || len(events) == 0 {
+		return
+	}
+
+	w.onTableWrites(events)
 }
 
 // firstError returns the representative error from a step-error list.

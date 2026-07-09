@@ -14,6 +14,7 @@ import (
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
@@ -76,6 +77,11 @@ type Options struct {
 
 	// Hooks for observability/testing
 	Hooks *hooks.HookRegistry `json:"-"`
+
+	// Metrics: nil-safe hot-path histograms shared by fetch loop,
+	// workers, and source. Injected programmatically (like Hooks),
+	// never config-derived; nil = telemetry disabled.
+	Metrics *metrics.Metrics `json:"-"`
 
 	// Internal parsed options for OptionsProvider interface
 	parsedSinkOptions   sink.Options

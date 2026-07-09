@@ -134,6 +134,7 @@ func natsAddDurable(t *testing.T, js nats.JetStreamContext, stream, consumer, fi
 // health logger and a drain goroutine ACKing everything off workCh.
 type fetchLoopHarness struct {
 	js       nats.JetStreamContext
+	conn     *Connector
 	capture  *captureHandler
 	errCh    chan error
 	received chan string   // subject per delivered message
@@ -197,6 +198,7 @@ func newFetchLoopHarness(t *testing.T, name string, rebindAttempts int) *fetchLo
 		rebindMax:      200 * time.Millisecond,
 		rebindAttempts: rebindAttempts,
 	}
+	h.conn = c
 
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
@@ -297,6 +299,18 @@ func TestFetchLoopRebindsAfterConsumerRecreated(t *testing.T) {
 
 	if got := countReason(h.capture, slog.LevelError, condRebinding); got != 1 {
 		t.Fatalf("got %d unhealthy transitions, want exactly 1", got)
+	}
+
+	// The incident must be visible in the fetch-side counters.
+	stats := h.conn.FetchStats()
+	if stats.SubscriptionErrors < 1 {
+		t.Fatalf("SubscriptionErrors = %d, want >= 1", stats.SubscriptionErrors)
+	}
+	if stats.RebindAttempts < 1 {
+		t.Fatalf("RebindAttempts = %d, want >= 1", stats.RebindAttempts)
+	}
+	if stats.MessagesFetched < 1 {
+		t.Fatalf("MessagesFetched = %d, want >= 1", stats.MessagesFetched)
 	}
 
 	select {

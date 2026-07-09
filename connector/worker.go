@@ -16,6 +16,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/connector/resilience"
 	"github.com/bureau14/qdb-nats-connector/internal/filter"
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
@@ -31,6 +32,7 @@ type Worker struct {
 	sink           *sink.Sink
 	circuitBreaker *resilience.CircuitBreaker
 	hooks          *hooks.HookRegistry
+	metrics        *metrics.Metrics // nil-safe; nil = telemetry disabled
 
 	// parseErrorAction: "drop" discards structurally-unusable messages
 	// (ACK, no row); "fail" NACKs any message with parse errors for
@@ -111,6 +113,7 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		rowFilter:        rowFilter,
 		circuitBreaker:   circuitBreaker,
 		hooks:            opts.Hooks,
+		metrics:          opts.Metrics,
 		parseErrorAction: opts.ParseErrorAction,
 	}
 
@@ -299,6 +302,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 			return w.sink.Write(ctx, tables)
 		})
 		writeDuration := time.Since(writeStart)
+		w.metrics.ObserveWriteDuration(writeDuration)
 
 		// PostWrite hook
 		rowsWritten := 0

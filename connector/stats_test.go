@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/stretchr/testify/assert"
 	"pgregory.net/rapid"
 )
@@ -112,6 +113,29 @@ func TestPerWorkerStats(t *testing.T) {
 			{Worker: "worker-1", Stats: WorkerStats{ParseFailures: 3}},
 		}, snapshots)
 	})
+}
+
+func TestFetchStatsSnapshot(t *testing.T) {
+	c := &Connector{}
+	c.messagesFetched.Add(10)
+	c.transientErrors.Add(2)
+	c.subscriptionErrors.Add(1)
+	c.rebindsAttempted.Add(3)
+
+	assert.Equal(t, FetchStats{
+		MessagesFetched:    10,
+		TransientErrors:    2,
+		SubscriptionErrors: 1,
+		RebindAttempts:     3,
+	}, c.FetchStats())
+}
+
+func TestWorkChannelDepth(t *testing.T) {
+	c := &Connector{workCh: make(chan *source.MessageBatch, 4)}
+	assert.Equal(t, 0, c.WorkChannelDepth())
+
+	c.workCh <- &source.MessageBatch{}
+	assert.Equal(t, 1, c.WorkChannelDepth())
 }
 
 // Property: the aggregate Stats() equals the field-wise sum of

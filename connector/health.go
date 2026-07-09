@@ -297,11 +297,11 @@ func (s HealthSummary) StageStuck() bool {
 func (c *Connector) Health() HealthSummary {
 	conditions, lastFetch := c.health.snapshot()
 
-	breakerStates := make(map[string]string, len(c.workers))
+	states := c.BreakerStates()
+	breakerStates := make(map[string]string, len(states))
 	breakerOpen := false
-	for _, w := range c.workers {
-		state := w.circuitBreaker.GetState()
-		breakerStates[w.workerID] = state.String()
+	for workerID, state := range states {
+		breakerStates[workerID] = state.String()
 		if state != resilience.StateClosed {
 			breakerOpen = true
 		}
@@ -350,4 +350,20 @@ func (c *Connector) NatsConnected() bool {
 	nc := c.source.NatsConn
 
 	return nc != nil && nc.IsConnected()
+}
+
+// BreakerStates returns each worker's circuit-breaker state as the
+// typed enum, keyed by worker identity ("worker-0", ...). Health()
+// derives its string map from this; metrics consumers map the enum to
+// gauge values without string parsing.
+// In: none
+// Out: map[string]resilience.State - breaker state per worker
+// Ex: c.BreakerStates() -> {"worker-0": resilience.StateClosed}
+func (c *Connector) BreakerStates() map[string]resilience.State {
+	states := make(map[string]resilience.State, len(c.workers))
+	for _, w := range c.workers {
+		states[w.workerID] = w.circuitBreaker.GetState()
+	}
+
+	return states
 }

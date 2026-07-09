@@ -1,10 +1,23 @@
 // Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
-// Package connector: worker statistics
-// Types: WorkerStats, workerCounters
+// Package connector: worker and fetch-loop statistics
+// Types: WorkerStats, WorkerStatsSnapshot, workerCounters, FetchStats,
+// fetchCounters
 // Ex: w.GetStats() → WorkerStats{MessagesProcessed: 1000, ...}
 package connector
 
-import "sync/atomic"
+import (
+	"context"
+	"sync/atomic"
+	"time"
+
+	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/nats-io/nats.go"
+)
+
+// pendingMaxAge: tolerance for the fetch-fed pending cache. An active
+// stream refreshes it every fetch (<= 1s BatchTimeout); older than this
+// means idle or stalled, so ConsumerPending polls ConsumerInfo instead.
+const pendingMaxAge = 10 * time.Second
 
 // WorkerStats: point-in-time snapshot of a worker's message counters.
 // Plain values, safe to copy, compare, and serialize.
@@ -107,4 +120,67 @@ func (c *Connector) PerWorkerStats() []WorkerStatsSnapshot {
 	}
 
 	return snapshots
+}
+
+// FetchStats: point-in-time snapshot of the fetch-loop counters.
+// Plain values, safe to copy, compare, and serialize.
+type FetchStats struct {
+	// MessagesFetched: messages pulled from JetStream, pre-parse.
+	MessagesFetched uint64
+	// TransientErrors: fetch errors retried with backoff.
+	TransientErrors uint64
+	// SubscriptionErrors: dead-subscription errors that entered re-bind.
+	SubscriptionErrors uint64
+	// RebindAttempts: individual re-bind tries across all incidents.
+	RebindAttempts uint64
+}
+
+// fetchCounters: atomic counters updated by the fetch loop.
+// Embedded in Connector; read via FetchStats(). rebindsAttempted is
+// named to avoid colliding with the rebindAttempts budget field.
+type fetchCounters struct {
+	messagesFetched    atomic.Uint64
+	transientErrors    atomic.Uint64
+	subscriptionErrors atomic.Uint64
+	rebindsAttempted   atomic.Uint64
+}
+
+// FetchStats returns a point-in-time copy of the fetch-loop counters.
+// Each counter is loaded atomically; the set is not one atomic unit.
+// In: none
+// Out: FetchStats - fetch-side counter snapshot
+// Ex: c.FetchStats() -> FetchStats{MessagesFetched: 5000, ...}
+func (c *Connector) FetchStats() FetchStats {
+	return FetchStats{
+		MessagesFetched:    c.messagesFetched.Load(),
+		TransientErrors:    c.transientErrors.Load(),
+		SubscriptionErrors: c.subscriptionErrors.Load(),
+		RebindAttempts:     c.rebindsAttempted.Load(),
+	}
+}
+
+// WorkChannelDepth returns the number of batches queued for workers.
+// A persistently full channel signals worker-pool backpressure.
+// In: none
+// Out: int - len of the work channel at this instant
+// Ex: c.WorkChannelDepth() -> 3
+func (c *Connector) WorkChannelDepth() int {
+	return len(c.workCh)
+}
+
+// ConsumerPending returns the durable consumer's pending-message count,
+// served from the fetch-fed cache when fresh and refreshed via
+// ConsumerInfo when idle/stalled. Gated on natsReady: the same
+// happens-before edge that orders source.Connect's field writes before
+// reads from scrape goroutines.
+// In: ctx context.Context - bounds the refresh RPC
+// Out: uint64, error - pending count (last-known on error)
+// Ex: c.ConsumerPending(ctx) -> 1523, nil
+func (c *Connector) ConsumerPending(ctx context.Context) (uint64, error) {
+	if !c.natsReady.Load() {
+		return 0, connectorErrors.NewConnectionFailedError("connector",
+			"consumer-info", nats.ErrInvalidConnection)
+	}
+
+	return c.source.PendingMessages(ctx, pendingMaxAge)
 }

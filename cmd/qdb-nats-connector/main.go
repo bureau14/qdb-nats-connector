@@ -145,6 +145,11 @@ func runMain() int {
 		return 1
 	}
 
+	// 3. Build the console stats logger and inject its per-table event
+	// callback -- also before the connector, which wires workers at
+	// construction.
+	stats := buildStats(opts)
+
 	// Create connector (parser is created internally by workers)
 	c, err := connector.NewConnector(opts)
 	if err != nil {
@@ -154,21 +159,23 @@ func runMain() int {
 	}
 	defer c.Close()
 
-	// 3. Serve probes (/livez, /readyz) + /metrics around the connector
+	// 4. Serve probes (/livez, /readyz) + /metrics around the connector
 	tel, err := startTelemetry(opts.HTTPAddr, c, reg)
 	if err != nil {
 		slog.Error("Unable to start telemetry server", "error", err)
 
 		return 1
 	}
+	startStats(stats, c)
 
 	slog.Info("Starting connector")
 
 	// Create root context for the application
 	ctx := context.Background()
 
-	// 4. Run connector: blocks until shutdown|error
+	// 5. Run connector: blocks until shutdown|error
 	err = c.RunWithContext(ctx)
+	stopStats(stats)
 	stopTelemetry(tel)
 	if err != nil && err != context.Canceled {
 		slog.Error("Connector failed", "error", err)
@@ -180,14 +187,16 @@ func runMain() int {
 }
 
 // buildMetrics creates the registry, hot-path histograms, and build-info
-// gauge; nil registry when telemetry is disabled (opts.Metrics stays nil
-// and every observation is a no-op).
-// In: opts *connector.Options - HTTPAddr gate + bucket config; Metrics
-// field is set as a side effect
+// gauge; nil registry when telemetry is fully disabled (opts.Metrics
+// stays nil and every observation is a no-op). Console stats read the
+// same lag histogram, so an enabled stats interval keeps the metrics
+// alive even with the HTTP server off; SERVING stays gated on HTTPAddr.
+// In: opts *connector.Options - HTTPAddr/StatsInterval gates + bucket
+// config; Metrics field is set as a side effect
 // Out: *prometheus.Registry, error - registry for /metrics, nil when off
 // Ex: reg, _ := buildMetrics(opts) → opts.Metrics wired
 func buildMetrics(opts *connector.Options) (*prometheus.Registry, error) {
-	if opts.HTTPAddr == "" {
+	if opts.HTTPAddr == "" && opts.StatsInterval <= 0 {
 		return nil, nil
 	}
 
@@ -235,6 +244,50 @@ func startTelemetry(addr string, c *connector.Connector, reg *prometheus.Registr
 	slog.Info("Telemetry server listening", "addr", srv.Addr())
 
 	return srv, nil
+}
+
+// buildStats constructs the console stats logger and injects the
+// per-table event callback into opts BEFORE the connector (and its
+// workers) exist; nil when --stats-interval is 0.
+// In: opts *connector.Options - StatsInterval gate + Metrics source;
+// OnTableWrites is set as a side effect
+// Out: *telemetry.StatsLogger - unstarted logger, nil when disabled
+// Ex: stats := buildStats(opts) → opts.OnTableWrites wired
+func buildStats(opts *connector.Options) *telemetry.StatsLogger {
+	if opts.StatsInterval <= 0 {
+		return nil
+	}
+
+	sl := telemetry.NewStatsLogger(opts.Metrics, opts.StatsInterval, slog.Default())
+	opts.OnTableWrites = sl.Record
+	slog.Info("Console stats enabled", "interval", opts.StatsInterval)
+
+	return sl
+}
+
+// startStats launches the stats tick goroutine once the connector
+// exists (nil-safe).
+// In: sl *telemetry.StatsLogger - logger or nil, c - stats source
+// Out: none
+// Ex: startStats(stats, c) → one stats line per interval
+func startStats(sl *telemetry.StatsLogger, c *connector.Connector) {
+	if sl == nil {
+		return
+	}
+
+	sl.Start(c)
+}
+
+// stopStats stops the stats tick goroutine (nil-safe).
+// In: sl *telemetry.StatsLogger - running logger or nil
+// Out: none
+// Ex: stopStats(stats) → tick goroutine exited
+func stopStats(sl *telemetry.StatsLogger) {
+	if sl == nil {
+		return
+	}
+
+	sl.Stop()
 }
 
 // stopTelemetry gracefully stops the probe server (nil-safe).

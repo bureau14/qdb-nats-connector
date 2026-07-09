@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/nats-io/nats.go"
@@ -27,6 +29,8 @@ import (
 // Subscription: active pull subscription
 // Options: connection & batch configuration
 // filterSubject: durable's FilterSubject resolved at Connect, reused by Rebind
+// pendingCount/pendingAt: consumer pending-message cache, fed for free by
+// FetchBatch metadata and refreshed on demand via PendingMessages
 type Source struct {
 	NatsConn     *nats.Conn
 	JetStream    nats.JetStreamContext
@@ -34,6 +38,8 @@ type Source struct {
 	Options      Options
 
 	filterSubject string
+	pendingCount  atomic.Uint64
+	pendingAt     atomic.Int64
 }
 
 // MessageInfo: NATS message with sequence number. Needed for selective ACK/NACK operations.
@@ -341,24 +347,7 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 		return nil, errors.NewConnectionFailedError("source", "fetch", err)
 	}
 
-	// Convert to MessageInfo slice
-	messageInfos := make([]MessageInfo, len(msgs))
-	for i, msg := range msgs {
-		// Extract sequence from JetStream metadata
-		meta, err := msg.Metadata()
-		var sequence uint64
-		if err == nil {
-			sequence = meta.Sequence.Stream
-		} else if i >= 0 {
-			// Fallback: use message index if metadata unavailable
-			sequence = uint64(i)
-		}
-
-		messageInfos[i] = MessageInfo{
-			Msg:      msg,
-			Sequence: sequence,
-		}
-	}
+	messageInfos := s.toMessageInfos(msgs)
 
 	// Create batch with acknowledgment functions
 	batch := &MessageBatch{
@@ -372,6 +361,93 @@ func (s *Source) FetchBatch(ctx context.Context) (*MessageBatch, error) {
 	}
 
 	return batch, nil
+}
+
+// PendingMessages returns the consumer's pending-message count. A cache
+// entry younger than maxAge is served without an RPC (the fetch path
+// feeds it for free); otherwise ConsumerInfo refreshes it -- this keeps
+// the value truthful when the stream is idle or fetching is stalled.
+// In: ctx context.Context - bounds the refresh RPC,
+// maxAge time.Duration - cache tolerance (0 forces a refresh)
+// Out: uint64, error - pending count (last-known on error), refresh err
+// Ex: s.PendingMessages(ctx, 10*time.Second) -> 1523, nil
+func (s *Source) PendingMessages(ctx context.Context, maxAge time.Duration) (uint64, error) {
+	cachedAt := s.pendingAt.Load()
+	if cachedAt != 0 && time.Since(time.Unix(0, cachedAt)) <= maxAge {
+		return s.pendingCount.Load(), nil
+	}
+
+	return s.refreshPending(ctx)
+}
+
+// refreshPending polls ConsumerInfo and updates the cache. On error the
+// last-known value is returned alongside the error -- gauges are
+// last-known by nature.
+// In: ctx context.Context - bounds the RPC
+// Out: uint64, error - fresh pending count, or cached count + err
+// Ex: s.refreshPending(ctx) -> 1523, nil
+func (s *Source) refreshPending(ctx context.Context) (uint64, error) {
+	if s.JetStream == nil {
+		return s.pendingCount.Load(), errors.NewConnectionFailedError("source",
+			"consumer-info", nats.ErrInvalidConnection)
+	}
+
+	info, err := s.JetStream.ConsumerInfo(s.Options.StreamName,
+		s.Options.ConsumerName, nats.Context(ctx))
+	if err != nil {
+		return s.pendingCount.Load(), errors.NewConnectionFailedError("source",
+			"consumer-info", err)
+	}
+
+	s.pendingCount.Store(info.NumPending)
+	s.pendingAt.Store(time.Now().UnixNano())
+
+	return info.NumPending, nil
+}
+
+// toMessageInfos converts fetched messages, observing per-message lag
+// (broker store time -> pickup) and caching the consumer's pending
+// count from the same metadata -- one time.Now() per batch. Messages
+// whose metadata fails to parse fall back to index-as-sequence and are
+// skipped for lag/pending.
+// In: msgs []*nats.Msg - non-empty fetch result
+// Out: []MessageInfo - messages with stream sequences
+// Ex: s.toMessageInfos(msgs) -> [{msg, 42}, ...]
+func (s *Source) toMessageInfos(msgs []*nats.Msg) []MessageInfo {
+	now := time.Now()
+	messageInfos := make([]MessageInfo, len(msgs))
+
+	havePending := false
+	var lastPending uint64
+
+	for i, msg := range msgs {
+		meta, err := msg.Metadata()
+		var sequence uint64
+		if err == nil {
+			sequence = meta.Sequence.Stream
+			s.Options.Metrics.ObserveLag(now.Sub(meta.Timestamp))
+
+			// NumPending decreases across the batch; the last message
+			// carries the freshest value.
+			lastPending = meta.NumPending
+			havePending = true
+		} else {
+			// Fallback: use message index if metadata unavailable
+			sequence = uint64(i)
+		}
+
+		messageInfos[i] = MessageInfo{
+			Msg:      msg,
+			Sequence: sequence,
+		}
+	}
+
+	if havePending {
+		s.pendingCount.Store(lastPending)
+		s.pendingAt.Store(now.UnixNano())
+	}
+
+	return messageInfos
 }
 
 // bindPullSubscription binds a pull subscription to the pre-created durable.

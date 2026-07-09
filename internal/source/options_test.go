@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 )
 
 // stubProvider: minimal OptionsProvider for FromOptionsProvider tests
@@ -36,6 +38,15 @@ func TestWithTLSCAFileSetsField(t *testing.T) {
 
 	if opts.TLSCAFile != "/keys/ca.pem" {
 		t.Fatalf("TLSCAFile = %q, want /keys/ca.pem", opts.TLSCAFile)
+	}
+}
+
+func TestWithMetricsSetsField(t *testing.T) {
+	m := &metrics.Metrics{}
+	opts := NewOptions(WithMetrics(m))
+
+	if opts.Metrics != m {
+		t.Fatalf("Metrics = %p, want %p", opts.Metrics, m)
 	}
 }
 

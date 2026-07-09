@@ -4,7 +4,11 @@
 // Ex: source.NewSource(opts).FetchBatch(ctx) → messages flow
 package source
 
-import "time"
+import (
+	"time"
+
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
+)
 
 // Option: functional option pattern for source configuration. Needed for flexible option composition.
 // Who: WithX functions return, NewOptions consumes.
@@ -24,6 +28,11 @@ type Options struct {
 	BatchSize    int           `json:"batch_size"`
 	BatchTimeout time.Duration `json:"batch_timeout"`
 	FetchTimeout time.Duration `json:"fetch_timeout"`
+
+	// Metrics: hot-path observation (message lag, batch size); nil
+	// disables. Injected by the connector, never config-derived --
+	// deliberately absent from OptionsProvider.
+	Metrics *metrics.Metrics `json:"-"`
 }
 
 // NewOptions applies options to JetStream defaults.
@@ -123,6 +132,18 @@ func WithBatchTimeout(timeout time.Duration) Option {
 func WithFetchTimeout(timeout time.Duration) Option {
 	return func(o Options) Options {
 		o.FetchTimeout = timeout
+
+		return o
+	}
+}
+
+// WithMetrics sets the hot-path metrics sink (nil = disabled).
+// In: m *metrics.Metrics - shared metrics instance
+// Out: Option
+// Ex: WithMetrics(m)
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(o Options) Options {
+		o.Metrics = m
 
 		return o
 	}

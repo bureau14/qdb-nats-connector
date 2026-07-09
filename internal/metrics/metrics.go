@@ -13,6 +13,7 @@ import (
 
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // Namespace prefixes every metric family exposed by the connector.
@@ -46,6 +47,21 @@ func (b BucketConfig) buckets() []float64 {
 type Config struct {
 	Lag   BucketConfig
 	Write BucketConfig
+}
+
+// BucketCount: one cumulative histogram bucket -- observations at or
+// below UpperBound.
+type BucketCount struct {
+	UpperBound      float64
+	CumulativeCount uint64
+}
+
+// HistogramSnapshot: cumulative histogram state at one instant. Buckets
+// hold ascending finite bounds; the implicit +Inf bucket is Count.
+type HistogramSnapshot struct {
+	Count   uint64
+	Sum     float64
+	Buckets []BucketCount
 }
 
 // Metrics: hot-path histograms. Observe is an atomic add -- safe to
@@ -140,6 +156,40 @@ func (m *Metrics) ObserveFetchBatchSize(n int) {
 	}
 
 	m.fetchBatchSize.Observe(float64(n))
+}
+
+// LagSnapshot returns the lag histogram's cumulative state, the same
+// cells /metrics serves -- consumers diff consecutive snapshots for
+// interval summaries (single substrate, no parallel bookkeeping).
+// In: none
+// Out: HistogramSnapshot, bool - snapshot; false on nil receiver or
+// encode failure
+// Ex: snap, ok := m.LagSnapshot() -> {Count: 42, ...}, true
+func (m *Metrics) LagSnapshot() (HistogramSnapshot, bool) {
+	if m == nil {
+		return HistogramSnapshot{}, false
+	}
+
+	var pb dto.Metric
+	err := m.messageLag.Write(&pb)
+	if err != nil || pb.Histogram == nil {
+		return HistogramSnapshot{}, false
+	}
+
+	h := pb.Histogram
+	snap := HistogramSnapshot{
+		Count:   h.GetSampleCount(),
+		Sum:     h.GetSampleSum(),
+		Buckets: make([]BucketCount, 0, len(h.GetBucket())),
+	}
+	for _, b := range h.GetBucket() {
+		snap.Buckets = append(snap.Buckets, BucketCount{
+			UpperBound:      b.GetUpperBound(),
+			CumulativeCount: b.GetCumulativeCount(),
+		})
+	}
+
+	return snap, true
 }
 
 // RegisterBuildInfo exposes ldflags build metadata as a constant gauge.

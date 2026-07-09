@@ -109,6 +109,58 @@ func TestFetchBatchSizeBucketsFixed(t *testing.T) {
 	assert.Equal(t, float64(2048), h.GetBucket()[11].GetUpperBound())
 }
 
+func TestLagSnapshotNilReceiver(t *testing.T) {
+	var m *Metrics
+
+	_, ok := m.LagSnapshot()
+	assert.False(t, ok)
+}
+
+func TestLagSnapshotMatchesObservations(t *testing.T) {
+	reg := prometheus.NewPedanticRegistry()
+	m, err := New(reg, Config{
+		Lag:   BucketConfig{Start: time.Millisecond, Factor: 2.0, Count: 3},
+		Write: BucketConfig{Start: time.Millisecond, Factor: 2.0, Count: 20},
+	})
+	require.NoError(t, err)
+
+	// Buckets: 0.001, 0.002, 0.004. Observe one value per bucket.
+	m.ObserveLag(time.Millisecond)     // <= 0.001
+	m.ObserveLag(2 * time.Millisecond) // <= 0.002
+	m.ObserveLag(3 * time.Millisecond) // <= 0.004
+
+	snap, ok := m.LagSnapshot()
+	require.True(t, ok)
+
+	assert.Equal(t, uint64(3), snap.Count)
+	assert.InDelta(t, 0.006, snap.Sum, 1e-9)
+	require.Len(t, snap.Buckets, 3)
+	assert.Equal(t, []BucketCount{
+		{UpperBound: 0.001, CumulativeCount: 1},
+		{UpperBound: 0.002, CumulativeCount: 2},
+		{UpperBound: 0.004, CumulativeCount: 3},
+	}, snap.Buckets)
+}
+
+func TestLagSnapshotOverflowOnlyRaisesCount(t *testing.T) {
+	reg := prometheus.NewPedanticRegistry()
+	m, err := New(reg, Config{
+		Lag:   BucketConfig{Start: time.Millisecond, Factor: 2.0, Count: 3},
+		Write: BucketConfig{Start: time.Millisecond, Factor: 2.0, Count: 20},
+	})
+	require.NoError(t, err)
+
+	m.ObserveLag(time.Second) // past the 0.004 top bound -> implicit +Inf
+
+	snap, ok := m.LagSnapshot()
+	require.True(t, ok)
+
+	assert.Equal(t, uint64(1), snap.Count)
+	for _, b := range snap.Buckets {
+		assert.Equal(t, uint64(0), b.CumulativeCount)
+	}
+}
+
 func TestMetricsLintClean(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
 	m, err := New(reg, defaultConfig())

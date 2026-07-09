@@ -22,8 +22,6 @@ func (p stubProvider) TLSCAFile() string           { return p.tlsCAFile }
 func (p stubProvider) BatchSize() int              { return 100 }
 func (p stubProvider) BatchTimeout() time.Duration { return time.Second }
 func (p stubProvider) FetchTimeout() time.Duration { return 5 * time.Second }
-func (p stubProvider) AckWait() time.Duration      { return 30 * time.Second }
-func (p stubProvider) MaxDeliver() int             { return 3 }
 
 func TestWithCredsFileSetsField(t *testing.T) {
 	opts := NewOptions(WithCredsFile("/keys/real.creds"))

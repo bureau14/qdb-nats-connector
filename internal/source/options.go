@@ -14,7 +14,7 @@ type Option func(Options) Options
 // Who: connector config provides, source consumes via NewSource.
 // Endpoint-ConsumerName: JetStream connection details
 // CredsFile-TLSCAFile: connection security (JWT credentials, private CA)
-// BatchSize-MaxDeliver: message fetching & acknowledgment policies
+// BatchSize-FetchTimeout: message fetching policies
 type Options struct {
 	Endpoint     string        `json:"endpoint"`
 	StreamName   string        `json:"stream_name"`
@@ -24,13 +24,11 @@ type Options struct {
 	BatchSize    int           `json:"batch_size"`
 	BatchTimeout time.Duration `json:"batch_timeout"`
 	FetchTimeout time.Duration `json:"fetch_timeout"`
-	AckWait      time.Duration `json:"ack_wait"`
-	MaxDeliver   int           `json:"max_deliver"`
 }
 
 // NewOptions applies options to JetStream defaults.
 // In: opts ...Option - functional options
-// Out: Options - batch=100, timeout=1s, ack=30s
+// Out: Options - batch=100, timeout=1s
 // Ex: NewOptions(WithEndpoint("nats://localhost")) → Options{}
 func NewOptions(opts ...Option) Options {
 	// Set defaults for JetStream
@@ -38,8 +36,6 @@ func NewOptions(opts ...Option) Options {
 		BatchSize:    100,
 		BatchTimeout: time.Second,
 		FetchTimeout: 5 * time.Second,
-		AckWait:      30 * time.Second,
-		MaxDeliver:   3,
 	}
 	for _, opt := range opts {
 		options = opt(options)
@@ -132,30 +128,6 @@ func WithFetchTimeout(timeout time.Duration) Option {
 	}
 }
 
-// WithAckWait sets message ACK timeout.
-// In: timeout time.Duration - ACK timeout
-// Out: Option
-// Ex: WithAckWait(30*time.Second)
-func WithAckWait(timeout time.Duration) Option {
-	return func(o Options) Options {
-		o.AckWait = timeout
-
-		return o
-	}
-}
-
-// WithMaxDeliver sets max redelivery count.
-// In: maxDeliver int - max attempts
-// Out: Option
-// Ex: WithMaxDeliver(3)
-func WithMaxDeliver(maxDeliver int) Option {
-	return func(o Options) Options {
-		o.MaxDeliver = maxDeliver
-
-		return o
-	}
-}
-
 // OptionsProvider: interface for source config decoupling from connector
 type OptionsProvider interface {
 	// URL returns NATS server URL (e.g., "nats://host:4222")
@@ -172,10 +144,6 @@ type OptionsProvider interface {
 	BatchTimeout() time.Duration
 	// FetchTimeout returns overall timeout for fetch operation
 	FetchTimeout() time.Duration
-	// AckWait returns time before message redelivery
-	AckWait() time.Duration
-	// MaxDeliver returns max delivery attempts before message is dead-lettered
-	MaxDeliver() int
 }
 
 // FromOptionsProvider extracts source config.
@@ -191,8 +159,6 @@ func FromOptionsProvider(p OptionsProvider) Options {
 		WithBatchSize(p.BatchSize()),
 		WithBatchTimeout(p.BatchTimeout()),
 		WithFetchTimeout(p.FetchTimeout()),
-		WithAckWait(p.AckWait()),
-		WithMaxDeliver(p.MaxDeliver()),
 	}
 
 	return NewOptions(opts...)

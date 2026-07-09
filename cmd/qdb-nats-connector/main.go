@@ -40,8 +40,6 @@ NATS JetStream Options:
     --batch-size <n>                 Messages per fetch (default: 100)
     --batch-timeout <duration>       Max wait for batch (default: 1s)
     --fetch-timeout <duration>       Total fetch timeout (default: 5s)
-    --ack-wait <duration>            Message ACK timeout (default: 30s)
-    --max-deliver <n>                Max delivery attempts (default: 3)
     --max-retries <n>                Poison message threshold (default: 3)
 
 QuasarDB Connection Options:

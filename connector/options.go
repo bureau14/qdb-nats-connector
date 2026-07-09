@@ -33,8 +33,6 @@ type Options struct {
 	NatsBatchSize    int           `mapstructure:"batch-size"`
 	NatsBatchTimeout time.Duration `mapstructure:"batch-timeout"`
 	NatsFetchTimeout time.Duration `mapstructure:"fetch-timeout"`
-	NatsAckWait      time.Duration `mapstructure:"ack-wait"`
-	NatsMaxDeliver   int           `mapstructure:"max-deliver"`
 	Workers          int           `mapstructure:"workers"`
 
 	// QDB options
@@ -86,8 +84,6 @@ type Options struct {
 		BatchSize    int
 		BatchTimeout time.Duration
 		FetchTimeout time.Duration
-		AckWait      time.Duration
-		MaxDeliver   int
 	}
 	initialized bool // tracks if parsedOptions have been set
 }
@@ -131,8 +127,6 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("batch-size", 100)
 	v.SetDefault("batch-timeout", time.Second)
 	v.SetDefault("fetch-timeout", 5*time.Second)
-	v.SetDefault("ack-wait", 30*time.Second)
-	v.SetDefault("max-deliver", 3)
 	v.SetDefault("max-retries", 3)
 	v.SetDefault("qdb-compression", "none")
 	v.SetDefault("qdb-encryption", "none")
@@ -165,8 +159,6 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.Int("batch-size", 100, "Messages per fetch")
 	fs.Duration("batch-timeout", time.Second, "Max wait for batch")
 	fs.Duration("fetch-timeout", 5*time.Second, "Total fetch timeout")
-	fs.Duration("ack-wait", 30*time.Second, "Message ACK timeout")
-	fs.Int("max-deliver", 3, "Max delivery attempts")
 
 	// General flags
 	fs.Int("max-retries", 3, "Poison message threshold")
@@ -558,24 +550,6 @@ func (o *Options) FetchTimeout() time.Duration {
 	return o.parsedSourceOptions.FetchTimeout
 }
 
-// AckWait returns message ACK timeout.
-// Out: time.Duration - timeout
-// Ex: AckWait() → 30s
-func (o *Options) AckWait() time.Duration {
-	o.ensureInitialized()
-
-	return o.parsedSourceOptions.AckWait
-}
-
-// MaxDeliver returns max redelivery count.
-// Out: int - max attempts
-// Ex: MaxDeliver() → 3
-func (o *Options) MaxDeliver() int {
-	o.ensureInitialized()
-
-	return o.parsedSourceOptions.MaxDeliver
-}
-
 // parseAndSetFields parses string fields into typed fields and sets internal options
 func (o *Options) parseAndSetFields(v *viper.Viper) error {
 	// Set internal parsed source options
@@ -587,8 +561,6 @@ func (o *Options) parseAndSetFields(v *viper.Viper) error {
 	o.parsedSourceOptions.BatchSize = o.NatsBatchSize
 	o.parsedSourceOptions.BatchTimeout = o.NatsBatchTimeout
 	o.parsedSourceOptions.FetchTimeout = o.NatsFetchTimeout
-	o.parsedSourceOptions.AckWait = o.NatsAckWait
-	o.parsedSourceOptions.MaxDeliver = o.NatsMaxDeliver
 
 	// Set sink options
 	o.parsedSinkOptions.ClusterUri = o.QdbClusterUri

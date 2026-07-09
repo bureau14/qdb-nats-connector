@@ -6,6 +6,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
@@ -79,7 +80,7 @@ func newTestMonitor(threshold time.Duration, probes ...probeRef) (*healthMonitor
 		health:         health,
 		probes:         probes,
 		stuckThreshold: threshold,
-		interval:       monitorInterval,
+		interval:       MonitorInterval,
 	}, capture
 }
 
@@ -133,6 +134,51 @@ func TestHealthStuckProbeLogsOncePerTransition(t *testing.T) {
 	require.Len(t, infos, 1)
 	assert.Equal(t, condStuckPrefix+"worker-3", attrValue(infos[0], "reason"))
 	assert.NotEmpty(t, attrValue(infos[0], "downtime"))
+}
+
+func TestHealthRetryProgressPreventsStageStuck(t *testing.T) {
+	var probe Probe
+	monitor, capture := newTestMonitor(5*time.Minute,
+		probeRef{owner: "worker-0", probe: &probe})
+
+	// A worker deep in a >threshold sink retry ladder: entered "process"
+	// long ago, but the retry loop keeps reporting progress via Touch
+	// (exactly what sink.Options.OnRetryProgress does). Never stuck.
+	probe.Begin("process")
+	for range 3 {
+		probe.mu.Lock()
+		probe.since = time.Now().Add(-6 * time.Minute)
+		probe.mu.Unlock()
+
+		probe.Touch()
+		monitor.health.recordFetchSuccess()
+		monitor.evaluate(time.Now())
+	}
+
+	assert.Empty(t, capture.byLevel(slog.LevelError))
+
+	conditions, _ := monitor.health.snapshot()
+	assert.Empty(t, conditions)
+}
+
+func TestHealthBlockedWriteWithoutProgressStillTrips(t *testing.T) {
+	var probe Probe
+	monitor, capture := newTestMonitor(5*time.Minute,
+		probeRef{owner: "worker-0", probe: &probe})
+
+	// Same shape, but a hard-wedged write never reaches a retry boundary:
+	// no Touch, so the stuck condition must fire at the threshold.
+	probe.Begin("process")
+	probe.mu.Lock()
+	probe.since = time.Now().Add(-6 * time.Minute)
+	probe.mu.Unlock()
+
+	monitor.health.recordFetchSuccess()
+	monitor.evaluate(time.Now())
+
+	errors := capture.byLevel(slog.LevelError)
+	require.Len(t, errors, 1)
+	assert.Equal(t, condStuckPrefix+"worker-0", attrValue(errors[0], "reason"))
 }
 
 func TestHealthIdleProbeNeverFlagged(t *testing.T) {
@@ -230,4 +276,65 @@ func TestHealthSummaryKeepsBreakerAndFetchSeparate(t *testing.T) {
 	summary = c.Health()
 	assert.False(t, summary.FetchHealthy)
 	assert.Contains(t, summary.Conditions, condFetchStalled)
+}
+
+func TestHealthEvaluateRecordsHeartbeat(t *testing.T) {
+	monitor, _ := newTestMonitor(5 * time.Minute)
+
+	assert.True(t, monitor.health.lastEvaluateAt().IsZero())
+
+	now := time.Now()
+	monitor.evaluate(now)
+	assert.Equal(t, now, monitor.health.lastEvaluateAt())
+}
+
+func TestHealthMonitorRunEvaluatesImmediately(t *testing.T) {
+	monitor, _ := newTestMonitor(5 * time.Minute)
+	monitor.interval = time.Hour
+
+	// A pre-cancelled context returns run() before the first tick; the
+	// initial evaluate must still have armed the heartbeat.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	monitor.run(ctx)
+
+	assert.False(t, monitor.health.lastEvaluateAt().IsZero())
+}
+
+func TestHealthSummaryStageStuck(t *testing.T) {
+	assert.True(t, HealthSummary{
+		Conditions: []string{condStuckPrefix + "worker-0"},
+	}.StageStuck())
+	assert.True(t, HealthSummary{
+		Conditions: []string{condFetchStalled, condStuckPrefix + "fetch-loop"},
+	}.StageStuck())
+
+	assert.False(t, HealthSummary{}.StageStuck())
+	assert.False(t, HealthSummary{
+		Conditions: []string{condFetchStalled, condRebinding},
+	}.StageStuck())
+}
+
+func TestHealthSummaryJSONSnakeCase(t *testing.T) {
+	summary := HealthSummary{
+		Healthy:          true,
+		FetchHealthy:     true,
+		Conditions:       []string{},
+		LastFetchSuccess: time.Now(),
+		BreakerOpen:      false,
+		BreakerStates:    map[string]string{"worker-0": "CLOSED"},
+	}
+
+	data, err := json.Marshal(summary)
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	for _, key := range []string{
+		"healthy", "fetch_healthy", "conditions",
+		"last_fetch_success", "breaker_open", "breaker_states",
+	} {
+		assert.Contains(t, decoded, key)
+	}
 }

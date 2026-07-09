@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/connector/resilience"
 	"github.com/bureau14/qdb-nats-connector/internal/filter"
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 	"github.com/bureau14/qdb-nats-connector/internal/parser"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
@@ -31,6 +33,11 @@ type Worker struct {
 	sink           *sink.Sink
 	circuitBreaker *resilience.CircuitBreaker
 	hooks          *hooks.HookRegistry
+	metrics        *metrics.Metrics // nil-safe; nil = telemetry disabled
+
+	// onTableWrites: per-table stats events after each successful
+	// write; nil = console stats disabled (hot path pays one nil check).
+	onTableWrites func([]TableWrite)
 
 	// parseErrorAction: "drop" discards structurally-unusable messages
 	// (ACK, no row); "fail" NACKs any message with parse errors for
@@ -79,12 +86,6 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		return nil, err
 	}
 
-	// Create sink
-	qdbSink, err := sink.NewSink(sink.FromOptionsProvider(opts))
-	if err != nil {
-		return nil, err
-	}
-
 	// Ensure hooks is never nil to simplify worker code
 	if opts.Hooks == nil {
 		opts.Hooks = hooks.NewHookRegistry()
@@ -109,17 +110,32 @@ func NewWorker(id int, opts *Options, workCh <-chan *source.MessageBatch, manage
 		)
 	}
 
-	return &Worker{
+	w := &Worker{
 		id:               id,
 		workerID:         workerID,
 		workCh:           workCh,
 		parser:           messageParser,
 		rowFilter:        rowFilter,
-		sink:             qdbSink,
 		circuitBreaker:   circuitBreaker,
 		hooks:            opts.Hooks,
+		metrics:          opts.Metrics,
+		onTableWrites:    opts.OnTableWrites,
 		parseErrorAction: opts.ParseErrorAction,
-	}, nil
+	}
+
+	// Create sink after the worker so its retry loop can report progress to
+	// the worker's liveness probe: each retry boundary refreshes the probe,
+	// keeping a legitimately retrying worker distinct from a wedged one.
+	// The method value binds &w.probe here, after heap allocation.
+	sinkOpts := sink.FromOptionsProvider(opts)
+	sinkOpts.OnRetryProgress = w.probe.Touch
+	qdbSink, err := sink.NewSink(sinkOpts)
+	if err != nil {
+		return nil, err
+	}
+	w.sink = qdbSink
+
+	return w, nil
 }
 
 // Run starts worker message processing loop.
@@ -200,10 +216,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Topic:     "all",
 		Timestamp: time.Now(),
 	}
-	err := w.hooks.Execute(ctx, "PreRead", preReadData)
-	if err != nil {
-		return err
-	}
+	w.hooks.Execute(ctx, "PreRead", preReadData)
 
 	// PostRead hook
 	messageCount := 0
@@ -221,10 +234,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Error:        nil,
 		Timestamp:    time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PostRead", postReadData)
-	if err != nil {
-		slog.Error("PostRead hook failed", "worker_id", w.id, "error", err)
-	}
+	w.hooks.Execute(ctx, "PostRead", postReadData)
 
 	if len(batch.Messages) == 0 {
 		return nil
@@ -236,6 +246,10 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 	// 2.1. Drop rows that do not pass the configured filter. Applied pre-merge,
 	// where every table holds exactly one row. Nil filter = pass-through.
 	validTables = w.rowFilter.Apply(validTables)
+
+	// 2.2. Capture per-table stats pre-merge (the merge below replaces the
+	// slice); emitted only after a successful write.
+	tableWrites := w.tableWritesFor(validTables)
 
 	// 2.5. Merge tables with the same name to prevent "already exists" errors
 	if len(validTables) > 0 {
@@ -253,6 +267,8 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		nackErr := batch.NackFunc(failedSequenceNumbers)
 		if nackErr != nil {
 			slog.Error("Failed to NACK parse failures", "worker_id", w.id, "error", nackErr)
+		} else {
+			w.nacks.Add(uint64(len(failedSequenceNumbers)))
 		}
 	}
 
@@ -289,16 +305,14 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 			Tables:     tables,
 			Timestamp:  time.Now(),
 		}
-		err = w.hooks.Execute(ctx, "PreWrite", preWriteData)
-		if err != nil {
-			return err
-		}
+		w.hooks.Execute(ctx, "PreWrite", preWriteData)
 
 		writeStart := time.Now()
 		writeErr := w.circuitBreaker.Execute(func() error {
 			return w.sink.Write(ctx, tables)
 		})
 		writeDuration := time.Since(writeStart)
+		w.metrics.ObserveWriteDuration(writeDuration)
 
 		// PostWrite hook
 		rowsWritten := 0
@@ -308,6 +322,8 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 				rowsWritten += table.RowCount()
 			}
 			tablesWritten = len(tables)
+			w.rowsWritten.Add(uint64(rowsWritten))
+			w.emitTableWrites(tableWrites)
 		}
 		postWriteData := &hooks.PostWriteData{
 			WorkerID:      w.workerID,
@@ -318,10 +334,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 			Error:         writeErr,
 			Timestamp:     time.Now(),
 		}
-		hookErr := w.hooks.Execute(ctx, "PostWrite", postWriteData)
-		if hookErr != nil {
-			slog.Error("PostWrite hook failed", "worker_id", w.id, "error", hookErr)
-		}
+		w.hooks.Execute(ctx, "PostWrite", postWriteData)
 
 		if writeErr != nil {
 			return w.handleWriteFailure(ctx, batch, validSequences, writeErr)
@@ -342,11 +355,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Count:     len(validSequences),
 		Timestamp: time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PreAck", preAckData)
-	if err != nil {
-		// Log the error but continue with ACK to prevent infinite redelivery
-		slog.Error("PreAck hook failed, continuing with ACK", "worker_id", w.id, "error", err)
-	}
+	w.hooks.Execute(ctx, "PreAck", preAckData)
 
 	ackErr := batch.AckFunc(validSequences)
 
@@ -355,6 +364,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 	nackedCount := 0
 	if ackErr == nil {
 		ackedCount = len(validSequences)
+		w.acks.Add(uint64(ackedCount))
 	}
 	postAckData := &hooks.PostAckData{
 		WorkerID:    fmt.Sprintf("worker-%d", w.id),
@@ -364,10 +374,7 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 		Error:       ackErr,
 		Timestamp:   time.Now(),
 	}
-	err = w.hooks.Execute(ctx, "PostAck", postAckData)
-	if err != nil {
-		slog.Error("PostAck hook failed", "worker_id", w.id, "error", err)
-	}
+	w.hooks.Execute(ctx, "PostAck", postAckData)
 
 	if ackErr != nil {
 		slog.Error("Failed to ACK after write success", "worker_id", w.id, "error", ackErr)
@@ -422,6 +429,49 @@ func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.Wr
 	return validTables, failedSequenceNumbers
 }
 
+// tableWritesFor aggregates post-filter, pre-merge tables per name for
+// the per-table stats callback. Names are trimmed of the pinning
+// "\x00" terminator appended by extract_table. Nil when no callback is
+// registered -- the disabled hot path pays only this nil check.
+// In: tables []qdb.WriterTable - post-filter, pre-merge tables (one
+// row each under the current parsers)
+// Out: []TableWrite - one event per distinct table; nil when disabled
+// Ex: tableWritesFor(tables) → [{Table: "skf/b831", Rows: 3, Msgs: 3}]
+func (w *Worker) tableWritesFor(tables []qdb.WriterTable) []TableWrite {
+	if w.onTableWrites == nil || len(tables) == 0 {
+		return nil
+	}
+
+	counts := make(map[string]TableWrite, len(tables))
+	for i := range tables {
+		name := strings.TrimSuffix(tables[i].GetName(), "\x00")
+		c := counts[name]
+		c.Table = name
+		c.Rows += tables[i].RowCount()
+		c.Msgs++
+		counts[name] = c
+	}
+
+	events := make([]TableWrite, 0, len(counts))
+	for _, c := range counts {
+		events = append(events, c)
+	}
+
+	return events
+}
+
+// emitTableWrites invokes the injected per-table stats callback.
+// In: events []TableWrite - pre-computed per-table tallies
+// Out: none - no-op when the callback is unset or events are empty
+// Ex: emitTableWrites(events) → callback invoked once
+func (w *Worker) emitTableWrites(events []TableWrite) {
+	if w.onTableWrites == nil || len(events) == 0 {
+		return
+	}
+
+	w.onTableWrites(events)
+}
+
 // firstError returns the representative error from a step-error list.
 // Ex: firstError([e1, e2]) → e1
 func firstError(errs []error) error {
@@ -465,11 +515,7 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 		Count:     len(validSequences),
 		Timestamp: time.Now(),
 	}
-	hookErr := w.hooks.Execute(ctx, "PreAck", preAckData)
-	if hookErr != nil {
-		// Log the error but continue with NACK to prevent infinite redelivery
-		slog.Error("PreAck hook failed, continuing with NACK", "worker_id", w.id, "error", hookErr)
-	}
+	w.hooks.Execute(ctx, "PreAck", preAckData)
 
 	cbErr := batch.NackFunc(validSequences)
 
@@ -478,6 +524,7 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 	nackedCount := 0
 	if cbErr == nil {
 		nackedCount = len(validSequences)
+		w.nacks.Add(uint64(nackedCount))
 	}
 	postAckData := &hooks.PostAckData{
 		WorkerID:    w.workerID,
@@ -487,10 +534,7 @@ func (w *Worker) handleWriteFailure(ctx context.Context, batch *source.MessageBa
 		Error:       cbErr,
 		Timestamp:   time.Now(),
 	}
-	hookErr = w.hooks.Execute(ctx, "PostAck", postAckData)
-	if hookErr != nil {
-		slog.Error("PostAck hook failed", "worker_id", w.id, "error", hookErr)
-	}
+	w.hooks.Execute(ctx, "PostAck", postAckData)
 
 	if cbErr != nil {
 		slog.Error("Failed to NACK after write failure", "worker_id", w.id, "error", cbErr)

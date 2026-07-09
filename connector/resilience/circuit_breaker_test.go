@@ -292,40 +292,32 @@ func newTestHookCapture() *testHookCapture {
 }
 
 func (c *testHookCapture) setupHooks(registry *hooks.HookRegistry) {
-	registry.Register("PreCircuitBreakerStateChange", func(ctx context.Context, data interface{}) error {
+	registry.Register("PreCircuitBreakerStateChange", func(ctx context.Context, data interface{}) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		event := data.(*hooks.PreCircuitBreakerStateChange)
 		c.preStateChanges = append(c.preStateChanges, *event)
-
-		return nil
 	})
 
-	registry.Register("PostCircuitBreakerStateChange", func(ctx context.Context, data interface{}) error {
+	registry.Register("PostCircuitBreakerStateChange", func(ctx context.Context, data interface{}) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		event := data.(*hooks.PostCircuitBreakerStateChange)
 		c.postStateChanges = append(c.postStateChanges, *event)
-
-		return nil
 	})
 
-	registry.Register("PostCircuitBreakerRequestRejected", func(ctx context.Context, data interface{}) error {
+	registry.Register("PostCircuitBreakerRequestRejected", func(ctx context.Context, data interface{}) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		event := data.(*hooks.PostCircuitBreakerRequestRejected)
 		c.rejections = append(c.rejections, *event)
-
-		return nil
 	})
 
-	registry.Register("PreCircuitBreakerJitter", func(ctx context.Context, data interface{}) error {
+	registry.Register("PreCircuitBreakerJitter", func(ctx context.Context, data interface{}) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		event := data.(*hooks.PreCircuitBreakerJitter)
 		c.jitterEvents = append(c.jitterEvents, *event)
-
-		return nil
 	})
 }
 

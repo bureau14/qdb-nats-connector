@@ -6,6 +6,7 @@ package connector
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	"github.com/bureau14/qdb-nats-connector/internal/errors"
+	"github.com/bureau14/qdb-nats-connector/internal/metrics"
 	"github.com/bureau14/qdb-nats-connector/internal/sink"
 	"github.com/bureau14/qdb-nats-connector/internal/source"
 	"github.com/nats-io/nats.go"
@@ -33,8 +35,6 @@ type Options struct {
 	NatsBatchSize    int           `mapstructure:"batch-size"`
 	NatsBatchTimeout time.Duration `mapstructure:"batch-timeout"`
 	NatsFetchTimeout time.Duration `mapstructure:"fetch-timeout"`
-	NatsAckWait      time.Duration `mapstructure:"ack-wait"`
-	NatsMaxDeliver   int           `mapstructure:"max-deliver"`
 	Workers          int           `mapstructure:"workers"`
 
 	// QDB options
@@ -67,6 +67,24 @@ type Options struct {
 	// batch-timeout.
 	HealthStuckThreshold time.Duration `mapstructure:"health-stuck-threshold"`
 
+	// HTTPAddr: probe HTTP listen address; empty disables the server.
+	HTTPAddr string `mapstructure:"http-addr"`
+
+	// StatsInterval: console stats period; 0 disables the stats line.
+	// The per-table top-10 window is a fixed 5 minutes regardless of
+	// this interval.
+	StatsInterval time.Duration `mapstructure:"stats-interval"`
+
+	// Metrics histogram buckets: exponential series start*factor^i,
+	// i in [0, count) -- prometheus.ExponentialBuckets knobs for the
+	// message-lag and write-duration histograms.
+	MetricsLagBucketStart    time.Duration `mapstructure:"metrics-lag-bucket-start"`
+	MetricsLagBucketFactor   float64       `mapstructure:"metrics-lag-bucket-factor"`
+	MetricsLagBucketCount    int           `mapstructure:"metrics-lag-bucket-count"`
+	MetricsWriteBucketStart  time.Duration `mapstructure:"metrics-write-bucket-start"`
+	MetricsWriteBucketFactor float64       `mapstructure:"metrics-write-bucket-factor"`
+	MetricsWriteBucketCount  int           `mapstructure:"metrics-write-bucket-count"`
+
 	// Parser configuration
 	Parser           string `mapstructure:"parser"`
 	ParserConfig     string `mapstructure:"parser-config"`
@@ -74,6 +92,17 @@ type Options struct {
 
 	// Hooks for observability/testing
 	Hooks *hooks.HookRegistry `json:"-"`
+
+	// Metrics: nil-safe hot-path histograms shared by fetch loop,
+	// workers, and source. Injected programmatically (like Hooks),
+	// never config-derived; nil = telemetry disabled.
+	Metrics *metrics.Metrics `json:"-"`
+
+	// OnTableWrites: per-table write events after each successful batch
+	// write. Injected programmatically (like Metrics); nil = console
+	// stats disabled. MUST be non-blocking -- called on the worker hot
+	// path.
+	OnTableWrites func([]TableWrite) `json:"-"`
 
 	// Internal parsed options for OptionsProvider interface
 	parsedSinkOptions   sink.Options
@@ -86,8 +115,6 @@ type Options struct {
 		BatchSize    int
 		BatchTimeout time.Duration
 		FetchTimeout time.Duration
-		AckWait      time.Duration
-		MaxDeliver   int
 	}
 	initialized bool // tracks if parsedOptions have been set
 }
@@ -131,8 +158,6 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("batch-size", 100)
 	v.SetDefault("batch-timeout", time.Second)
 	v.SetDefault("fetch-timeout", 5*time.Second)
-	v.SetDefault("ack-wait", 30*time.Second)
-	v.SetDefault("max-deliver", 3)
 	v.SetDefault("max-retries", 3)
 	v.SetDefault("qdb-compression", "none")
 	v.SetDefault("qdb-encryption", "none")
@@ -146,6 +171,14 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	v.SetDefault("circuit-breaker-half-open-base", 1)
 	v.SetDefault("circuit-breaker-half-open-max", 32)
 	v.SetDefault("health-stuck-threshold", 5*time.Minute)
+	v.SetDefault("http-addr", ":9100")
+	v.SetDefault("stats-interval", time.Minute)
+	v.SetDefault("metrics-lag-bucket-start", time.Millisecond)
+	v.SetDefault("metrics-lag-bucket-factor", 2.0)
+	v.SetDefault("metrics-lag-bucket-count", 20)
+	v.SetDefault("metrics-write-bucket-start", time.Millisecond)
+	v.SetDefault("metrics-write-bucket-factor", 2.0)
+	v.SetDefault("metrics-write-bucket-count", 20)
 	v.SetDefault("parser", "noop")
 	v.SetDefault("parser-config", "")
 	v.SetDefault("parse-error-action", "drop")
@@ -165,8 +198,6 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	fs.Int("batch-size", 100, "Messages per fetch")
 	fs.Duration("batch-timeout", time.Second, "Max wait for batch")
 	fs.Duration("fetch-timeout", 5*time.Second, "Total fetch timeout")
-	fs.Duration("ack-wait", 30*time.Second, "Message ACK timeout")
-	fs.Int("max-deliver", 3, "Max delivery attempts")
 
 	// General flags
 	fs.Int("max-retries", 3, "Poison message threshold")
@@ -195,6 +226,16 @@ func LoadConfig(args []string, printHelp func()) (*Options, error) {
 	// Health monitoring flags
 	fs.Duration("health-stuck-threshold", 5*time.Minute,
 		"Age past which a blocked pipeline stage or persistently failing fetch is reported unhealthy")
+	fs.String("http-addr", ":9100", "Probe HTTP listen address (empty disables)")
+	fs.Duration("stats-interval", time.Minute, "Console stats period (0 disables)")
+
+	// Metrics histogram bucket flags
+	fs.Duration("metrics-lag-bucket-start", time.Millisecond, "Message-lag histogram: first bucket bound")
+	fs.Float64("metrics-lag-bucket-factor", 2.0, "Message-lag histogram: bucket growth factor")
+	fs.Int("metrics-lag-bucket-count", 20, "Message-lag histogram: bucket count")
+	fs.Duration("metrics-write-bucket-start", time.Millisecond, "Write-duration histogram: first bucket bound")
+	fs.Float64("metrics-write-bucket-factor", 2.0, "Write-duration histogram: bucket growth factor")
+	fs.Int("metrics-write-bucket-count", 20, "Write-duration histogram: bucket count")
 
 	// Parser flags
 	fs.String("parser", "noop", "Parser type: yaml|noop")
@@ -331,6 +372,30 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 		return errors.NewInvalidConfigError("connector", "health stuck threshold must be positive")
 	}
 
+	if opts.StatsInterval < 0 {
+		return errors.NewInvalidConfigError("connector", "stats interval cannot be negative (0 disables)")
+	}
+
+	if opts.HTTPAddr != "" {
+		_, _, err := net.SplitHostPort(opts.HTTPAddr)
+		if err != nil {
+			return errors.NewInvalidConfigError("connector",
+				fmt.Sprintf("invalid http-addr %q (want host:port or :port): %v", opts.HTTPAddr, err))
+		}
+	}
+
+	bucketErr := validateBucketConfig("metrics-lag-bucket",
+		opts.MetricsLagBucketStart, opts.MetricsLagBucketFactor, opts.MetricsLagBucketCount)
+	if bucketErr != nil {
+		return bucketErr
+	}
+
+	bucketErr = validateBucketConfig("metrics-write-bucket",
+		opts.MetricsWriteBucketStart, opts.MetricsWriteBucketFactor, opts.MetricsWriteBucketCount)
+	if bucketErr != nil {
+		return bucketErr
+	}
+
 	// Validate parser configuration
 	validParsers := map[string]bool{"yaml": true, "noop": true}
 	if !validParsers[opts.Parser] {
@@ -373,6 +438,49 @@ func validateOptions(opts *Options) *errors.ConnectorError {
 	}
 
 	return nil
+}
+
+// validateBucketConfig checks one exponential bucket series.
+// In: flag string - flag prefix for the error message, start/factor/
+// count - prometheus.ExponentialBuckets knobs
+// Out: *errors.ConnectorError - nil or InvalidConfig
+// Ex: validateBucketConfig("metrics-lag-bucket", 1ms, 2.0, 20) -> nil
+func validateBucketConfig(flag string, start time.Duration, factor float64, count int) *errors.ConnectorError {
+	if start <= 0 {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("%s-start must be positive", flag))
+	}
+
+	if factor <= 1.0 {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("%s-factor must be > 1.0", flag))
+	}
+
+	if count < 1 || count > 64 {
+		return errors.NewInvalidConfigError("connector",
+			fmt.Sprintf("%s-count must be in [1, 64]", flag))
+	}
+
+	return nil
+}
+
+// MetricsConfig maps the bucket flags onto the metrics package config.
+// In: none
+// Out: metrics.Config - lag + write-duration bucket series
+// Ex: opts.MetricsConfig() -> Config{Lag: {1ms, 2.0, 20}, ...}
+func (o *Options) MetricsConfig() metrics.Config {
+	return metrics.Config{
+		Lag: metrics.BucketConfig{
+			Start:  o.MetricsLagBucketStart,
+			Factor: o.MetricsLagBucketFactor,
+			Count:  o.MetricsLagBucketCount,
+		},
+		Write: metrics.BucketConfig{
+			Start:  o.MetricsWriteBucketStart,
+			Factor: o.MetricsWriteBucketFactor,
+			Count:  o.MetricsWriteBucketCount,
+		},
+	}
 }
 
 // ClusterUri returns QuasarDB URI
@@ -558,24 +666,6 @@ func (o *Options) FetchTimeout() time.Duration {
 	return o.parsedSourceOptions.FetchTimeout
 }
 
-// AckWait returns message ACK timeout.
-// Out: time.Duration - timeout
-// Ex: AckWait() → 30s
-func (o *Options) AckWait() time.Duration {
-	o.ensureInitialized()
-
-	return o.parsedSourceOptions.AckWait
-}
-
-// MaxDeliver returns max redelivery count.
-// Out: int - max attempts
-// Ex: MaxDeliver() → 3
-func (o *Options) MaxDeliver() int {
-	o.ensureInitialized()
-
-	return o.parsedSourceOptions.MaxDeliver
-}
-
 // parseAndSetFields parses string fields into typed fields and sets internal options
 func (o *Options) parseAndSetFields(v *viper.Viper) error {
 	// Set internal parsed source options
@@ -587,8 +677,6 @@ func (o *Options) parseAndSetFields(v *viper.Viper) error {
 	o.parsedSourceOptions.BatchSize = o.NatsBatchSize
 	o.parsedSourceOptions.BatchTimeout = o.NatsBatchTimeout
 	o.parsedSourceOptions.FetchTimeout = o.NatsFetchTimeout
-	o.parsedSourceOptions.AckWait = o.NatsAckWait
-	o.parsedSourceOptions.MaxDeliver = o.NatsMaxDeliver
 
 	// Set sink options
 	o.parsedSinkOptions.ClusterUri = o.QdbClusterUri

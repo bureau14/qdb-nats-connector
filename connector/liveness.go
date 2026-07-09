@@ -44,6 +44,25 @@ func (p *Probe) End() {
 	p.since = time.Time{}
 }
 
+// Touch refreshes the in-flight age without changing stage: "still making
+// observable progress in this stage." No-op on a cleared probe -- progress
+// in no stage is not progress, and Touch must never resurrect state (e.g. a
+// straggler callback firing after End). Touch never sets a stage; Begin/End
+// bracket ownership stays with the goroutine.
+// In: none
+// Out: none
+// Ex: p.Touch() // sink retry boundary reached, worker not wedged
+func (p *Probe) Touch() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.stage == "" {
+		return
+	}
+
+	p.since = time.Now()
+}
+
 // Sample reports the in-flight stage and its age at the given instant.
 // In: now time.Time - monitor's clock (injected for deterministic tests)
 // Out: stage, age, active - zero values with active=false when cleared

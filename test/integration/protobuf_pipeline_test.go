@@ -227,15 +227,21 @@ func publishProtoMix(t *testing.T, js nats.JetStreamContext) map[int64]protoRowE
 }
 
 // startConnector loads options from args and runs the connector in a
-// goroutine. The returned stop func cancels, waits for RunWithContext to
+// goroutine. Optional mutators run between LoadConfig and NewConnector to
+// inject programmatic-only options (Metrics, Hooks) exactly as main does.
+// The returned stop func cancels, waits for RunWithContext to
 // return (context.Canceled = clean), and Closes. It is idempotent and also
 // registered as a t.Cleanup, so the connector stops on failure paths too.
 // The done channel surfaces early startup failures to poll loops.
-func startConnector(t *testing.T, args []string) (*connector.Connector, <-chan error, func()) {
+func startConnector(t *testing.T, args []string, mutate ...func(*connector.Options)) (*connector.Connector, <-chan error, func()) {
 	t.Helper()
 
 	opts, err := connector.LoadConfig(args, func() {})
 	require.NoError(t, err)
+
+	for _, m := range mutate {
+		m(opts)
+	}
 
 	conn, err := connector.NewConnector(opts)
 	require.NoError(t, err)

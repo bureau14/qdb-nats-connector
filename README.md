@@ -84,8 +84,6 @@ Precedence: CLI flags > Environment variables > Defaults
 --batch-size <size>             # Messages per fetch (default: 100)
 --batch-timeout <duration>      # Max wait for batch (default: 1s)
 --fetch-timeout <duration>      # Total fetch timeout (default: 5s)
---ack-wait <duration>          # Message ACK timeout (default: 30s)
---max-deliver <count>          # Max delivery attempts (default: 3)
 --max-retries <count>          # Poison message threshold (default: 3)
 
 # QuasarDB options
@@ -252,8 +250,12 @@ nats consumer report DATA_STREAM
 
 ### JetStream Tuning
 
-- `--ack-wait`: Set based on expected processing time
-- `--max-deliver`: Balance between retry attempts and poison message handling
+Redelivery policy (AckWait, MaxDeliver) is owned by the operator-created
+durable consumer, not the connector -- configure it when creating the
+durable (e.g. `nats consumer add --ack-wait 30s --max-deliver 3 ...`):
+
+- AckWait: set based on expected processing time
+- MaxDeliver: balance between retry attempts and poison message handling
 
 ## Monitoring
 
@@ -286,7 +288,7 @@ The connector logs key events:
    ```
 
 3. **High redelivery rate**
-   - Increase `--ack-wait` if processing is slow
+   - Increase the durable's AckWait if processing is slow
    - Check logs for parse errors
    - Verify QuasarDB connectivity
 

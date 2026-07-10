@@ -19,11 +19,14 @@ import (
 
 // fakeParser returns a fixed classified result per message, ignoring content.
 // outcome selects the classification; for OK/Partial a single-row table
-// carrying val in its first column is produced.
+// carrying val in its first column is produced, or zero tables when
+// zeroTables is set (a valid zero-row parse, e.g. explode over an empty
+// array).
 type fakeParser struct {
-	cols    []qdb.WriterColumn
-	val     int64
-	outcome parser.Outcome
+	cols       []qdb.WriterColumn
+	val        int64
+	outcome    parser.Outcome
+	zeroTables bool
 }
 
 // Parse returns the configured outcome with a single-row table for OK/Partial.
@@ -33,6 +36,10 @@ func (p *fakeParser) Parse(_ *nats.Msg) (parser.ParseResult, error) {
 			Outcome: parser.OutcomeUnusable,
 			Errors:  []error{fmt.Errorf("undecodable payload")},
 		}, nil
+	}
+
+	if p.zeroTables {
+		return parser.ParseResult{Outcome: p.outcome}, nil
 	}
 
 	tbl, err := qdb.NewWriterTable("t1", p.cols)
@@ -268,4 +275,34 @@ func TestParseMessagesPolicyTable(t *testing.T) {
 			assert.Equal(t, uint64(tc.wantFailed), stats.ParseFailures) //nolint:gosec // test count, no overflow
 		})
 	}
+}
+
+// TestProcessBatchZeroRowParseAcksAndCounts is the regression test for valid
+// zero-row parses (OutcomeOK with zero tables, e.g. a terminal explode over
+// an empty sample array): every sequence must ACK, none must NACK, no write
+// is attempted, and the parses_zero_rows counter must observe each one.
+func TestProcessBatchZeroRowParseAcksAndCounts(t *testing.T) {
+	cols := []qdb.WriterColumn{{ColumnName: "value\x00", ColumnType: qdb.TsColumnInt64}}
+
+	w := &Worker{
+		id:               0,
+		workerID:         "worker-0",
+		parser:           &fakeParser{cols: cols, outcome: parser.OutcomeOK, zeroTables: true},
+		hooks:            hooks.NewHookRegistry(),
+		parseErrorAction: "drop",
+	}
+
+	var acked, nacked []uint64
+	batch := makeBatch(&acked, &nacked)
+
+	// nil sink: a write attempt would panic, so completion proves no write.
+	require.NoError(t, w.processBatchFromChannel(context.Background(), batch))
+	assert.ElementsMatch(t, []uint64{1, 2, 3}, acked, "all sequences must be ACKed")
+	assert.Empty(t, nacked, "no sequence must be NACKed")
+
+	stats := w.GetStats()
+	assert.Equal(t, uint64(3), stats.ParsesZeroRows)
+	assert.Equal(t, uint64(3), stats.MessagesProcessed)
+	assert.Equal(t, uint64(0), stats.MessagesDropped)
+	assert.Equal(t, uint64(0), stats.RowsWritten)
 }

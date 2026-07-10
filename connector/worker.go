@@ -243,8 +243,11 @@ func (w *Worker) processBatchFromChannel(ctx context.Context, batch *source.Mess
 	// 2. Parse messages - failures retry automatically
 	validTables, failedSequenceNumbers := w.parseMessages(batch)
 
-	// 2.1. Drop rows that do not pass the configured filter. Applied pre-merge,
-	// where every table holds exactly one row. Nil filter = pass-through.
+	// 2.1. Drop rows that do not pass the configured filter. Applied
+	// pre-merge: scalar configs produce single-row tables, explode configs
+	// one N-row table per message. The filter evaluates row 0 only -- exact
+	// either way, because exploded (per-sample) columns are rejected at
+	// config load (filter.New). Nil filter = pass-through.
 	validTables = w.rowFilter.Apply(validTables)
 
 	// 2.2. Capture per-table stats pre-merge (the merge below replaces the
@@ -421,7 +424,13 @@ func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.Wr
 				"subject", msgInfo.Msg.Subject)
 			w.messagesDropped.Add(1)
 		default:
-			// OK, or Partial in drop mode: sentinel-filled row per ADR-005
+			// OK, or Partial in drop mode: sentinel-filled row per ADR-005.
+			// A valid parse may yield zero tables (terminal explode over an
+			// empty array): ACKed below like any valid message, counted here
+			// so silent data disappearance stays observable.
+			if len(res.Tables) == 0 {
+				w.parsesZeroRows.Add(1)
+			}
 			validTables = append(validTables, res.Tables...)
 		}
 	}
@@ -433,8 +442,9 @@ func (w *Worker) parseMessages(batch *source.MessageBatch) (validTables []qdb.Wr
 // the per-table stats callback. Names are trimmed of the pinning
 // "\x00" terminator appended by extract_table. Nil when no callback is
 // registered -- the disabled hot path pays only this nil check.
-// In: tables []qdb.WriterTable - post-filter, pre-merge tables (one
-// row each under the current parsers)
+// In: tables []qdb.WriterTable - post-filter, pre-merge tables
+// (single-row from scalar configs, N-row from explode configs; Rows sums
+// RowCount, Msgs counts per-table contributions)
 // Out: []TableWrite - one event per distinct table; nil when disabled
 // Ex: tableWritesFor(tables) → [{Table: "skf/b831", Rows: 3, Msgs: 3}]
 func (w *Worker) tableWritesFor(tables []qdb.WriterTable) []TableWrite {

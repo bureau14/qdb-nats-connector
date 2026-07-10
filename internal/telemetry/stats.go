@@ -146,6 +146,7 @@ func (s *StatsLogger) snapshot(src StatsSource, now time.Time) statsSnapshot {
 		snap.worker.ParseFailures += w.Stats.ParseFailures
 		snap.worker.WriteFailures += w.Stats.WriteFailures
 		snap.worker.MessagesDropped += w.Stats.MessagesDropped
+		snap.worker.ParsesZeroRows += w.Stats.ParsesZeroRows
 		snap.worker.RowsWritten += w.Stats.RowsWritten
 		snap.worker.Acks += w.Stats.Acks
 		snap.worker.Nacks += w.Stats.Nacks

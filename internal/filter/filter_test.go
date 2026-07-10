@@ -55,7 +55,7 @@ func assertInvalidConfig(t *testing.T, err error) {
 
 // TestNewEmptySpec verifies that an empty Spec produces a nil filter (pass-through).
 func TestNewEmptySpec(t *testing.T) {
-	f, err := New(Spec{}, []qdb.WriterColumn{int64Col("x")})
+	f, err := New(Spec{}, []qdb.WriterColumn{int64Col("x")}, nil)
 	require.NoError(t, err)
 	assert.Nil(t, f)
 }
@@ -65,6 +65,7 @@ func TestNewInvalidMode(t *testing.T) {
 	_, err := New(
 		Spec{Mode: "bogus", Match: []MatchEntry{{Column: "x", Value: 1}}},
 		[]qdb.WriterColumn{int64Col("x")},
+		nil,
 	)
 	assertInvalidConfig(t, err)
 }
@@ -74,6 +75,7 @@ func TestNewEmptyMatchList(t *testing.T) {
 	_, err := New(
 		Spec{Mode: "whitelist"},
 		[]qdb.WriterColumn{int64Col("x")},
+		nil,
 	)
 	assertInvalidConfig(t, err)
 }
@@ -83,6 +85,7 @@ func TestNewUnknownColumn(t *testing.T) {
 	_, err := New(
 		Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "missing", Value: 1}}},
 		[]qdb.WriterColumn{int64Col("x")},
+		nil,
 	)
 	assertInvalidConfig(t, err)
 }
@@ -96,6 +99,7 @@ func TestNewUnsupportedColumnType(t *testing.T) {
 		_, err := New(
 			Spec{Mode: "whitelist", Match: []MatchEntry{{Column: col.ColumnName[:len(col.ColumnName)-1], Value: 1}}},
 			[]qdb.WriterColumn{col},
+			nil,
 		)
 		assertInvalidConfig(t, err)
 	}
@@ -107,12 +111,14 @@ func TestNewValueTypeMismatch(t *testing.T) {
 	_, err := New(
 		Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "x", Value: "string-for-int64"}}},
 		[]qdb.WriterColumn{int64Col("x")},
+		nil,
 	)
 	assertInvalidConfig(t, err)
 
 	_, err = New(
 		Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "s", Value: 42}}},
 		[]qdb.WriterColumn{strCol("s")},
+		nil,
 	)
 	assertInvalidConfig(t, err)
 }
@@ -123,6 +129,7 @@ func TestNewNullTerminatorStripping(t *testing.T) {
 	f, err := New(
 		Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "data_type", Value: 1}}},
 		[]qdb.WriterColumn{int64Col("data_type")},
+		nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, f)
@@ -145,7 +152,7 @@ func TestModeFilterInt64(t *testing.T) {
 	cols := []qdb.WriterColumn{int64Col("v")}
 
 	t.Run("whitelist keeps matching row and drops non-matching row", func(t *testing.T) {
-		f, err := New(Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "v", Value: 1}}}, cols)
+		f, err := New(Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "v", Value: 1}}}, cols, nil)
 		require.NoError(t, err)
 
 		kept := singleRowTable(t, cols, int64(1))
@@ -157,7 +164,7 @@ func TestModeFilterInt64(t *testing.T) {
 	})
 
 	t.Run("blacklist drops matching row and keeps non-matching row", func(t *testing.T) {
-		f, err := New(Spec{Mode: "blacklist", Match: []MatchEntry{{Column: "v", Value: 1}}}, cols)
+		f, err := New(Spec{Mode: "blacklist", Match: []MatchEntry{{Column: "v", Value: 1}}}, cols, nil)
 		require.NoError(t, err)
 
 		dropped := singleRowTable(t, cols, int64(1))
@@ -182,6 +189,7 @@ func TestORSemanticsMultipleMatches(t *testing.T) {
 			},
 		},
 		cols,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -202,6 +210,7 @@ func TestStringColumnWhitelist(t *testing.T) {
 	f, err := New(
 		Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "tag", Value: "keep"}}},
 		cols,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -211,4 +220,28 @@ func TestStringColumnWhitelist(t *testing.T) {
 	result := f.Apply([]qdb.WriterTable{keep, drop})
 	require.Len(t, result, 1)
 	assert.Equal(t, keep, result[0])
+}
+
+// TestNewRejectsExplodedColumns verifies that predicates referencing
+// per-sample (exploded) columns are rejected at config load: Apply
+// evaluates row 0 only, which would be silently wrong for them. Broadcast
+// columns stay filterable.
+func TestNewRejectsExplodedColumns(t *testing.T) {
+	cols := []qdb.WriterColumn{int64Col("sample_index"), int64Col("capability_key")}
+
+	_, err := New(
+		Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "sample_index", Value: 0}}},
+		cols,
+		[]string{"value", "sample_index"},
+	)
+	assertInvalidConfig(t, err)
+	assert.Contains(t, err.Error(), "exploded column")
+
+	f, err := New(
+		Spec{Mode: "whitelist", Match: []MatchEntry{{Column: "capability_key", Value: 4}}},
+		cols,
+		[]string{"value", "sample_index"},
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, f)
 }

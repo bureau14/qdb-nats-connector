@@ -45,6 +45,7 @@ type Collector struct {
 	messagesProcessed *prometheus.Desc
 	parseFailures     *prometheus.Desc
 	messagesDropped   *prometheus.Desc
+	parsesZeroRows    *prometheus.Desc
 	writeFailures     *prometheus.Desc
 	rowsWritten       *prometheus.Desc
 	acks              *prometheus.Desc
@@ -82,6 +83,8 @@ func NewCollector(src StatsSource, logger *slog.Logger) *Collector {
 			"Messages NACKed for redelivery due to parse errors.", workerLabel, nil),
 		messagesDropped: prometheus.NewDesc(fqName("messages_dropped_total"),
 			"Structurally-unusable messages discarded in drop mode.", workerLabel, nil),
+		parsesZeroRows: prometheus.NewDesc(fqName("parses_zero_rows_total"),
+			"Successful parses that produced zero rows (e.g. explode over an empty array).", workerLabel, nil),
 		writeFailures: prometheus.NewDesc(fqName("write_failures_total"),
 			"Batch write errors against QuasarDB.", workerLabel, nil),
 		rowsWritten: prometheus.NewDesc(fqName("rows_written_total"),
@@ -113,7 +116,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{
 		c.messagesFetched, c.fetchErrors, c.rebindAttempts,
 		c.messagesProcessed, c.parseFailures, c.messagesDropped,
-		c.writeFailures, c.rowsWritten, c.acks, c.nacks,
+		c.parsesZeroRows, c.writeFailures, c.rowsWritten, c.acks, c.nacks,
 		c.consumerPending, c.breakerState, c.workChannelDepth,
 		c.lastFetchSuccess, c.ready, c.healthy,
 	} {
@@ -148,6 +151,7 @@ func (c *Collector) collectWorkers(ch chan<- prometheus.Metric) {
 		c.emit(ch, c.messagesProcessed, prometheus.CounterValue, float64(snap.Stats.MessagesProcessed), snap.Worker)
 		c.emit(ch, c.parseFailures, prometheus.CounterValue, float64(snap.Stats.ParseFailures), snap.Worker)
 		c.emit(ch, c.messagesDropped, prometheus.CounterValue, float64(snap.Stats.MessagesDropped), snap.Worker)
+		c.emit(ch, c.parsesZeroRows, prometheus.CounterValue, float64(snap.Stats.ParsesZeroRows), snap.Worker)
 		c.emit(ch, c.writeFailures, prometheus.CounterValue, float64(snap.Stats.WriteFailures), snap.Worker)
 		c.emit(ch, c.rowsWritten, prometheus.CounterValue, float64(snap.Stats.RowsWritten), snap.Worker)
 		c.emit(ch, c.acks, prometheus.CounterValue, float64(snap.Stats.Acks), snap.Worker)

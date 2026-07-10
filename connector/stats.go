@@ -32,6 +32,11 @@ type WorkerStats struct {
 	// MessagesDropped: structurally-unusable messages discarded in drop
 	// mode (ACKed without a row).
 	MessagesDropped uint64
+	// ParsesZeroRows: successful (OK/Partial) parses that produced zero
+	// tables -- e.g. a terminal explode over an empty sample array. ACKed
+	// like any valid parse; counted so silent data disappearance stays
+	// observable.
+	ParsesZeroRows uint64
 	// RowsWritten: rows successfully written to QuasarDB.
 	RowsWritten uint64
 	// Acks: messages acknowledged after a successful pipeline pass.
@@ -47,6 +52,7 @@ type workerCounters struct {
 	parseFailures     atomic.Uint64
 	writeFailures     atomic.Uint64
 	messagesDropped   atomic.Uint64
+	parsesZeroRows    atomic.Uint64
 	rowsWritten       atomic.Uint64
 	acks              atomic.Uint64
 	nacks             atomic.Uint64
@@ -60,6 +66,7 @@ func (c *workerCounters) snapshot() WorkerStats {
 		ParseFailures:     c.parseFailures.Load(),
 		WriteFailures:     c.writeFailures.Load(),
 		MessagesDropped:   c.messagesDropped.Load(),
+		ParsesZeroRows:    c.parsesZeroRows.Load(),
 		RowsWritten:       c.rowsWritten.Load(),
 		Acks:              c.acks.Load(),
 		Nacks:             c.nacks.Load(),
@@ -74,6 +81,7 @@ func accumulateStats(stats []WorkerStats) WorkerStats {
 		total.ParseFailures += s.ParseFailures
 		total.WriteFailures += s.WriteFailures
 		total.MessagesDropped += s.MessagesDropped
+		total.ParsesZeroRows += s.ParsesZeroRows
 		total.RowsWritten += s.RowsWritten
 		total.Acks += s.Acks
 		total.Nacks += s.Nacks

@@ -51,12 +51,17 @@ type RowFilter struct {
 // New builds a RowFilter from a Spec and the ordered output columns. columns is
 // the same slice the parser passes to NewWriterTable, so a column's index in
 // the slice equals its GetData offset; column names carry the parser's \x00
-// terminator, which New strips before matching. Returns (nil, nil) when no
-// filtering is configured (empty Spec == pass-through). Rejects an invalid
-// mode, an empty match list when a mode is set, unknown columns, unsupported
-// column types (only int64 and string), and values that do not match the
-// column's declared type, each via connectorErrors.NewInvalidConfigError.
-func New(spec Spec, columns []qdb.WriterColumn) (*RowFilter, error) {
+// terminator, which New strips before matching. exploded lists the columns
+// (without \x00) bound per-element by a terminal explode step (target +
+// ordinal); nil/empty for scalar configs. Predicates evaluate row 0 only --
+// exact for broadcast columns, silently wrong for per-sample ones -- so
+// specs referencing exploded columns are rejected here at config load.
+// Returns (nil, nil) when no filtering is configured (empty Spec ==
+// pass-through). Rejects an invalid mode, an empty match list when a mode
+// is set, unknown or exploded columns, unsupported column types (only int64
+// and string), and values that do not match the column's declared type,
+// each via connectorErrors.NewInvalidConfigError.
+func New(spec Spec, columns []qdb.WriterColumn, exploded []string) (*RowFilter, error) {
 	if spec.Mode == "" && len(spec.Match) == 0 {
 		return nil, nil
 	}
@@ -73,8 +78,18 @@ func New(spec Spec, columns []qdb.WriterColumn) (*RowFilter, error) {
 
 	offsetByName, typeByName := indexColumns(columns)
 
+	explodedSet := make(map[string]bool, len(exploded))
+	for _, name := range exploded {
+		explodedSet[name] = true
+	}
+
 	matches := make([]match, 0, len(spec.Match))
 	for _, entry := range spec.Match {
+		if explodedSet[entry.Column] {
+			return nil, connectorErrors.NewInvalidConfigError("filter",
+				fmt.Sprintf("filters.match references exploded column %q; filters evaluate row 0 only and cannot filter per-sample columns", entry.Column))
+		}
+
 		m, err := resolveMatch(entry, offsetByName, typeByName)
 		if err != nil {
 			return nil, err
@@ -172,9 +187,11 @@ func coerceString(v interface{}, column string) (string, error) {
 	return s, nil
 }
 
-// Apply returns the subset of tables to keep. Each input table is assumed to be
-// a single-row WriterTable (the pre-merge invariant): Apply evaluates row 0
-// only and must be called before MergeWriterTables, never after. A nil receiver
+// Apply returns the subset of tables to keep. It runs pre-merge (before
+// MergeWriterTables, never after) and evaluates row 0 only: exact for
+// scalar configs (single-row tables) AND for exploded N-row tables, because
+// every filterable column there is a broadcast column -- New rejects specs
+// referencing per-sample (exploded) columns at config load. A nil receiver
 // is pass-through (returns tables unchanged), covering the noop-parser and
 // no-filter cases.
 func (f *RowFilter) Apply(tables []qdb.WriterTable) []qdb.WriterTable {

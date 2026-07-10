@@ -296,8 +296,9 @@ func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 	}
 
 	// Build the optional row filter from the filters block + ordered columns.
-	// Returns nil (pass-through) when no filters are configured.
-	rowFilter, err := filter.New(config.Filters, columns)
+	// Exploded (per-sample) columns are not filterable: Apply evaluates row 0
+	// only. Returns nil (pass-through) when no filters are configured.
+	rowFilter, err := filter.New(config.Filters, columns, explodedColumnNames(explode))
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
+	"github.com/bureau14/qdb-nats-connector/internal/filter"
 	"github.com/bureau14/qdb-nats-connector/internal/util"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -705,4 +706,28 @@ func TestExplodeInt64ArrayNoScale(t *testing.T) {
 		requireUnusable(t, res, err)
 		assert.True(t, errorsContain(res.Errors, "must be []int64 to match column"))
 	})
+}
+
+// TestExplodeFilterGuard: a filters block referencing an exploded column is
+// rejected at config load, end-to-end through NewYAMLParserFromConfig.
+func TestExplodeFilterGuard(t *testing.T) {
+	config := explodeRuntimeConfig(map[string]interface{}{"value": "250ms"})
+	config.Filters = filter.Spec{
+		Mode:  "whitelist",
+		Match: []filter.MatchEntry{{Column: "sample_index", Value: 0}},
+	}
+
+	parser, err := NewYAMLParserFromConfig(config)
+	assert.Nil(t, parser)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exploded column")
+
+	// The same filter against a broadcast column compiles.
+	config.Filters = filter.Spec{
+		Mode:  "whitelist",
+		Match: []filter.MatchEntry{{Column: "stream_id", Value: "abc"}},
+	}
+	parser, err = NewYAMLParserFromConfig(config)
+	require.NoError(t, err)
+	assert.NotNil(t, parser)
 }

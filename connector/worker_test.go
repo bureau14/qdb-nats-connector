@@ -64,7 +64,7 @@ func TestProcessBatchAllRowsFilteredStillAcks(t *testing.T) {
 	rf, err := filter.New(filter.Spec{
 		Mode:  "whitelist",
 		Match: []filter.MatchEntry{{Column: "value", Value: 999}},
-	}, cols)
+	}, cols, nil)
 	require.NoError(t, err)
 	require.NotNil(t, rf)
 

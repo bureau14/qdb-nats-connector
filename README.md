@@ -140,9 +140,11 @@ The YAML parser provides a flexible, high-performance alternative with <5% overh
 
 Key features:
 
-- **Building blocks**: Pre-compiled transformation functions (decompress, parse_json, extract_field, extract_index, extract_timestamp, etc.)
+- **Building blocks**: Pre-compiled transformation functions (decompress, parse_json, parse_protobuf, extract_field, extract_index, extract_timestamp, extract_subject, extract_map_entry, extract_table, safe_parse_number, compute_field, unpack, explode)
 - **Column types**: timestamp, double, int64, blob, string, symbol
 - **Timestamp formats**: rfc3339, rfc3339nano, unix, unix_ms, unix_us, unix_ns, or custom Go layouts -- for both the index and timestamp value columns
+- **Binary arrays**: `unpack` reinterprets packed fixed-width bytes (int8..int64, uint8..uint64, float32/64; optional endianness, host order by default; optional amplitude scale) as typed arrays -- `parse_*` steps handle self-describing formats, `unpack` handles formats whose schema lives in the config
+- **Row explosion**: `explode` is the terminal 1->N step (one row per array element): `$timestamp[i] = start + i*interval` with interval from a static value, a sourced field + unit, or an array-length map (`by_length`); scalar columns broadcast onto every row (see ADR-012)
 - **Parallel processing**: Optional worker pools for increased throughput
 - **Error handling**: Configurable drop/fail modes
 - **Type safety**: Automatic conversions with overflow protection

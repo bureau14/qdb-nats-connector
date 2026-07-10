@@ -454,6 +454,15 @@ no `extract_index` step at all -- a compile-time property of the pipeline.
 
 This change maintains backward compatibility - both `step:` and `block:` fields are supported in YAML configurations.
 
+## Amendment (2026-07-10): N-row materialization
+
+ADR-012 adds the `unpack` (bytes -> typed array, structural) and
+`explode` (terminal 1->N row materialization) steps. Where this document
+speaks of single-row tables, that is now the scalar-config case only:
+explode configs produce one N-row WriterTable per message, and the
+sentinel-fill invariant widens from 1 to N values per column. See
+`adr/012-unpack-explode.md`.
+
 ---
 
 _This ADR documents the architectural decision for pluggable parser implementation in the NATS to QuasarDB connector system._

@@ -186,7 +186,15 @@ type YAMLParser struct {
 	// hasIndexStep: config defines an extract_index step. When true, a
 	// message that produced no $timestamp is structurally unusable; the
 	// time.Now() index fallback only applies to configs without one.
+	// explode is the other timestamp producer (explode.index) and is
+	// mutually exclusive with extract_index, so at most one of
+	// hasIndexStep / explode is ever set.
 	hasIndexStep bool
+
+	// explode: compiled terminal explode spec; nil for scalar configs.
+	// When set, Parse materializes one N-row WriterTable per message via
+	// parseExploded instead of the single-row createWriterTable path.
+	explode *explodeSpec
 
 	// Column mapping - pre-computed at startup
 	columnTypes []qdb.TsColumnType
@@ -249,8 +257,15 @@ func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 		return nil, err
 	}
 
+	// Split off the terminal explode spec (if any): it is not a pipeline
+	// step, it changes row materialization (see explode.go).
+	steps, explodeCfg, err := splitExplodeSpec(config.Transformations)
+	if err != nil {
+		return nil, err
+	}
+
 	// Compile pipeline
-	pipeline, err := compilePipeline(config.Transformations)
+	pipeline, err := compilePipeline(steps)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +282,19 @@ func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 		return nil, err
 	}
 
+	// Compile the terminal explode spec against pipeline + schema; nil for
+	// scalar configs. Then enforce the broadcast rule: arrays cannot reach
+	// output columns without an explode binding.
+	explode, err := compileExplodeSpec(explodeCfg, steps, config.Output.Columns, columnTypes)
+	if err != nil {
+		return nil, err
+	}
+
+	err = validateArrayBindings(steps, explode, config.Output.Columns)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build the optional row filter from the filters block + ordered columns.
 	// Returns nil (pass-through) when no filters are configured.
 	rowFilter, err := filter.New(config.Filters, columns)
@@ -277,7 +305,8 @@ func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 	parser := &YAMLParser{
 		config:       config,
 		pipeline:     pipeline,
-		hasIndexStep: hasStep(config.Transformations, "extract_index"),
+		hasIndexStep: hasStep(steps, "extract_index"),
+		explode:      explode,
 		columns:      columns,
 		columnTypes:  columnTypes,
 		rowFilter:    rowFilter,

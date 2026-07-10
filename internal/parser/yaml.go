@@ -106,9 +106,9 @@ type TransformationStep func(*ParseState) error
 
 // compiledStep pairs a compiled step function with its compile-time
 // classification. Structural steps either decode the payload itself
-// (decompress, parse_json, parse_protobuf) or reject the message's shape
-// outright (extract_map_entry): when one fails, nothing downstream can
-// succeed and the message is structurally unusable.
+// (decompress, parse_json, parse_protobuf, unpack) or reject the message's
+// shape outright (extract_map_entry): when one fails, nothing downstream
+// can succeed and the message is structurally unusable.
 type compiledStep struct {
 	fn         TransformationStep
 	name       string
@@ -119,7 +119,7 @@ type compiledStep struct {
 // whole message unusable (vs a partial field failure per ADR-005).
 func isStructuralStep(name string) bool {
 	return name == "decompress" || name == "parse_json" || name == "parse_protobuf" ||
-		name == "extract_map_entry"
+		name == "extract_map_entry" || name == "unpack"
 }
 
 // stepRegistry maps names to step factories.
@@ -136,6 +136,7 @@ var stepRegistry = map[string]func(map[string]interface{}) (TransformationStep, 
 	"extract_table":     makeExtractTableStep,
 	"compute_field":     makeComputeFieldStep,
 	"safe_parse_number": makeSafeParseNumberStep,
+	"unpack":            makeUnpackStep,
 }
 
 // YAMLConfig: YAML parser configuration
@@ -185,7 +186,15 @@ type YAMLParser struct {
 	// hasIndexStep: config defines an extract_index step. When true, a
 	// message that produced no $timestamp is structurally unusable; the
 	// time.Now() index fallback only applies to configs without one.
+	// explode is the other timestamp producer (explode.index) and is
+	// mutually exclusive with extract_index, so at most one of
+	// hasIndexStep / explode is ever set.
 	hasIndexStep bool
+
+	// explode: compiled terminal explode spec; nil for scalar configs.
+	// When set, Parse materializes one N-row WriterTable per message via
+	// parseExploded instead of the single-row createWriterTable path.
+	explode *explodeSpec
 
 	// Column mapping - pre-computed at startup
 	columnTypes []qdb.TsColumnType
@@ -248,8 +257,15 @@ func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 		return nil, err
 	}
 
+	// Split off the terminal explode spec (if any): it is not a pipeline
+	// step, it changes row materialization (see explode.go).
+	steps, explodeCfg, err := splitExplodeSpec(config.Transformations)
+	if err != nil {
+		return nil, err
+	}
+
 	// Compile pipeline
-	pipeline, err := compilePipeline(config.Transformations)
+	pipeline, err := compilePipeline(steps)
 	if err != nil {
 		return nil, err
 	}
@@ -266,9 +282,23 @@ func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 		return nil, err
 	}
 
+	// Compile the terminal explode spec against pipeline + schema; nil for
+	// scalar configs. Then enforce the broadcast rule: arrays cannot reach
+	// output columns without an explode binding.
+	explode, err := compileExplodeSpec(explodeCfg, steps, config.Output.Columns, columnTypes)
+	if err != nil {
+		return nil, err
+	}
+
+	err = validateArrayBindings(steps, explode, config.Output.Columns)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build the optional row filter from the filters block + ordered columns.
-	// Returns nil (pass-through) when no filters are configured.
-	rowFilter, err := filter.New(config.Filters, columns)
+	// Exploded (per-sample) columns are not filterable: Apply evaluates row 0
+	// only. Returns nil (pass-through) when no filters are configured.
+	rowFilter, err := filter.New(config.Filters, columns, explodedColumnNames(explode))
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +306,8 @@ func NewYAMLParserFromConfig(config YAMLConfig) (*YAMLParser, error) {
 	parser := &YAMLParser{
 		config:       config,
 		pipeline:     pipeline,
-		hasIndexStep: hasStep(config.Transformations, "extract_index"),
+		hasIndexStep: hasStep(steps, "extract_index"),
+		explode:      explode,
 		columns:      columns,
 		columnTypes:  columnTypes,
 		rowFilter:    rowFilter,
@@ -323,6 +354,12 @@ func (p *YAMLParser) Parse(msg *nats.Msg) (ParseResult, error) {
 		return ParseResult{Outcome: OutcomeUnusable, Errors: state.Errors}, nil
 	}
 
+	// Terminal explode: materialize one N-row table (see parseExploded);
+	// the single-row builder below never runs for explode configs.
+	if p.explode != nil {
+		return p.parseExploded(state, tableName)
+	}
+
 	// Create WriterTable - uses per-call allocated buffers for memory safety
 	table, err := p.createWriterTable(state, tableName)
 	if err != nil {
@@ -360,6 +397,9 @@ func (p *YAMLParser) runPipeline(state *ParseState) bool {
 }
 
 // checkStructuralFloor validates the parsed state can anchor a real row.
+// $timestamp is required iff an extract_index step is configured; explode
+// configs anchor time via explode.index instead (validated in
+// parseExploded) and only need the $table routing checked here.
 // In: state *ParseState - post-pipeline state
 // Out: string - validated table name, error - structural failure
 // Ex: checkStructuralFloor(state) → "sensors\x00", nil
@@ -459,7 +499,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState, tableName string) (qdb
 	// Set index - uses parsed index, or current time as fallback. The
 	// fallback is only reachable for configs without an extract_index step:
 	// checkStructuralFloor classifies a configured-but-missing $timestamp
-	// as unusable before this function runs.
+	// as unusable before this function runs. Explode configs never reach
+	// this function at all (Parse dispatches to parseExploded, which owns
+	// the time axis), so the fallback stays scalar-only.
 	var ts time.Time
 	if parsedTs, ok := state.Fields["$timestamp"].(time.Time); ok {
 		ts = parsedTs

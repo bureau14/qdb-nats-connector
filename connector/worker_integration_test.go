@@ -67,7 +67,7 @@ func TestPartialFilterWorkerIntegration(t *testing.T) {
 			{Column: "data_type", Value: 1},
 			{Column: "data_type", Value: 2},
 		},
-	}, cols)
+	}, cols, nil)
 	require.NoError(t, err)
 	require.NotNil(t, rf)
 

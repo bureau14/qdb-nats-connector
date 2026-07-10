@@ -13,6 +13,7 @@ package parser
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -487,4 +488,425 @@ func compileExplodeSpec(cfg map[string]interface{}, steps []TransformSpec, schem
 	}
 
 	return spec, nil
+}
+
+// explodeInputs: per-message resolved explode inputs. Exactly one of
+// floats/ints is non-nil (matching explodeSpec.targetType) once n > 0;
+// start/interval are only resolved when n > 0 (an empty waveform needs no
+// time axis).
+type explodeInputs struct {
+	floats   []float64
+	ints     []int64
+	n        int
+	start    time.Time
+	interval time.Duration
+}
+
+// resolveUntypedArray types a []interface{} source (parse_protobuf repeated
+// fields, parse_json arrays) with strict per-element assertions -- no
+// coercion; one mistyped element is a structural failure.
+func (e *explodeSpec) resolveUntypedArray(v []interface{}) (explodeInputs, error) {
+	in := explodeInputs{n: len(v)}
+
+	if e.targetType == qdb.TsColumnDouble {
+		out := make([]float64, len(v))
+		for i, elem := range v {
+			f, ok := elem.(float64)
+			if !ok {
+				return explodeInputs{}, fmt.Errorf(
+					"explode source '%s' element %d has type %T, want float64", e.sourcePath, i, elem)
+			}
+			out[i] = f
+		}
+		in.floats = out
+
+		return in, nil
+	}
+
+	out := make([]int64, len(v))
+	for i, elem := range v {
+		n, ok := elem.(int64)
+		if !ok {
+			return explodeInputs{}, fmt.Errorf(
+				"explode source '%s' element %d has type %T, want int64", e.sourcePath, i, elem)
+		}
+		out[i] = n
+	}
+	in.ints = out
+
+	return in, nil
+}
+
+// resolveArray types the source array against the bound target column.
+// Typed slices come from unpack; []interface{} from parse_protobuf and
+// parse_json (see resolveUntypedArray).
+func (e *explodeSpec) resolveArray(value interface{}) (explodeInputs, error) {
+	switch v := value.(type) {
+	case []float64:
+		if e.targetType != qdb.TsColumnDouble {
+			return explodeInputs{}, fmt.Errorf(
+				"explode source '%s' must be []int64 to match column %q, got %T", e.sourcePath, e.targetName, value)
+		}
+
+		return explodeInputs{floats: v, n: len(v)}, nil
+	case []int64:
+		if e.targetType != qdb.TsColumnInt64 {
+			return explodeInputs{}, fmt.Errorf(
+				"explode source '%s' must be []float64 to match column %q, got %T", e.sourcePath, e.targetName, value)
+		}
+
+		return explodeInputs{ints: v, n: len(v)}, nil
+	case []interface{}:
+		return e.resolveUntypedArray(v)
+	}
+
+	return explodeInputs{}, fmt.Errorf(
+		"explode source '%s' has type %T, want a numeric array", e.sourcePath, value)
+}
+
+// resolveStart looks up the time-axis anchor: a time.Time field, typically
+// produced by extract_timestamp. It marks the capture-window START.
+func (e *explodeSpec) resolveStart(fields map[string]interface{}) (time.Time, error) {
+	value, ok := e.lookupStart(fields)
+	if !ok {
+		return time.Time{}, fmt.Errorf(
+			"explode index.start field '%s' not found", e.startPath)
+	}
+
+	ts, ok := value.(time.Time)
+	if !ok {
+		return time.Time{}, fmt.Errorf(
+			"explode index.start '%s' must be a time.Time (use extract_timestamp), got %T", e.startPath, value)
+	}
+
+	return ts, nil
+}
+
+// resolveSourcedInterval converts a per-message int64/float64 field to a
+// positive duration via the configured unit, guarding non-finite,
+// non-positive, and int64-overflow inputs.
+func (e *explodeSpec) resolveSourcedInterval(fields map[string]interface{}) (time.Duration, error) {
+	value, ok := e.intervalLookup(fields)
+	if !ok {
+		return 0, fmt.Errorf("explode index.interval field '%s' not found", e.intervalPath)
+	}
+
+	switch v := value.(type) {
+	case int64:
+		if v <= 0 || v > math.MaxInt64/int64(e.intervalUnit) {
+			return 0, fmt.Errorf(
+				"explode index.interval from '%s' must be a positive duration, got %d", e.intervalPath, v)
+		}
+
+		return time.Duration(v) * e.intervalUnit, nil
+	case float64:
+		ns := v * float64(e.intervalUnit)
+		if math.IsNaN(ns) || ns <= 0 || ns >= float64(math.MaxInt64) {
+			return 0, fmt.Errorf(
+				"explode index.interval from '%s' must be a positive duration, got %v", e.intervalPath, v)
+		}
+
+		d := time.Duration(math.Round(ns))
+		if d <= 0 {
+			return 0, fmt.Errorf(
+				"explode index.interval from '%s' rounds to a non-positive duration: %v", e.intervalPath, v)
+		}
+
+		return d, nil
+	}
+
+	return 0, fmt.Errorf(
+		"explode index.interval source '%s' must be int64 or float64, got %T", e.intervalPath, value)
+}
+
+// resolveInterval returns the per-message sample interval per the compiled
+// mode. A by_length map without an entry for the array length is a
+// structural failure: guessing a time axis is never acceptable.
+func (e *explodeSpec) resolveInterval(fields map[string]interface{}, n int) (time.Duration, error) {
+	switch e.mode {
+	case intervalModeValue:
+		return e.intervalValue, nil
+	case intervalModeByLength:
+		d, ok := e.intervalByLength[n]
+		if !ok {
+			return 0, fmt.Errorf(
+				"explode index.interval by_length has no entry for array length %d", n)
+		}
+
+		return d, nil
+	case intervalModeSource:
+		return e.resolveSourcedInterval(fields)
+	}
+
+	return 0, fmt.Errorf("explode index.interval has unknown mode %d", e.mode)
+}
+
+// resolveInputs resolves the per-message explode inputs. An empty array
+// short-circuits BEFORE start/interval resolution: zero rows need no time
+// axis, and a by_length map has no length-0 entry by construction.
+func (e *explodeSpec) resolveInputs(fields map[string]interface{}) (explodeInputs, error) {
+	value, ok := e.lookupSource(fields)
+	if !ok {
+		return explodeInputs{}, fmt.Errorf(
+			"explode source field '%s' not found", e.sourcePath)
+	}
+
+	in, err := e.resolveArray(value)
+	if err != nil || in.n == 0 {
+		return in, err
+	}
+
+	in.start, err = e.resolveStart(fields)
+	if err != nil {
+		return explodeInputs{}, err
+	}
+
+	in.interval, err = e.resolveInterval(fields, in.n)
+	if err != nil {
+		return explodeInputs{}, err
+	}
+
+	return in, nil
+}
+
+// buildExplodedIndex reconstructs the time axis: t[i] = start + i*interval
+// by integer-nanosecond MULTIPLICATION per ordinal, never accumulation --
+// accumulation drifts microseconds over 8192 samples at non-dyadic rates.
+// t[0] == start exactly (0-based ordinal; start anchors the window START).
+// Overflow: time.Duration is int64 ns, so i*interval only overflows when
+// interval exceeds ~12.7 days at n=8192 -- no practical concern.
+func buildExplodedIndex(start time.Time, interval time.Duration, n int) []time.Time {
+	idx := make([]time.Time, n)
+	for i := range idx {
+		idx[i] = start.Add(time.Duration(i) * interval)
+	}
+
+	return idx
+}
+
+// broadcastDoubles replicates a scalar n times, or the double null sentinel
+// (NaN) when the field is missing/mistyped -- the same per-type sentinel
+// table as createWriterTable, widened from 1 to n copies.
+func broadcastDoubles(value interface{}, n int) []float64 {
+	v, ok := value.(float64)
+	if !ok {
+		v = math.NaN()
+	}
+
+	out := make([]float64, n)
+	for i := range out {
+		out[i] = v
+	}
+
+	return out
+}
+
+// broadcastInt64s: n copies or qdb.Int64Undefined() sentinel.
+func broadcastInt64s(value interface{}, n int) []int64 {
+	v, ok := value.(int64)
+	if !ok {
+		v = qdb.Int64Undefined()
+	}
+
+	out := make([]int64, n)
+	for i := range out {
+		out[i] = v
+	}
+
+	return out
+}
+
+// broadcastTimestamps: n copies or qdb.MinTimespec() sentinel.
+func broadcastTimestamps(value interface{}, n int) []time.Time {
+	v, ok := value.(time.Time)
+	if !ok {
+		v = qdb.MinTimespec()
+	}
+
+	out := make([]time.Time, n)
+	for i := range out {
+		out[i] = v
+	}
+
+	return out
+}
+
+// broadcastStrings: n copies or the "" sentinel (strings and symbols; see
+// createWriterTable's pinning contract -- repeating one string header n
+// times is pinning-safe, runtime.Pinner pin counts nest).
+func broadcastStrings(value interface{}, n int) []string {
+	v, ok := value.(string)
+	if !ok {
+		v = ""
+	}
+
+	out := make([]string, n)
+	for i := range out {
+		out[i] = v
+	}
+
+	return out
+}
+
+// broadcastBlobs: n copies or the empty-slice sentinel.
+func broadcastBlobs(value interface{}, n int) [][]byte {
+	v, ok := value.([]byte)
+	if !ok {
+		v = []byte{}
+	}
+
+	out := make([][]byte, n)
+	for i := range out {
+		out[i] = v
+	}
+
+	return out
+}
+
+// assertExplodedColumnLen enforces the widened sentinel-fill invariant
+// before every SetData: every output column carries exactly n values.
+// MergeSingleTableWriters does NOT validate per-column lengths; a violation
+// here would write silently misaligned (timestamp, value) pairs.
+func assertExplodedColumnLen(name string, got, n int) error {
+	if got != n {
+		return connectorErrors.NewParsingFailedError("yaml_parser",
+			fmt.Errorf("exploded column %q length %d != row count %d", name, got, n))
+	}
+
+	return nil
+}
+
+// setExplodedTarget binds the source array itself to the target column: the
+// unpack-allocated (or per-message converted) slice is fresh and contiguous.
+func setExplodedTarget(table *qdb.WriterTable, col int, name string, in explodeInputs) error {
+	if in.floats != nil {
+		err := assertExplodedColumnLen(name, len(in.floats), in.n)
+		if err != nil {
+			return err
+		}
+
+		data := qdb.NewColumnDataDouble(in.floats)
+
+		return table.SetData(col, &data)
+	}
+
+	err := assertExplodedColumnLen(name, len(in.ints), in.n)
+	if err != nil {
+		return err
+	}
+
+	data := qdb.NewColumnDataInt64(in.ints)
+
+	return table.SetData(col, &data)
+}
+
+// setBroadcastColumn fills output column i with n copies of its scalar
+// field value (or per-type null sentinel).
+func (p *YAMLParser) setBroadcastColumn(table *qdb.WriterTable, state *ParseState, i, n int) error {
+	fieldName := strings.TrimSuffix(p.columns[i].ColumnName, "\x00")
+	value := state.Fields[fieldName]
+
+	switch p.columnTypes[i] {
+	case qdb.TsColumnDouble:
+		data := qdb.NewColumnDataDouble(broadcastDoubles(value, n))
+
+		return table.SetData(i, &data)
+	case qdb.TsColumnInt64:
+		data := qdb.NewColumnDataInt64(broadcastInt64s(value, n))
+
+		return table.SetData(i, &data)
+	case qdb.TsColumnTimestamp:
+		data := qdb.NewColumnDataTimestamp(broadcastTimestamps(value, n))
+
+		return table.SetData(i, &data)
+	case qdb.TsColumnString, qdb.TsColumnSymbol:
+		data := qdb.NewColumnDataString(broadcastStrings(value, n))
+
+		return table.SetData(i, &data)
+	case qdb.TsColumnBlob:
+		data := qdb.NewColumnDataBlob(broadcastBlobs(value, n))
+
+		return table.SetData(i, &data)
+	case qdb.TsColumnUninitialized:
+		// Schema validation rejects uninitialized columns before reaching here.
+	}
+
+	return nil
+}
+
+// setExplodedColumn routes output column i to its role: exploded target,
+// ordinal (0..n-1), or broadcast.
+func (p *YAMLParser) setExplodedColumn(table *qdb.WriterTable, state *ParseState, i int, in explodeInputs) error {
+	e := p.explode
+
+	switch i {
+	case e.targetCol:
+		return setExplodedTarget(table, i, e.targetName, in)
+	case e.ordinalCol:
+		ord := make([]int64, in.n)
+		for j := range ord {
+			ord[j] = int64(j)
+		}
+
+		data := qdb.NewColumnDataInt64(ord)
+
+		return table.SetData(i, &data)
+	}
+
+	return p.setBroadcastColumn(table, state, i, in.n)
+}
+
+// createExplodedWriterTable builds the one N-row WriterTable for an
+// exploded message. Memory-pinning contract: see createWriterTable's header
+// (yaml.go); the sentinel-fill invariant here is N copies per column, not
+// 1, and is self-asserted because merge does not validate column lengths.
+func (p *YAMLParser) createExplodedWriterTable(state *ParseState, tableName string, in explodeInputs) (qdb.WriterTable, error) {
+	table, err := qdb.NewWriterTable(tableName, p.columns)
+	if err != nil {
+		return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
+	}
+
+	table.SetIndex(buildExplodedIndex(in.start, in.interval, in.n))
+
+	for i := range p.columns {
+		err := p.setExplodedColumn(&table, state, i, in)
+		if err != nil {
+			return qdb.WriterTable{}, connectorErrors.NewParsingFailedError("yaml_parser", err)
+		}
+	}
+
+	return table, nil
+}
+
+// parseExploded materializes the terminal explode: input resolution
+// failures are structural (OutcomeUnusable, zero tables -- no row may be
+// fabricated without a real time axis); an empty array is zero rows with
+// OutcomeOK (ACKed, counted as a zero-row parse by the worker; fabricating
+// a null-amplitude sample at t0 would be worse than no row, ADR-012);
+// broadcast metadata failures accumulated by the scalar pipeline stay
+// OutcomePartial, N sentinel copies.
+func (p *YAMLParser) parseExploded(state *ParseState, tableName string) (ParseResult, error) {
+	in, err := p.explode.resolveInputs(state.Fields)
+	if err != nil {
+		state.Errors = append(state.Errors,
+			connectorErrors.NewParsingFailedError("yaml_parser", err))
+
+		return ParseResult{Outcome: OutcomeUnusable, Errors: state.Errors}, nil
+	}
+
+	outcome := OutcomeOK
+	if len(state.Errors) > 0 {
+		outcome = OutcomePartial
+	}
+
+	if in.n == 0 {
+		return ParseResult{Outcome: outcome, Errors: state.Errors}, nil
+	}
+
+	table, err := p.createExplodedWriterTable(state, tableName, in)
+	if err != nil {
+		return ParseResult{}, err
+	}
+
+	return ParseResult{Tables: []qdb.WriterTable{table}, Outcome: outcome, Errors: state.Errors}, nil
 }

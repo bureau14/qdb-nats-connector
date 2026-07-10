@@ -353,6 +353,12 @@ func (p *YAMLParser) Parse(msg *nats.Msg) (ParseResult, error) {
 		return ParseResult{Outcome: OutcomeUnusable, Errors: state.Errors}, nil
 	}
 
+	// Terminal explode: materialize one N-row table (see parseExploded);
+	// the single-row builder below never runs for explode configs.
+	if p.explode != nil {
+		return p.parseExploded(state, tableName)
+	}
+
 	// Create WriterTable - uses per-call allocated buffers for memory safety
 	table, err := p.createWriterTable(state, tableName)
 	if err != nil {
@@ -390,6 +396,9 @@ func (p *YAMLParser) runPipeline(state *ParseState) bool {
 }
 
 // checkStructuralFloor validates the parsed state can anchor a real row.
+// $timestamp is required iff an extract_index step is configured; explode
+// configs anchor time via explode.index instead (validated in
+// parseExploded) and only need the $table routing checked here.
 // In: state *ParseState - post-pipeline state
 // Out: string - validated table name, error - structural failure
 // Ex: checkStructuralFloor(state) → "sensors\x00", nil
@@ -489,7 +498,9 @@ func (p *YAMLParser) createWriterTable(state *ParseState, tableName string) (qdb
 	// Set index - uses parsed index, or current time as fallback. The
 	// fallback is only reachable for configs without an extract_index step:
 	// checkStructuralFloor classifies a configured-but-missing $timestamp
-	// as unusable before this function runs.
+	// as unusable before this function runs. Explode configs never reach
+	// this function at all (Parse dispatches to parseExploded, which owns
+	// the time axis), so the fallback stays scalar-only.
 	var ts time.Time
 	if parsedTs, ok := state.Fields["$timestamp"].(time.Time); ok {
 		ts = parsedTs

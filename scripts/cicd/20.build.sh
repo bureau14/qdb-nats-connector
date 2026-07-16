@@ -313,8 +313,43 @@ if [[ ! -f "${CONNECTOR_BIN}" ]]; then
 fi
 
 # --- package ---
+#
+# The archive is a self-contained, relocatable dependency artifact:
+#   bin/  connector binary + libqdb_api runtime co-located next to it
+#         (mirrors qdb-api-rest scripts/teamcity/30.package.sh); the binary
+#         resolves the library via the $ORIGIN/@loader_path rpath baked in
+#         .envrc, or exe-dir DLL search on Windows.
+#   etc/  example parser configs
+# qdb-pkg-archives repackages this .tar.zst into the external .tar.gz
+# verbatim, so the internal and external layouts are identical.
 
 mkdir -p "${BASE_DIR}/artifacts"
+
+PKG_DIR="${BASE_DIR}/artifacts/pkg"
+rm -rf "${PKG_DIR}"
+mkdir -p "${PKG_DIR}/bin" "${PKG_DIR}/etc"
+
+cp "${CONNECTOR_BIN}" "${PKG_DIR}/bin/"
+
+shopt -s nullglob
+case "${OS}" in
+    windows ) QDB_RUNTIME_LIBS=("${BASE_DIR}/qdb/bin/qdb_api.dll") ;;
+    darwin )  QDB_RUNTIME_LIBS=("${BASE_DIR}/qdb/lib/"libqdb_api*.dylib) ;;
+    * )       QDB_RUNTIME_LIBS=("${BASE_DIR}/qdb/lib/"libqdb_api*.so*) ;;
+esac
+shopt -u nullglob
+
+if [[ ${#QDB_RUNTIME_LIBS[@]} -eq 0 || ! -f "${QDB_RUNTIME_LIBS[0]}" ]]; then
+    echo "ERROR: no libqdb_api runtime library found for packaging" >&2
+    exit 1
+fi
+
+cp "${QDB_RUNTIME_LIBS[@]}" "${PKG_DIR}/bin/"
+
+cp "${BASE_DIR}/examples/finance-ohlc.yaml" \
+   "${BASE_DIR}/examples/industrial-sensor.yaml" \
+   "${BASE_DIR}/examples/network-metrics.yaml" \
+   "${PKG_DIR}/etc/"
 
 ARCHIVE="${BASE_DIR}/artifacts/qdb-${VERSION}-${OS}-${ARCH}-nats-connector.tar.zst"
 
@@ -322,7 +357,9 @@ ARCHIVE="${BASE_DIR}/artifacts/qdb-${VERSION}-${OS}-${ARCH}-nats-connector.tar.z
 # (FreeBSD, macOS) as long as zstd is on PATH; avoids format-flag divergence.
 tar --use-compress-program=zstd \
     -cf "${ARCHIVE}" \
-    -C "${BASE_DIR}" \
-    "bin/qdb-nats-connector${SUFFIX}"
+    -C "${PKG_DIR}" \
+    bin etc
+
+rm -rf "${PKG_DIR}"
 
 echo "Packaged: ${ARCHIVE} ($(du -h "${ARCHIVE}" | cut -f1))"

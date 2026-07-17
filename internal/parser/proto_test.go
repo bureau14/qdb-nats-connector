@@ -252,6 +252,39 @@ func TestParseProtobufProtoFileEquivalence(t *testing.T) {
 	assert.Equal(t, "2023-11-14T22:13:20.123456789Z", fromProto["created_at"])
 }
 
+// TestParseProtobufProtoFileSameDirImport pins the proto_file import
+// contract: the file's own directory is the import root, so a sibling
+// import resolves with no extra configuration (and google/protobuf/*
+// standard imports always resolve, per the equivalence test).
+func TestParseProtobufProtoFileSameDirImport(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "common.proto"), []byte(`syntax = "proto3";
+package sibling.v1;
+message Meta { string unit = 1; }
+`), 0o600))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "outer.proto"), []byte(`syntax = "proto3";
+package sibling.v1;
+import "common.proto";
+message Outer {
+  string name = 1;
+  Meta meta = 2;
+}
+`), 0o600))
+
+	step, err := makeParseProtobufStep(map[string]interface{}{
+		"proto_file":   filepath.Join(dir, "outer.proto"),
+		"message_type": "sibling.v1.Outer",
+	})
+	require.NoError(t, err)
+
+	// Field 1 (name), wire type 2, value "abc".
+	state := &ParseState{Data: []byte{0x0A, 0x03, 'a', 'b', 'c'}, Fields: map[string]interface{}{}}
+	require.NoError(t, step(state))
+	assert.Equal(t, "abc", state.Fields["name"])
+}
+
 // writeSchemaPipelineYAML writes a minimal parse_protobuf pipeline config
 // referencing schemaPath under schemaKey (descriptor_file or proto_file),
 // returning the config path.

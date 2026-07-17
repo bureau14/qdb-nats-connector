@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260707072009-1675a4d77067
+	github.com/coreos/go-systemd/v22 v22.6.0
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.51.0
 	github.com/prometheus/client_golang v1.23.2

@@ -23,12 +23,13 @@ import (
 	"pgregory.net/rapid"
 )
 
-// Descriptor path is relative to internal/parser (the test working dir);
+// Schema paths are relative to internal/parser (the test working dir);
 // the shared marshalling helpers live in prototest (same embedded schema).
 const (
-	testEnvelopeDesc = "prototest/testdata/envelope.desc"
-	testEnvelopeType = prototest.EnvelopeType
-	testInnerType    = prototest.InnerType
+	testEnvelopeDesc  = "prototest/testdata/envelope.desc"
+	testEnvelopeProto = "prototest/testdata/envelope.proto"
+	testEnvelopeType  = prototest.EnvelopeType
+	testInnerType     = prototest.InnerType
 )
 
 // requireParsingFailedError asserts err is a yaml_parser ParsingFailed error.
@@ -103,12 +104,27 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, garbageDesc.Close())
 
+	badSyntaxProto := filepath.Join(t.TempDir(), "bad.proto")
+	require.NoError(t, os.WriteFile(badSyntaxProto, []byte(`syntax = "proto3";
+message {`), 0o600))
+
+	badImportProto := filepath.Join(t.TempDir(), "badimport.proto")
+	require.NoError(t, os.WriteFile(badImportProto, []byte(`syntax = "proto3";
+import "nonexistent/missing.proto";
+message M { string a = 1; }
+`), 0o600))
+
 	cases := []struct {
 		name   string
 		config map[string]interface{}
 	}{
-		{"missing descriptor_file", map[string]interface{}{
+		{"neither descriptor_file nor proto_file", map[string]interface{}{
 			"message_type": testEnvelopeType,
+		}},
+		{"both descriptor_file and proto_file", map[string]interface{}{
+			"descriptor_file": testEnvelopeDesc,
+			"proto_file":      testEnvelopeProto,
+			"message_type":    testEnvelopeType,
 		}},
 		{"missing message_type", map[string]interface{}{
 			"descriptor_file": testEnvelopeDesc,
@@ -116,6 +132,30 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 		{"nonexistent descriptor file", map[string]interface{}{
 			"descriptor_file": "testdata/nonexistent.desc",
 			"message_type":    testEnvelopeType,
+		}},
+		{"proto_file empty", map[string]interface{}{
+			"proto_file":   "",
+			"message_type": testEnvelopeType,
+		}},
+		{"proto_file not a string", map[string]interface{}{
+			"proto_file":   7,
+			"message_type": testEnvelopeType,
+		}},
+		{"nonexistent proto file", map[string]interface{}{
+			"proto_file":   "testdata/nonexistent.proto",
+			"message_type": testEnvelopeType,
+		}},
+		{"proto file syntax error", map[string]interface{}{
+			"proto_file":   badSyntaxProto,
+			"message_type": testEnvelopeType,
+		}},
+		{"proto file unresolvable import", map[string]interface{}{
+			"proto_file":   badImportProto,
+			"message_type": "M",
+		}},
+		{"unknown message type via proto_file", map[string]interface{}{
+			"proto_file":   testEnvelopeProto,
+			"message_type": "test.v1.Nonexistent",
 		}},
 		{"garbage descriptor file", map[string]interface{}{
 			"descriptor_file": garbageDesc.Name(),
@@ -173,6 +213,43 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 			assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
 		})
 	}
+}
+
+// TestParseProtobufProtoFileEquivalence pins the two schema front-ends to
+// identical decode output: the same payload decoded via the protoc-compiled
+// descriptor and via in-process .proto compilation yields equal fields.
+// envelope.proto imports google/protobuf/timestamp.proto, so this also
+// exercises protocompile's standard imports (the in-process replacement for
+// protoc --include_imports).
+func TestParseProtobufProtoFileEquivalence(t *testing.T) {
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		fields := m.Descriptor().Fields()
+		prototest.SetStringField(m, "name", "sensor-a")
+		m.Set(fields.ByName("count"), protoreflect.ValueOfInt64(42))
+		m.Set(fields.ByName("ratio"), protoreflect.ValueOfFloat64(0.5))
+		prototest.SetTimestampField(m, "created_at", 1700000000, 123456789)
+		prototest.SetBlobsEntry(m, 3, []byte{0xAA})
+	})
+
+	decode := func(schemaKey, schemaPath string) map[string]interface{} {
+		step, err := makeParseProtobufStep(map[string]interface{}{
+			schemaKey:      schemaPath,
+			"message_type": testEnvelopeType,
+		})
+		require.NoError(t, err)
+
+		state := &ParseState{Data: payload, Fields: map[string]interface{}{}}
+		require.NoError(t, step(state))
+
+		return state.Fields
+	}
+
+	fromDesc := decode("descriptor_file", testEnvelopeDesc)
+	fromProto := decode("proto_file", testEnvelopeProto)
+
+	assert.Equal(t, fromDesc, fromProto)
+	assert.Equal(t, "sensor-a", fromProto["name"])
+	assert.Equal(t, "2023-11-14T22:13:20.123456789Z", fromProto["created_at"])
 }
 
 // writeDescriptorPipelineYAML writes a minimal parse_protobuf pipeline

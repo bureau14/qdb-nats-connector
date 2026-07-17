@@ -3,16 +3,25 @@
 // Types: protoStepConfig, protoDecoder
 // Ex: makeParseProtobufStep(config) → step decoding state.Data via dynamicpb
 //
+// Schemas arrive through one of two mutually exclusive front-ends: a
+// protoc-compiled FileDescriptorSet (descriptor_file) or a raw .proto
+// source compiled in-process at pipeline compile time (proto_file). Both
+// converge on the same *descriptorpb.FileDescriptorSet before message
+// resolution, so decode behavior is identical by construction.
+//
 // Strings produced here follow the memory pinning contract (see yaml.go
 // header): fmt.Sprintf, direct concatenation, and simple conversions only.
 package parser
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/bufbuild/protocompile"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -29,31 +38,65 @@ const protoTimestampName protoreflect.FullName = "google.protobuf.Timestamp"
 
 // protoStepConfig: compile-time configuration of a parse_protobuf step.
 type protoStepConfig struct {
-	descriptorFile string
+	descriptorFile string // protoc-compiled FileDescriptorSet path; "" = compile protoFile
+	protoFile      string // raw .proto source path; "" = load descriptorFile
 	messageType    string
 	source         string                                                  // original dot-path, for error messages; "" = decode state.Data
 	lookupSource   func(fields map[string]interface{}) (interface{}, bool) // nil = decode state.Data
 	target         string                                                  // top-level key to nest output under; "" = merge at root
 }
 
-// parseProtoStepConfig validates parse_protobuf step config.
-// In: config["descriptor_file"] - path to a protoc-compiled FileDescriptorSet;
+// protoPathOption reads an optional path option: an absent key is fine, a
+// present key must hold a non-empty string.
+// In: config map[string]interface{} - step config
 //
-//	relative paths in file-loaded configs are pre-resolved against the
-//	config directory (resolveDescriptorPaths); programmatic configs are
-//	cwd-relative
+//	key string - option name
+//
+// Out: string - path ("" if absent); bool - key present and valid
+// Ex: protoPathOption(config, "proto_file") → "x.proto", true, nil
+func protoPathOption(config map[string]interface{}, key string) (path string, present bool, err error) {
+	raw, present := config[key]
+	if !present {
+		return "", false, nil
+	}
+
+	path, ok := raw.(string)
+	if !ok || path == "" {
+		return "", false, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("parse_protobuf '%s' must be a non-empty string", key))
+	}
+
+	return path, true, nil
+}
+
+// parseProtoStepConfig validates parse_protobuf step config.
+// In: config["descriptor_file"] - path to a protoc-compiled FileDescriptorSet
+//
+//	config["proto_file"] - path to a raw .proto source, compiled in-process;
+//	exactly one of descriptor_file / proto_file is required. Relative paths
+//	in file-loaded configs are pre-resolved against the config directory
+//	(resolveDescriptorPaths); programmatic configs are cwd-relative
 //
 //	config["message_type"] - fully-qualified message name to decode
 //	config["source"] - optional dot-path to a []byte/string field to decode
 //	config["target"] - optional top-level key to nest decoded fields under
 //
 // Out: protoStepConfig - validated config
-// Ex: parseProtoStepConfig({"descriptor_file": "x.desc", "message_type": "test.v1.Envelope"}) → cfg
+// Ex: parseProtoStepConfig({"proto_file": "x.proto", "message_type": "test.v1.Envelope"}) → cfg
 func parseProtoStepConfig(config map[string]interface{}) (protoStepConfig, error) {
-	descriptorFile, ok := config["descriptor_file"].(string)
-	if !ok || descriptorFile == "" {
+	descriptorFile, hasDescriptor, err := protoPathOption(config, "descriptor_file")
+	if err != nil {
+		return protoStepConfig{}, err
+	}
+
+	protoFile, hasProto, err := protoPathOption(config, "proto_file")
+	if err != nil {
+		return protoStepConfig{}, err
+	}
+
+	if hasDescriptor == hasProto {
 		return protoStepConfig{}, connectorErrors.NewInvalidConfigError("yaml_parser",
-			"parse_protobuf step requires a 'descriptor_file' string option")
+			"parse_protobuf step requires exactly one of 'descriptor_file' or 'proto_file'")
 	}
 
 	messageType, ok := config["message_type"].(string)
@@ -62,7 +105,7 @@ func parseProtoStepConfig(config map[string]interface{}) (protoStepConfig, error
 			"parse_protobuf step requires a 'message_type' string option")
 	}
 
-	cfg := protoStepConfig{descriptorFile: descriptorFile, messageType: messageType}
+	cfg := protoStepConfig{descriptorFile: descriptorFile, protoFile: protoFile, messageType: messageType}
 
 	if raw, present := config["source"]; present {
 		source, ok := raw.(string)
@@ -111,6 +154,75 @@ func loadDescriptorSet(path string) (*descriptorpb.FileDescriptorSet, error) {
 	}
 
 	return fds, nil
+}
+
+// appendFileDescriptors appends fd and its transitive imports to fds,
+// dependencies first, deduplicated by path.
+// In: fd protoreflect.FileDescriptor - compiled file
+//
+//	fds *descriptorpb.FileDescriptorSet - accumulator (mutated)
+//	seen map[string]bool - paths already appended (mutated)
+//
+// Ex: appendFileDescriptors(fd, fds, seen) → fds.File = [timestamp.proto, x.proto]
+func appendFileDescriptors(fd protoreflect.FileDescriptor, fds *descriptorpb.FileDescriptorSet, seen map[string]bool) {
+	if seen[fd.Path()] {
+		return
+	}
+	seen[fd.Path()] = true
+
+	imports := fd.Imports()
+	for i := range imports.Len() {
+		appendFileDescriptors(imports.Get(i).FileDescriptor, fds, seen)
+	}
+
+	fds.File = append(fds.File, protodesc.ToFileDescriptorProto(fd))
+}
+
+// compileProtoFile compiles a raw .proto source into the same descriptor
+// set shape loadDescriptorSet reads from disk, so everything downstream
+// (registry build, message resolution, dynamicpb decode) is shared between
+// the two front-ends. The file's own directory is the import root:
+// same-directory imports resolve implicitly, and protoc's standard imports
+// (google/protobuf/*.proto) come from protocompile.WithStandardImports -
+// the in-process equivalent of protoc --include_imports. Runs once at
+// pipeline compile (startup), never per message; context.Background() is
+// deliberate - step factories have no context and this is a bounded local
+// compile, not I/O to a remote service.
+// In: path string - .proto source file path
+// Out: *descriptorpb.FileDescriptorSet - compiled set, dependencies first
+// Ex: compileProtoFile("idf_v1_min.proto") → fds
+func compileProtoFile(path string) (*descriptorpb.FileDescriptorSet, error) {
+	compiler := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(&protocompile.SourceResolver{
+			ImportPaths: []string{filepath.Dir(path)},
+		}),
+	}
+
+	files, err := compiler.Compile(context.Background(), filepath.Base(path))
+	if err != nil {
+		return nil, connectorErrors.NewInvalidConfigError("yaml_parser",
+			fmt.Sprintf("failed to compile proto file '%s': %v", path, err))
+	}
+
+	fds := &descriptorpb.FileDescriptorSet{}
+	appendFileDescriptors(files[0], fds, map[string]bool{})
+
+	return fds, nil
+}
+
+// loadStepDescriptorSet materializes a step's descriptor set from its
+// configured front-end: load a protoc-compiled file (descriptor_file) or
+// compile raw source in-process (proto_file). parseProtoStepConfig
+// guarantees exactly one is set.
+// In: cfg protoStepConfig - validated step config
+// Out: *descriptorpb.FileDescriptorSet - descriptor set
+// Ex: loadStepDescriptorSet(cfg) → fds
+func loadStepDescriptorSet(cfg protoStepConfig) (*descriptorpb.FileDescriptorSet, error) {
+	if cfg.protoFile != "" {
+		return compileProtoFile(cfg.protoFile)
+	}
+
+	return loadDescriptorSet(cfg.descriptorFile)
 }
 
 // formatProtoTimestamp renders a google.protobuf.Timestamp message as an
@@ -260,12 +372,13 @@ type protoDecoder struct {
 	desc protoreflect.MessageDescriptor
 }
 
-// newProtoDecoder loads the descriptor set and resolves the message type.
+// newProtoDecoder materializes the descriptor set and resolves the message
+// type.
 // In: cfg protoStepConfig - validated step config
 // Out: *protoDecoder - ready-to-use decoder
 // Ex: newProtoDecoder(cfg) → decoder
 func newProtoDecoder(cfg protoStepConfig) (*protoDecoder, error) {
-	fds, err := loadDescriptorSet(cfg.descriptorFile)
+	fds, err := loadStepDescriptorSet(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +475,8 @@ func resolveProtoSource(state *ParseState, cfg protoStepConfig) ([]byte, error) 
 //
 // In: config["descriptor_file"] - protoc-compiled FileDescriptorSet path
 //
+//	config["proto_file"] - raw .proto source path, compiled in-process;
+//	exactly one of descriptor_file / proto_file is required
 //	(config-dir-relative when file-loaded, cwd-relative when programmatic)
 //
 //	config["message_type"] - fully-qualified message name
@@ -369,7 +484,7 @@ func resolveProtoSource(state *ParseState, cfg protoStepConfig) ([]byte, error) 
 //	config["target"] - optional top-level key to nest decoded fields under
 //
 // Out: TransformationStep - decodes into state.Fields
-// Ex: makeParseProtobufStep({"descriptor_file": "x.desc", "message_type": "test.v1.Envelope"}) → step
+// Ex: makeParseProtobufStep({"proto_file": "x.proto", "message_type": "test.v1.Envelope"}) → step
 func makeParseProtobufStep(config map[string]interface{}) (TransformationStep, error) {
 	cfg, err := parseProtoStepConfig(config)
 	if err != nil {

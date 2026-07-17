@@ -66,6 +66,10 @@ type Connector struct {
 	// and nil-safe histograms shared with the workers.
 	fetchCounters
 	metrics *metrics.Metrics
+
+	// onReady: fired once at the running transition (see Options.OnReady);
+	// nil = no notification.
+	onReady func()
 }
 
 // NewConnector creates NATS→QuasarDB connector.
@@ -145,6 +149,7 @@ func NewConnector(opts *Options) (*Connector, error) {
 		rebindMax:      rebindBackoffMax,
 		rebindAttempts: rebindMaxAttempts,
 		metrics:        opts.Metrics,
+		onReady:        opts.OnReady,
 	}, nil
 }
 
@@ -230,6 +235,10 @@ func (c *Connector) RunWithContext(ctx context.Context) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	slog.Info("Connector running, processing messages...")
+
+	if c.onReady != nil {
+		c.onReady()
+	}
 
 	// Wait for error, signal, or cancellation
 	select {

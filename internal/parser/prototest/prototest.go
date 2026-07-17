@@ -36,6 +36,12 @@ const (
 //go:embed testdata/envelope.desc
 var envelopeDesc []byte
 
+// envelopeProto is the raw .proto source envelope.desc was compiled from -
+// the same schema through the parse_protobuf proto_file front-end.
+//
+//go:embed testdata/envelope.proto
+var envelopeProto []byte
+
 // WriteDescriptor writes the embedded descriptor set into dir and returns
 // its path. Use it to place envelope.desc next to a generated YAML config
 // so a relative descriptor_file resolves against the config directory.
@@ -46,6 +52,21 @@ func WriteDescriptor(t *testing.T, dir string) string {
 	err := os.WriteFile(path, envelopeDesc, 0o600)
 	if err != nil {
 		t.Fatalf("prototest: write descriptor: %v", err)
+	}
+
+	return path
+}
+
+// WriteProtoSource writes the embedded .proto source into dir and returns
+// its path. Use it to place envelope.proto next to a generated YAML config
+// so a relative proto_file resolves against the config directory.
+func WriteProtoSource(t *testing.T, dir string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "envelope.proto")
+	err := os.WriteFile(path, envelopeProto, 0o600)
+	if err != nil {
+		t.Fatalf("prototest: write proto source: %v", err)
 	}
 
 	return path

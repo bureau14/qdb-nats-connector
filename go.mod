@@ -3,6 +3,7 @@ module github.com/bureau14/qdb-nats-connector
 go 1.25.0
 
 require (
+	github.com/bufbuild/protocompile v0.14.1
 	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260707072009-1675a4d77067
 	github.com/coreos/go-systemd/v22 v22.6.0
 	github.com/google/uuid v1.6.0
@@ -39,6 +40,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 )

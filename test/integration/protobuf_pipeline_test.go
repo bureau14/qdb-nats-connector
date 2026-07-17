@@ -58,8 +58,9 @@ type protoRowExpect struct {
 }
 
 // protoPipelineYAML renders the composed SKF-shaped pipeline config with a
-// RELATIVE descriptor_file, exercising config-dir resolution end-to-end.
-func protoPipelineYAML(tableName string) string {
+// RELATIVE schema path under schemaKey (descriptor_file or proto_file),
+// exercising config-dir resolution end-to-end for both front-ends.
+func protoPipelineYAML(tableName, schemaKey, schemaFile string) string {
 	return `
 output:
   columns:
@@ -79,7 +80,7 @@ output:
 transformations:
   - step: "parse_protobuf"
     config:
-      descriptor_file: "envelope.desc"
+      ` + schemaKey + `: "` + schemaFile + `"
       message_type: "` + prototest.EnvelopeType + `"
   - step: "extract_map_entry"
     config:
@@ -90,7 +91,7 @@ transformations:
       allowed_keys: ["3"]
   - step: "parse_protobuf"
     config:
-      descriptor_file: "envelope.desc"
+      ` + schemaKey + `: "` + schemaFile + `"
       message_type: "` + prototest.InnerType + `"
       source: "attribute_raw"
       target: "attr"
@@ -128,16 +129,22 @@ transformations:
 `
 }
 
-// writeProtoPipelineConfig writes the YAML config and the descriptor SIDE BY
-// SIDE into dir (the relocatable deployment bundle shape); returns the
-// config path.
-func writeProtoPipelineConfig(t *testing.T, dir, tableName string) string {
+// writeProtoPipelineConfig writes the YAML config and its schema file SIDE
+// BY SIDE into dir (the relocatable deployment bundle shape); returns the
+// config path. schemaKey selects the front-end: descriptor_file ships the
+// protoc-compiled envelope.desc, proto_file ships the raw envelope.proto.
+func writeProtoPipelineConfig(t *testing.T, dir, tableName, schemaKey string) string {
 	t.Helper()
 
-	prototest.WriteDescriptor(t, dir)
+	var schemaFile string
+	if schemaKey == "proto_file" {
+		schemaFile = filepath.Base(prototest.WriteProtoSource(t, dir))
+	} else {
+		schemaFile = filepath.Base(prototest.WriteDescriptor(t, dir))
+	}
 
 	configPath := filepath.Join(dir, "pipeline.yaml")
-	require.NoError(t, os.WriteFile(configPath, []byte(protoPipelineYAML(tableName)), 0o600))
+	require.NoError(t, os.WriteFile(configPath, []byte(protoPipelineYAML(tableName, schemaKey, schemaFile)), 0o600))
 
 	return configPath
 }
@@ -375,8 +382,22 @@ func assertProtoRows(t *testing.T, expected, actual map[int64]protoRowExpect) {
 
 // TestProtobufPipelineEndToEnd is the M3 exit criterion: the composed
 // protobuf pipeline against real NATS JetStream and QuasarDB, with exact
-// drop accounting via Connector.Stats after a drained shutdown.
+// drop accounting via Connector.Stats after a drained shutdown. Runs once
+// per schema front-end: the protoc-compiled descriptor and the raw .proto
+// source compiled in-process must behave identically end-to-end.
 func TestProtobufPipelineEndToEnd(t *testing.T) {
+	for _, schemaKey := range []string{"descriptor_file", "proto_file"} {
+		t.Run(schemaKey, func(t *testing.T) {
+			runProtobufPipelineEndToEnd(t, schemaKey)
+		})
+	}
+}
+
+// runProtobufPipelineEndToEnd runs the full pipeline against a hermetic
+// JetStream and a real QuasarDB with the given parse_protobuf front-end.
+func runProtobufPipelineEndToEnd(t *testing.T, schemaKey string) {
+	t.Helper()
+
 	url := startNatsServer(t, t.TempDir())
 	js := jetStreamContext(t, url)
 
@@ -398,7 +419,7 @@ func TestProtobufPipelineEndToEnd(t *testing.T) {
 
 	expected := publishProtoMix(t, js)
 
-	configPath := writeProtoPipelineConfig(t, t.TempDir(), tableName)
+	configPath := writeProtoPipelineConfig(t, t.TempDir(), tableName, schemaKey)
 	conn, done, stop := startConnector(t, []string{
 		"--nats", url,
 		"--stream", protoStreamName,

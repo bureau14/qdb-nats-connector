@@ -1,0 +1,28 @@
+# Copyright (c) 2009-2025, quasardb SAS. All rights reserved.
+# systemd unit for the QuasarDB NATS connector.
+# Type=notify: READY=1 after the connector starts processing;
+# WATCHDOG=1 pets gated on the same verdict as /livez.
+
+[Unit]
+Description=QuasarDB NATS connector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/qdb-nats-connector
+# READY=1 is only sent after the initial NATS connect succeeds.
+TimeoutStartSec=300
+# Connector pets at WatchdogSec/2. Keep WatchdogSec >= 3x the 30s
+# health-monitor cadence (same tolerance as /livez heartbeat-stale).
+WatchdogSec=90
+Restart=on-failure
+RestartSec=5
+# All flags are available as QDB_NATS_* environment variables, e.g.:
+#Environment=QDB_NATS_NATS=nats://127.0.0.1:4222
+#Environment=QDB_NATS_STREAM=events
+#Environment=QDB_NATS_QDB=qdb://127.0.0.1:2836
+#EnvironmentFile=-/etc/qdb/qdb-nats-connector.env
+
+[Install]
+WantedBy=multi-user.target

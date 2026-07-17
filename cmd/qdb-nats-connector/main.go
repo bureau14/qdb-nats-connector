@@ -150,6 +150,10 @@ func runMain() int {
 	// construction.
 	stats := buildStats(opts)
 
+	// sd-notify READY callback: injected before the connector exists
+	// (like OnTableWrites); the connector stays systemd-agnostic.
+	opts.OnReady = sdNotifyReady
+
 	// Create connector (parser is created internally by workers)
 	c, err := connector.NewConnector(opts)
 	if err != nil {
@@ -168,13 +172,19 @@ func runMain() int {
 	}
 	startStats(stats, c)
 
+	// 5. Pet the systemd watchdog while alive (nil outside systemd or
+	// when WATCHDOG_USEC is unset)
+	wd := newWatchdogPetter(c)
+	startWatchdog(wd)
+
 	slog.Info("Starting connector")
 
 	// Create root context for the application
 	ctx := context.Background()
 
-	// 5. Run connector: blocks until shutdown|error
+	// 6. Run connector: blocks until shutdown|error
 	err = c.RunWithContext(ctx)
+	stopWatchdog(wd)
 	stopStats(stats)
 	stopTelemetry(tel)
 	if err != nil && err != context.Canceled {
@@ -288,6 +298,30 @@ func stopStats(sl *telemetry.StatsLogger) {
 	}
 
 	sl.Stop()
+}
+
+// startWatchdog launches the watchdog pet goroutine (nil-safe).
+// In: wd *watchdogPetter - petter or nil
+// Out: none
+// Ex: startWatchdog(wd) → WATCHDOG=1 per tick while alive
+func startWatchdog(wd *watchdogPetter) {
+	if wd == nil {
+		return
+	}
+
+	wd.Start()
+}
+
+// stopWatchdog stops the watchdog pet goroutine (nil-safe).
+// In: wd *watchdogPetter - running petter or nil
+// Out: none
+// Ex: stopWatchdog(wd) → pet goroutine exited
+func stopWatchdog(wd *watchdogPetter) {
+	if wd == nil {
+		return
+	}
+
+	wd.Stop()
 }
 
 // stopTelemetry gracefully stops the probe server (nil-safe).

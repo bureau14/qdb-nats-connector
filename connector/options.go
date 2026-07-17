@@ -104,6 +104,12 @@ type Options struct {
 	// path.
 	OnTableWrites func([]TableWrite) `json:"-"`
 
+	// OnReady: fired once when the connector transitions to running
+	// (source connected, workers + monitor started). Injected
+	// programmatically (like OnTableWrites); nil = no notification.
+	// Called synchronously from RunWithContext -- must not block.
+	OnReady func() `json:"-"`
+
 	// Internal parsed options for OptionsProvider interface
 	parsedSinkOptions   sink.Options
 	parsedSourceOptions struct {

@@ -351,6 +351,11 @@ cp "${BASE_DIR}/examples/finance-ohlc.yaml" \
    "${BASE_DIR}/examples/network-metrics.yaml" \
    "${PKG_DIR}/etc/"
 
+# systemd unit: linux-only packaging artifact.
+if [[ "${OS}" == "linux" ]]; then
+    cp "${BASE_DIR}/examples/qdb-nats-connector.service" "${PKG_DIR}/etc/"
+fi
+
 ARCHIVE="${BASE_DIR}/artifacts/qdb-${VERSION}-${OS}-${ARCH}-nats-connector.tar.zst"
 
 # --use-compress-program=zstd works on both GNU tar (Linux) and BSD tar

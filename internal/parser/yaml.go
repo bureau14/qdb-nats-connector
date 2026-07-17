@@ -743,11 +743,12 @@ func (p *YAMLParser) newParseState() *ParseState {
 	return state
 }
 
-// resolveDescriptorPaths rewrites relative parse_protobuf descriptor_file
-// values to be baseDir-relative, making a config + descriptor bundle
-// relocatable (both files side by side, wherever mounted). Absolute paths
-// pass through untouched. Only file-loaded configs get this treatment;
-// programmatic NewYAMLParserFromConfig callers keep cwd/absolute semantics.
+// resolveDescriptorPaths rewrites relative parse_protobuf schema paths
+// (descriptor_file and proto_file) to be baseDir-relative, making a config
+// + schema bundle relocatable (both files side by side, wherever mounted).
+// Absolute paths pass through untouched. Only file-loaded configs get this
+// treatment; programmatic NewYAMLParserFromConfig callers keep cwd/absolute
+// semantics.
 // In: config *YAMLConfig - freshly unmarshalled config (mutated in place)
 //
 //	baseDir string - directory of the YAML config file
@@ -760,12 +761,14 @@ func resolveDescriptorPaths(config *YAMLConfig, baseDir string) {
 			continue
 		}
 
-		path, ok := spec.Config["descriptor_file"].(string)
-		if !ok || path == "" || filepath.IsAbs(path) {
-			continue
-		}
+		for _, key := range []string{"descriptor_file", "proto_file"} {
+			path, ok := spec.Config[key].(string)
+			if !ok || path == "" || filepath.IsAbs(path) {
+				continue
+			}
 
-		spec.Config["descriptor_file"] = filepath.Join(baseDir, path)
+			spec.Config[key] = filepath.Join(baseDir, path)
+		}
 	}
 }
 

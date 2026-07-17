@@ -252,12 +252,13 @@ func TestParseProtobufProtoFileEquivalence(t *testing.T) {
 	assert.Equal(t, "2023-11-14T22:13:20.123456789Z", fromProto["created_at"])
 }
 
-// writeDescriptorPipelineYAML writes a minimal parse_protobuf pipeline
-// config referencing descriptorFile, returning the config path.
-// descriptor_file is SINGLE-quoted: absolute Windows temp paths contain
+// writeSchemaPipelineYAML writes a minimal parse_protobuf pipeline config
+// referencing schemaPath under schemaKey (descriptor_file or proto_file),
+// returning the config path.
+// The schema path is SINGLE-quoted: absolute Windows temp paths contain
 // backslashes, and in a double-quoted YAML scalar `\U...` is a unicode
 // escape ("did not find expected hexdecimal number").
-func writeDescriptorPipelineYAML(t *testing.T, dir, descriptorFile string) string {
+func writeSchemaPipelineYAML(t *testing.T, dir, schemaKey, schemaPath string) string {
 	t.Helper()
 
 	content := `
@@ -268,7 +269,7 @@ output:
 transformations:
   - step: "parse_protobuf"
     config:
-      descriptor_file: '` + descriptorFile + `'
+      ` + schemaKey + `: '` + schemaPath + `'
       message_type: "` + testEnvelopeType + `"
   - step: "extract_table"
     config:
@@ -294,7 +295,7 @@ func TestDescriptorFileResolution(t *testing.T) {
 		require.NoError(t, os.MkdirAll(dir, 0o750))
 		prototest.WriteDescriptor(t, dir)
 
-		configPath := writeDescriptorPipelineYAML(t, dir, "envelope.desc")
+		configPath := writeSchemaPipelineYAML(t, dir, "descriptor_file", "envelope.desc")
 
 		parser, err := NewYAMLParser(configPath)
 		require.NoError(t, err)
@@ -305,7 +306,7 @@ func TestDescriptorFileResolution(t *testing.T) {
 		descDir := t.TempDir()
 		descPath := prototest.WriteDescriptor(t, descDir)
 
-		configPath := writeDescriptorPipelineYAML(t, t.TempDir(), descPath)
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "descriptor_file", descPath)
 
 		parser, err := NewYAMLParser(configPath)
 		require.NoError(t, err)
@@ -313,7 +314,7 @@ func TestDescriptorFileResolution(t *testing.T) {
 	})
 
 	t.Run("relative missing next to config fails compile", func(t *testing.T) {
-		configPath := writeDescriptorPipelineYAML(t, t.TempDir(), "envelope.desc")
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "descriptor_file", "envelope.desc")
 
 		parser, err := NewYAMLParser(configPath)
 		require.Error(t, err)
@@ -328,6 +329,59 @@ func TestDescriptorFileResolution(t *testing.T) {
 		// testEnvelopeDesc is relative to internal/parser (the test cwd);
 		// NewYAMLParserFromConfig must not rewrite it.
 		_, err := NewYAMLParserFromConfig(envelopePipelineConfig())
+		require.NoError(t, err)
+	})
+}
+
+// TestProtoFileResolution pins the same path semantics for proto_file:
+// file-loaded configs resolve relative paths against the config directory
+// (yaml + proto ship as a relocatable bundle); absolute paths pass through.
+func TestProtoFileResolution(t *testing.T) {
+	t.Run("relative resolves against config dir", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "bundle")
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+		prototest.WriteProtoSource(t, dir)
+
+		configPath := writeSchemaPipelineYAML(t, dir, "proto_file", "envelope.proto")
+
+		parser, err := NewYAMLParser(configPath)
+		require.NoError(t, err)
+		require.NotNil(t, parser)
+	})
+
+	t.Run("absolute passes through", func(t *testing.T) {
+		protoDir := t.TempDir()
+		protoPath := prototest.WriteProtoSource(t, protoDir)
+
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "proto_file", protoPath)
+
+		parser, err := NewYAMLParser(configPath)
+		require.NoError(t, err)
+		require.NotNil(t, parser)
+	})
+
+	t.Run("relative missing next to config fails compile", func(t *testing.T) {
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "proto_file", "envelope.proto")
+
+		parser, err := NewYAMLParser(configPath)
+		require.Error(t, err)
+		assert.Nil(t, parser)
+
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	})
+
+	t.Run("programmatic config stays cwd-relative", func(t *testing.T) {
+		// testEnvelopeProto is relative to internal/parser (the test cwd);
+		// NewYAMLParserFromConfig must not rewrite it.
+		config := envelopePipelineConfig()
+		config.Transformations[0].Config = map[string]interface{}{
+			"proto_file":   testEnvelopeProto,
+			"message_type": testEnvelopeType,
+		}
+
+		_, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 	})
 }

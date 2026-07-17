@@ -64,6 +64,17 @@ func evaluateLiveness(src HealthSource, now time.Time) liveness {
 	return liveness{Alive: true}
 }
 
+// Alive reports the /livez verdict for non-HTTP consumers (systemd
+// watchdog): the exact same evaluator the /livez handler uses.
+// In: src HealthSource - probe inputs, now time.Time - evaluation clock
+// Out: bool - alive verdict, string - failure reason ("" when alive)
+// Ex: telemetry.Alive(conn, time.Now()) -> true, ""
+func Alive(src HealthSource, now time.Time) (alive bool, reason string) {
+	verdict := evaluateLiveness(src, now)
+
+	return verdict.Alive, verdict.Reason
+}
+
 // evaluateReadiness decides /readyz: ready iff NATS is connected, the
 // fetch side is healthy, and all circuit breakers are closed --
 // Connector.Healthy() plus the live connection check.

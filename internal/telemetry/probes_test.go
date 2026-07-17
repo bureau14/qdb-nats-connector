@@ -105,6 +105,51 @@ func TestLivezFailsOnStageStuck(t *testing.T) {
 	assert.Contains(t, verdict.Conditions, "stage-stuck:worker-1")
 }
 
+func TestAliveMatchesLivezSemantics(t *testing.T) {
+	// Alive is the /livez verdict for non-HTTP consumers (systemd
+	// watchdog); pin it to the exact handler semantics.
+	cases := map[string]struct {
+		degrade    func(*fakeSource)
+		wantAlive  bool
+		wantReason string
+	}{
+		"green": {
+			degrade:   func(*fakeSource) {},
+			wantAlive: true,
+		},
+		"zero heartbeat startup grace": {
+			degrade:   func(s *fakeSource) { s.lastEval = time.Time{} },
+			wantAlive: true,
+		},
+		"stale heartbeat": {
+			degrade: func(s *fakeSource) {
+				s.lastEval = time.Now().Add(-heartbeatStaleAfter - time.Second)
+			},
+			wantAlive:  false,
+			wantReason: reasonHeartbeatStale,
+		},
+		"stage stuck": {
+			degrade: func(s *fakeSource) {
+				s.health.FetchHealthy = false
+				s.health.Conditions = []string{"stage-stuck:worker-1"}
+			},
+			wantAlive:  false,
+			wantReason: reasonStageStuck,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			src := greenSource()
+			tc.degrade(&src)
+
+			alive, reason := Alive(src, time.Now())
+			assert.Equal(t, tc.wantAlive, alive)
+			assert.Equal(t, tc.wantReason, reason)
+		})
+	}
+}
+
 func TestReadyzReadyWhenGreen(t *testing.T) {
 	code, body := probeCode(t, handleReadyz(greenSource()))
 	assert.Equal(t, http.StatusOK, code)

@@ -23,12 +23,13 @@ import (
 	"pgregory.net/rapid"
 )
 
-// Descriptor path is relative to internal/parser (the test working dir);
+// Schema paths are relative to internal/parser (the test working dir);
 // the shared marshalling helpers live in prototest (same embedded schema).
 const (
-	testEnvelopeDesc = "prototest/testdata/envelope.desc"
-	testEnvelopeType = prototest.EnvelopeType
-	testInnerType    = prototest.InnerType
+	testEnvelopeDesc  = "prototest/testdata/envelope.desc"
+	testEnvelopeProto = "prototest/testdata/envelope.proto"
+	testEnvelopeType  = prototest.EnvelopeType
+	testInnerType     = prototest.InnerType
 )
 
 // requireParsingFailedError asserts err is a yaml_parser ParsingFailed error.
@@ -103,12 +104,27 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, garbageDesc.Close())
 
+	badSyntaxProto := filepath.Join(t.TempDir(), "bad.proto")
+	require.NoError(t, os.WriteFile(badSyntaxProto, []byte(`syntax = "proto3";
+message {`), 0o600))
+
+	badImportProto := filepath.Join(t.TempDir(), "badimport.proto")
+	require.NoError(t, os.WriteFile(badImportProto, []byte(`syntax = "proto3";
+import "nonexistent/missing.proto";
+message M { string a = 1; }
+`), 0o600))
+
 	cases := []struct {
 		name   string
 		config map[string]interface{}
 	}{
-		{"missing descriptor_file", map[string]interface{}{
+		{"neither descriptor_file nor proto_file", map[string]interface{}{
 			"message_type": testEnvelopeType,
+		}},
+		{"both descriptor_file and proto_file", map[string]interface{}{
+			"descriptor_file": testEnvelopeDesc,
+			"proto_file":      testEnvelopeProto,
+			"message_type":    testEnvelopeType,
 		}},
 		{"missing message_type", map[string]interface{}{
 			"descriptor_file": testEnvelopeDesc,
@@ -116,6 +132,30 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 		{"nonexistent descriptor file", map[string]interface{}{
 			"descriptor_file": "testdata/nonexistent.desc",
 			"message_type":    testEnvelopeType,
+		}},
+		{"proto_file empty", map[string]interface{}{
+			"proto_file":   "",
+			"message_type": testEnvelopeType,
+		}},
+		{"proto_file not a string", map[string]interface{}{
+			"proto_file":   7,
+			"message_type": testEnvelopeType,
+		}},
+		{"nonexistent proto file", map[string]interface{}{
+			"proto_file":   "testdata/nonexistent.proto",
+			"message_type": testEnvelopeType,
+		}},
+		{"proto file syntax error", map[string]interface{}{
+			"proto_file":   badSyntaxProto,
+			"message_type": testEnvelopeType,
+		}},
+		{"proto file unresolvable import", map[string]interface{}{
+			"proto_file":   badImportProto,
+			"message_type": "M",
+		}},
+		{"unknown message type via proto_file", map[string]interface{}{
+			"proto_file":   testEnvelopeProto,
+			"message_type": "test.v1.Nonexistent",
 		}},
 		{"garbage descriptor file", map[string]interface{}{
 			"descriptor_file": garbageDesc.Name(),
@@ -175,12 +215,83 @@ func TestParseProtobufFactoryErrors(t *testing.T) {
 	}
 }
 
-// writeDescriptorPipelineYAML writes a minimal parse_protobuf pipeline
-// config referencing descriptorFile, returning the config path.
-// descriptor_file is SINGLE-quoted: absolute Windows temp paths contain
+// TestParseProtobufProtoFileEquivalence pins the two schema front-ends to
+// identical decode output: the same payload decoded via the protoc-compiled
+// descriptor and via in-process .proto compilation yields equal fields.
+// envelope.proto imports google/protobuf/timestamp.proto, so this also
+// exercises protocompile's standard imports (the in-process replacement for
+// protoc --include_imports).
+func TestParseProtobufProtoFileEquivalence(t *testing.T) {
+	payload := prototest.MarshalEnvelope(t, func(m protoreflect.Message) {
+		fields := m.Descriptor().Fields()
+		prototest.SetStringField(m, "name", "sensor-a")
+		m.Set(fields.ByName("count"), protoreflect.ValueOfInt64(42))
+		m.Set(fields.ByName("ratio"), protoreflect.ValueOfFloat64(0.5))
+		prototest.SetTimestampField(m, "created_at", 1700000000, 123456789)
+		prototest.SetBlobsEntry(m, 3, []byte{0xAA})
+	})
+
+	decode := func(schemaKey, schemaPath string) map[string]interface{} {
+		step, err := makeParseProtobufStep(map[string]interface{}{
+			schemaKey:      schemaPath,
+			"message_type": testEnvelopeType,
+		})
+		require.NoError(t, err)
+
+		state := &ParseState{Data: payload, Fields: map[string]interface{}{}}
+		require.NoError(t, step(state))
+
+		return state.Fields
+	}
+
+	fromDesc := decode("descriptor_file", testEnvelopeDesc)
+	fromProto := decode("proto_file", testEnvelopeProto)
+
+	assert.Equal(t, fromDesc, fromProto)
+	assert.Equal(t, "sensor-a", fromProto["name"])
+	assert.Equal(t, "2023-11-14T22:13:20.123456789Z", fromProto["created_at"])
+}
+
+// TestParseProtobufProtoFileSameDirImport pins the proto_file import
+// contract: the file's own directory is the import root, so a sibling
+// import resolves with no extra configuration (and google/protobuf/*
+// standard imports always resolve, per the equivalence test).
+func TestParseProtobufProtoFileSameDirImport(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "common.proto"), []byte(`syntax = "proto3";
+package sibling.v1;
+message Meta { string unit = 1; }
+`), 0o600))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "outer.proto"), []byte(`syntax = "proto3";
+package sibling.v1;
+import "common.proto";
+message Outer {
+  string name = 1;
+  Meta meta = 2;
+}
+`), 0o600))
+
+	step, err := makeParseProtobufStep(map[string]interface{}{
+		"proto_file":   filepath.Join(dir, "outer.proto"),
+		"message_type": "sibling.v1.Outer",
+	})
+	require.NoError(t, err)
+
+	// Field 1 (name), wire type 2, value "abc".
+	state := &ParseState{Data: []byte{0x0A, 0x03, 'a', 'b', 'c'}, Fields: map[string]interface{}{}}
+	require.NoError(t, step(state))
+	assert.Equal(t, "abc", state.Fields["name"])
+}
+
+// writeSchemaPipelineYAML writes a minimal parse_protobuf pipeline config
+// referencing schemaPath under schemaKey (descriptor_file or proto_file),
+// returning the config path.
+// The schema path is SINGLE-quoted: absolute Windows temp paths contain
 // backslashes, and in a double-quoted YAML scalar `\U...` is a unicode
 // escape ("did not find expected hexdecimal number").
-func writeDescriptorPipelineYAML(t *testing.T, dir, descriptorFile string) string {
+func writeSchemaPipelineYAML(t *testing.T, dir, schemaKey, schemaPath string) string {
 	t.Helper()
 
 	content := `
@@ -191,7 +302,7 @@ output:
 transformations:
   - step: "parse_protobuf"
     config:
-      descriptor_file: '` + descriptorFile + `'
+      ` + schemaKey + `: '` + schemaPath + `'
       message_type: "` + testEnvelopeType + `"
   - step: "extract_table"
     config:
@@ -217,7 +328,7 @@ func TestDescriptorFileResolution(t *testing.T) {
 		require.NoError(t, os.MkdirAll(dir, 0o750))
 		prototest.WriteDescriptor(t, dir)
 
-		configPath := writeDescriptorPipelineYAML(t, dir, "envelope.desc")
+		configPath := writeSchemaPipelineYAML(t, dir, "descriptor_file", "envelope.desc")
 
 		parser, err := NewYAMLParser(configPath)
 		require.NoError(t, err)
@@ -228,7 +339,7 @@ func TestDescriptorFileResolution(t *testing.T) {
 		descDir := t.TempDir()
 		descPath := prototest.WriteDescriptor(t, descDir)
 
-		configPath := writeDescriptorPipelineYAML(t, t.TempDir(), descPath)
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "descriptor_file", descPath)
 
 		parser, err := NewYAMLParser(configPath)
 		require.NoError(t, err)
@@ -236,7 +347,7 @@ func TestDescriptorFileResolution(t *testing.T) {
 	})
 
 	t.Run("relative missing next to config fails compile", func(t *testing.T) {
-		configPath := writeDescriptorPipelineYAML(t, t.TempDir(), "envelope.desc")
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "descriptor_file", "envelope.desc")
 
 		parser, err := NewYAMLParser(configPath)
 		require.Error(t, err)
@@ -251,6 +362,59 @@ func TestDescriptorFileResolution(t *testing.T) {
 		// testEnvelopeDesc is relative to internal/parser (the test cwd);
 		// NewYAMLParserFromConfig must not rewrite it.
 		_, err := NewYAMLParserFromConfig(envelopePipelineConfig())
+		require.NoError(t, err)
+	})
+}
+
+// TestProtoFileResolution pins the same path semantics for proto_file:
+// file-loaded configs resolve relative paths against the config directory
+// (yaml + proto ship as a relocatable bundle); absolute paths pass through.
+func TestProtoFileResolution(t *testing.T) {
+	t.Run("relative resolves against config dir", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "bundle")
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+		prototest.WriteProtoSource(t, dir)
+
+		configPath := writeSchemaPipelineYAML(t, dir, "proto_file", "envelope.proto")
+
+		parser, err := NewYAMLParser(configPath)
+		require.NoError(t, err)
+		require.NotNil(t, parser)
+	})
+
+	t.Run("absolute passes through", func(t *testing.T) {
+		protoDir := t.TempDir()
+		protoPath := prototest.WriteProtoSource(t, protoDir)
+
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "proto_file", protoPath)
+
+		parser, err := NewYAMLParser(configPath)
+		require.NoError(t, err)
+		require.NotNil(t, parser)
+	})
+
+	t.Run("relative missing next to config fails compile", func(t *testing.T) {
+		configPath := writeSchemaPipelineYAML(t, t.TempDir(), "proto_file", "envelope.proto")
+
+		parser, err := NewYAMLParser(configPath)
+		require.Error(t, err)
+		assert.Nil(t, parser)
+
+		var connErr *connectorErrors.ConnectorError
+		require.True(t, errors.As(err, &connErr))
+		assert.Equal(t, connectorErrors.ErrCodeInvalidConfig, connErr.Code)
+	})
+
+	t.Run("programmatic config stays cwd-relative", func(t *testing.T) {
+		// testEnvelopeProto is relative to internal/parser (the test cwd);
+		// NewYAMLParserFromConfig must not rewrite it.
+		config := envelopePipelineConfig()
+		config.Transformations[0].Config = map[string]interface{}{
+			"proto_file":   testEnvelopeProto,
+			"message_type": testEnvelopeType,
+		}
+
+		_, err := NewYAMLParserFromConfig(config)
 		require.NoError(t, err)
 	})
 }

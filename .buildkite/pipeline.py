@@ -36,6 +36,12 @@ from qdb_pipeline import (
 
 STEPS_DIR = Path(__file__).parent / "steps"
 
+# Pin QuasarDB artifact downloads to a specific remote ref.
+# When set, the qdb-artifacts download step pulls artifacts built from
+# this ref instead of the connector's own branch.  Set to None to
+# follow the connector branch (the default on master / 3.15.x).
+QDB_DOWNLOAD_REF = "refs/heads/3.14.x"
+
 # Connector-specific Platform overlays. Linux platforms run inside the
 # rhel7 builder container; other OSes run on bare agents (docker_image="").
 # No toolchain fields are set -- Go does not need c_compiler / cxx_compiler /
@@ -251,12 +257,13 @@ def generate_pipeline() -> Pipeline:
     file pattern lives next to the step it belongs to.
     """
     git_ref = get_git_ref()
+    download_ref = QDB_DOWNLOAD_REF or git_ref
     pipeline = Pipeline()
 
     lint = _lint_step()
     set_artifact_plugin_options(
         lint,
-        {"download": {"variant": "linux-haswell-release", "git-ref": git_ref}},
+        {"download": {"variant": "linux-haswell-release", "git-ref": download_ref}},
     )
     pipeline.add_step(CommandStep.from_dict(lint))
 
@@ -274,7 +281,7 @@ def generate_pipeline() -> Pipeline:
         set_artifact_plugin_options(
             step,
             {
-                "download": {"variant": variant, "git-ref": git_ref},
+                "download": {"variant": variant, "git-ref": download_ref},
                 "upload": {"variant": variant, "git-ref": git_ref},
                 "promote": {"variant": variant, "git-ref": git_ref},
             },

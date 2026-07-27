@@ -252,7 +252,7 @@ def generate_pipeline() -> Pipeline:
     file pattern lives next to the step it belongs to.
     """
     git_ref = get_git_ref()
-    qdb_git_ref = "refs/heads/3.14.x"
+    qdb_git_ref = "refs/tags/v3.14.2"
     pipeline = Pipeline()
 
     lint = _lint_step()

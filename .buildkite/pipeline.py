@@ -36,11 +36,6 @@ from qdb_pipeline import (
 
 STEPS_DIR = Path(__file__).parent / "steps"
 
-# Pin QuasarDB artifact downloads to a specific remote ref.
-# When set, the qdb-artifacts download step pulls artifacts built from
-# this ref instead of the connector's own branch.  Set to None to
-# follow the connector branch (the default on master / 3.15.x).
-QDB_DOWNLOAD_REF = "refs/heads/3.14.x"
 
 # Connector-specific Platform overlays. Linux platforms run inside the
 # rhel7 builder container; other OSes run on bare agents (docker_image="").
@@ -257,13 +252,24 @@ def generate_pipeline() -> Pipeline:
     file pattern lives next to the step it belongs to.
     """
     git_ref = get_git_ref()
-    download_ref = QDB_DOWNLOAD_REF or git_ref
+    qdb_git_ref = "refs/heads/3.14.x"
     pipeline = Pipeline()
 
     lint = _lint_step()
     set_artifact_plugin_options(
         lint,
-        {"download": {"variant": "linux-haswell-release", "git-ref": download_ref}},
+        {
+            "download": {
+                "variant": "linux-haswell-release",
+                "git-ref": git_ref,
+                "by_project": {
+                    "quasardb-build": {
+                        "variant": "linux-haswell-release",
+                        "git-ref": qdb_git_ref,
+                    },
+                },
+            },
+        },
     )
     pipeline.add_step(CommandStep.from_dict(lint))
 
@@ -281,7 +287,16 @@ def generate_pipeline() -> Pipeline:
         set_artifact_plugin_options(
             step,
             {
-                "download": {"variant": variant, "git-ref": download_ref},
+                "download": {
+                    "variant": variant,
+                    "git-ref": git_ref,
+                    "by_project": {
+                        "quasardb-build": {
+                            "variant": variant,
+                            "git-ref": qdb_git_ref,
+                        },
+                    },
+                },
                 "upload": {"variant": variant, "git-ref": git_ref},
                 "promote": {"variant": variant, "git-ref": git_ref},
             },

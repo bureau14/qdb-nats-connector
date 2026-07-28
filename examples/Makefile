@@ -116,6 +116,14 @@ define run_test_workflow
 	@NUM_MESSAGES=$(2) ./$(1).sh export 2>&1 || { $(call LOG_ERROR,Failed to export results for $(1)); ./$(1).sh stop 2>/dev/null || true; exit 1; }
 	@$(call LOG_INFO,Step 7/8: Stopping connector for $(1))
 	@./$(1).sh stop 2>&1 || $(call LOG_WARNING,Failed to stop connector gracefully for $(1))
+	@# --- qdbd 3.14.2 compat shim (branch-only, do not merge upstream) -------
+	@# qdb_export in 3.14.2 writes `nan` for null DOUBLEs; the golden data was
+	@# generated with a newer qdb_export that writes an empty field. Rewrite
+	@# this run's exported CSVs before validation. No-op on newer qdbd.
+	@# Deliberately NOT renumbered as a "Step N/8", to keep this diff small for
+	@# future re-syncs from 3.14.x. See compat/qdb-3.14.2-nan-to-empty.sh.
+	@bash compat/qdb-3.14.2-nan-to-empty.sh $(DATASETS_DIR)/$(1)-$(2)/actual 2>&1 || { $(call LOG_ERROR,NaN normalization failed for $(1)); exit 1; }
+	@# --- end compat shim ---------------------------------------------------
 	@$(call LOG_INFO,Step 8/8: Validating results for $(1))
 	@# Validation is a HARD gate: a failed or missing comparison fails the test.
 	@NUM_MESSAGES=$(2) ./$(1).sh validate 2>&1 || { $(call LOG_ERROR,Validation failed for $(1)); exit 1; }

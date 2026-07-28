@@ -133,6 +133,16 @@ dump_e2e_failure_logs() {
     fi
 }
 
+# --- qdbd version gate (branch-only, do not merge upstream) ------------------
+# This branch is pinned to qdbd 3.14.2, but the qdb-artifacts plugin silently
+# falls back to refs/heads/master for variants with no 3.14.2-test-runner build,
+# so some platforms would otherwise test a different server than intended and
+# still report green. Fail early and loudly instead. Until 3.14.2-test-runner
+# publishes artifacts for windows/freebsd/macos, those legs are EXPECTED to fail
+# here. See examples/compat/assert-qdb-version.sh.
+bash examples/compat/assert-qdb-version.sh 3.14.2 "${BASE_DIR}/qdb/bin"
+# --- end version gate --------------------------------------------------------
+
 # Examples run end-to-end against the shared qdbd + NATS server. Each uses its
 # own NATS stream and QuasarDB tables and stops its connector before the next,
 # so they run sequentially without interfering.

@@ -2,10 +2,10 @@
 
 Loads step templates from `steps/*.yml`, substitutes `{placeholder}`
 vars, overlays env, the Docker plugin, and qdb-artifacts options
-(variant + git-ref) per platform. Produces a 7-step graph: one lint
+(variant + git-ref) per platform. Produces an 8-step graph: one lint
 step plus one docker step in parallel with five per-platform combined
-steps; each combined step runs build, unit, integration, and e2e
-scripts in sequence.
+steps, then an aggregate test-report step; each combined step runs
+build, unit, integration, and e2e scripts in sequence.
 
 Usage:
     python3 pipeline.py [generate|check]
@@ -233,12 +233,16 @@ def _per_platform_step(p: Platform) -> dict:
 def generate_pipeline() -> Pipeline:
     """Assemble the full pipeline and return it.
 
-    Resulting graph (7 steps total, all running in parallel):
+    Resulting graph (8 steps total):
         lint (1)
         docker (1)
         build-{slug} x5   (each running build + unit + integration + e2e
                            in sequence, then uploading the archive and
                            promoting the LATEST_SUCCESSFUL pointer)
+        test report (1)   (depends on every build-{slug})
+
+    The first seven run in parallel; only the test-report step has
+    depends_on.
 
     The docker step is a standalone bare-host build of the
     bureau14/qdb-nats-connector image; it runs in parallel with lint

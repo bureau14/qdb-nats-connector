@@ -3,8 +3,10 @@
 # Invoked by .buildkite/steps/_build.yml.
 # Compiles all three connector binaries via ${GO} build directly (no make),
 # and packages bin/qdb-nats-connector into
-# artifacts/qdb-${VERSION}-${OS}-${ARCH}-nats-connector.tar.zst
-# for upload.  The Go toolchain is wired by cicd_setup_go_toolchain (00.common.sh),
+# artifacts/qdb-${VERSION}-<system>-64bit[-<cpu>]-nats-connector.tar.zst
+# for upload -- quasardb's CPack naming grammar, produced by
+# cicd_artifact_platform (00.common.sh).
+# The Go toolchain is wired by cicd_setup_go_toolchain (00.common.sh),
 # which derives GO from GOROOT injected by pipeline.py::_go_env_for_agent().
 #
 # The qdb-c-api fetch (populating qdb/lib and qdb/include) is the
@@ -242,38 +244,11 @@ GIT_SHA="$(git rev-parse HEAD)"
 BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 KERNEL_VERSION="$(uname -r)"
 
-# Derive ${OS} and ${ARCH} for the release archive name.  Mirrors
-# ~/git/qdb-api-rest/scripts/common.sh:111-160 verbatim so the archive
-# naming matches the qdb-api-rest convention: qdb-${VERSION}-${OS}-${ARCH}-...
-case "$(uname)" in
-    Darwin | Linux | FreeBSD )
-        ARCH="$(uname -m)"
-        if [[ "${ARCH}" == "x86_64" || "${ARCH}" == "amd64" ]]; then
-            ARCH="amd64"
-        else
-            ARCH="aarch64"
-        fi
-        ;;
-    MINGW* )
-        # Windows agents are always amd64; uname -m is unreliable under MSYS2.
-        ARCH="amd64"
-        ;;
-    * )
-        echo "ERROR: unable to probe ARCH for $(uname)" >&2
-        exit 1
-        ;;
-esac
-
-case "$(uname)" in
-    MINGW* )    OS="windows" ;;
-    Darwin )    OS="darwin" ;;
-    Linux )     OS="linux" ;;
-    FreeBSD )   OS="freebsd" ;;
-    * )
-        echo "ERROR: unable to probe OS for $(uname)" >&2
-        exit 1
-        ;;
-esac
+# ${OS} selects the platform-specific packaging bits below: which libqdb_api
+# runtime to co-locate (glob further down) and whether to ship the systemd
+# unit.  The archive *name* no longer derives from it -- that is
+# cicd_artifact_platform's job, which reproduces quasardb's CPack grammar.
+OS="$(cicd_artifact_os)"
 
 BUILD_MODE="release"
 # -mod=vendor: build strictly from the committed vendor/ tree; fail loudly
@@ -356,7 +331,11 @@ if [[ "${OS}" == "linux" ]]; then
     cp "${BASE_DIR}/examples/qdb-nats-connector.service" "${PKG_DIR}/etc/"
 fi
 
-ARCHIVE="${BASE_DIR}/artifacts/qdb-${VERSION}-${OS}-${ARCH}-nats-connector.tar.zst"
+# Archive name follows quasardb's published CPack grammar
+#     qdb-<version>-<system>-64bit[-<cpu>]-<component>.<ext>
+# via cicd_artifact_platform (00.common.sh), so connector archives sit
+# alongside the server/c-api/utils archives on the download site.
+ARCHIVE="${BASE_DIR}/artifacts/qdb-${VERSION}-$(cicd_artifact_platform)-nats-connector.tar.zst"
 
 # --use-compress-program=zstd works on both GNU tar (Linux) and BSD tar
 # (FreeBSD, macOS) as long as zstd is on PATH; avoids format-flag divergence.

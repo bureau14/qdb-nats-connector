@@ -87,10 +87,18 @@ OS_ENV: dict[str, dict[str, str]] = {
 
 OS_STEP_ENV: dict[str, dict[str, str]] = {}
 
-# GOAMD64=v3 (AVX2/haswell) is set for all amd64 platforms.
-# aarch64 platforms have no entry and receive no GOAMD64 override.
+# Mirrors ~/git/quasardb/.buildkite/pipeline.py:129 verbatim.
+# QDB_CPU_ARCHITECTURE_CORE2 is QuasarDB's canonical "legacy baseline" switch
+# (quasardb cmake_modules/options.cmake:1).  There is deliberately no positive
+# haswell flag on either the C++ or the Go side -- absence means haswell.
+#
+# GOAMD64 is no longer declared here: 00.common.sh::cicd_setup_cpu_baseline
+# derives it from this variable (core2 -> v1, otherwise v3), so a single knob
+# drives both the Go codegen level and the -core2 token that
+# cicd_artifact_platform puts in the archive name.  Declaring GOAMD64 here as
+# well would let the two drift apart.
 CPU_ENV: dict[str, dict[str, str]] = {
-    "haswell": {"GOAMD64": "v3"},
+    "core2": {"QDB_CPU_ARCHITECTURE_CORE2": "ON"},
 }
 
 # Go version slug used to form the per-OS agent env var names.

@@ -169,6 +169,51 @@ cicd_artifact_os() {
 
 export -f cicd_artifact_os
 
+# cicd_setup_cpu_baseline -- translate QDB_CPU_ARCHITECTURE_CORE2 into GOAMD64.
+#
+# QDB_CPU_ARCHITECTURE_CORE2 is quasardb's canonical "build for the legacy
+# baseline" switch (cmake_modules/options.cmake:1), set per-platform by
+# .buildkite/pipeline.py exactly as quasardb's own pipeline does.  Honouring
+# the same variable keeps a single knob driving both the archive name
+# (cicd_artifact_platform) and the Go codegen level.  There is deliberately no
+# positive haswell flag on either side -- absence means haswell.
+#
+# Mapping rationale: core2 compiles as -march=core2, i.e. up to SSSE3 only
+# (quasardb cmake_modules/compiler_flags.cmake:162-164).  GOAMD64=v2 requires
+# SSE4.2 and POPCNT, which Core 2 does NOT have, so v1 is the correct floor --
+# v2 would emit instructions that fault on the very hardware this variant
+# exists to serve.  The default build is -march=haswell (AVX2/BMI2/FMA) == v3.
+# Matches the mapping already documented in adr/011-version-information.md.
+#
+# Inputs:  GO -- resolved by cicd_setup_go_toolchain; this function must be
+#          called after it.  GOARCH is probed via ${GO} rather than uname -m
+#          because uname -m is unreliable under MSYS2.
+#          QDB_CPU_ARCHITECTURE_CORE2 -- "ON", or absent on haswell/ARM legs.
+#
+# Outputs: GOAMD64 -- exported, because go build and go test read it from the
+#          environment, and 50.test-e2e.sh shells out to examples/Makefile
+#          which runs its own go build.
+cicd_setup_cpu_baseline() {
+    local goarch
+    goarch="$("${GO}" env GOARCH | tr -d '\r')"
+
+    if [[ "${goarch}" != "amd64" ]]; then
+        unset GOAMD64
+        echo "cicd_setup_cpu_baseline: GOARCH=${goarch}, GOAMD64 not applicable"
+        return
+    fi
+
+    if [[ "${QDB_CPU_ARCHITECTURE_CORE2:-OFF}" == "ON" ]]; then
+        export GOAMD64="v1"
+    else
+        export GOAMD64="v3"
+    fi
+
+    echo "cicd_setup_cpu_baseline: QDB_CPU_ARCHITECTURE_CORE2=${QDB_CPU_ARCHITECTURE_CORE2:-OFF} GOAMD64=${GOAMD64}"
+}
+
+export -f cicd_setup_cpu_baseline
+
 # cicd_artifact_platform -- emit the "<system>-64bit[-<cpu>]" platform token.
 #
 # Port of quasardb's cmake_modules/cpu_arch.cmake:10-36.  The branch order is

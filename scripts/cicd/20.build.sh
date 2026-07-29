@@ -46,6 +46,7 @@ fi
 
 cicd_setup_qdb_env
 cicd_setup_go_toolchain
+cicd_setup_cpu_baseline
 
 # --- Windows diagnostic dump (temporary, added 2026-05-12) ---
 # Blast-radius probe to capture the post-mingw-upgrade cgo failure context

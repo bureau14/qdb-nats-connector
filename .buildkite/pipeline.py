@@ -2,8 +2,8 @@
 
 Loads step templates from `steps/*.yml`, substitutes `{placeholder}`
 vars, overlays env, the Docker plugin, and qdb-artifacts options
-(variant + git-ref) per platform. Produces an 8-step graph: one lint
-step plus one docker step in parallel with five per-platform combined
+(variant + git-ref) per platform. Produces an 11-step graph: one lint
+step plus one docker step in parallel with eight per-platform combined
 steps, then an aggregate test-report step; each combined step runs
 build, unit, integration, and e2e scripts in sequence.
 
@@ -43,15 +43,28 @@ STEPS_DIR = Path(__file__).parent / "steps"
 _LINUX = dict(docker_image="bureau14/builder:rhel7")
 _OS_OVERLAY: dict[str, dict] = {"linux": _LINUX}
 
-# 5-platform matrix: haswell (AVX2) baseline for all amd64 targets.
-# core2 is omitted because Go's GOAMD64 distinction is not a meaningful
-# performance lever here; the linked libqdb_api is built for haswell anyway.
+# 8-platform matrix, mirroring ~/git/quasardb/.buildkite/pipeline.py:70-79
+# name for name.
+#
+# Both amd64 baselines are built because QuasarDB publishes a core2 variant of
+# every C++ artifact.  This is an ISA-compatibility requirement, not a
+# performance tuning knob: a GOAMD64=v3 connector linked against a
+# -march=core2 libqdb_api cannot execute at all on the pre-2013 hardware that
+# variant exists to serve.
+#
+# Matching quasardb's platform names is also what wires the C API dependency
+# up for free -- the qdb-artifacts download variant in generate_pipeline() is
+# Platform.slug("release"), i.e. "linux-core2-release", which is exactly the
+# variant quasardb-build publishes.
 PLATFORMS: list[Platform] = [
     dataclasses.replace(p, **_OS_OVERLAY.get(p.os, {}))
     for p in select_platforms(
+        "linux-amd64-core2",
         "linux-amd64-haswell",
         "linux-aarch64",
+        "windows-amd64-core2",
         "windows-amd64-haswell",
+        "freebsd-amd64-core2",
         "freebsd-amd64-haswell",
         "macos-aarch64",
     )
@@ -241,15 +254,15 @@ def _per_platform_step(p: Platform) -> dict:
 def generate_pipeline() -> Pipeline:
     """Assemble the full pipeline and return it.
 
-    Resulting graph (8 steps total):
+    Resulting graph (11 steps total):
         lint (1)
         docker (1)
-        build-{slug} x5   (each running build + unit + integration + e2e
+        build-{slug} x8   (each running build + unit + integration + e2e
                            in sequence, then uploading the archive and
                            promoting the LATEST_SUCCESSFUL pointer)
         test report (1)   (depends on every build-{slug})
 
-    The first seven run in parallel; only the test-report step has
+    The first ten run in parallel; only the test-report step has
     depends_on.
 
     The docker step is a standalone bare-host build of the
@@ -266,6 +279,9 @@ def generate_pipeline() -> Pipeline:
     pipeline = Pipeline()
 
     lint = _lint_step()
+    # Lint is not per-platform: it needs *a* C API to typecheck against, not a
+    # matching one.  Pinned to haswell (the lint agent is haswell-class) even
+    # though a linux-core2-release variant now exists.
     set_artifact_plugin_options(
         lint,
         {"download": {"variant": "linux-haswell-release", "git-ref": git_ref}},

@@ -36,6 +36,10 @@ fi
 
 cicd_setup_qdb_env
 cicd_setup_go_toolchain
+# No cicd_setup_cpu_baseline here, unlike 20/30/40/50: the lint step is not
+# per-platform, so pipeline.py::_lint_step composes its env without the
+# CPU_ENV layer and there is no QDB_CPU_ARCHITECTURE_CORE2 to derive from.
+# Lint produces no shipped binary, so the microarch level is irrelevant.
 
 # --- install golangci-lint ---
 

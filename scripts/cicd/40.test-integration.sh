@@ -46,6 +46,7 @@ fi
 
 cicd_setup_qdb_env
 cicd_setup_go_toolchain
+cicd_setup_cpu_baseline
 
 # --- nats-server provisioning ---
 

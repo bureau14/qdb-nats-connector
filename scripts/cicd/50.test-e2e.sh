@@ -37,6 +37,7 @@ fi
 # of qdb-data-gen / qdb-data-loader resolves the toolchain.
 cicd_setup_qdb_env
 cicd_setup_go_toolchain
+cicd_setup_cpu_baseline
 
 # The examples Makefile invokes `go` by name (not via $GO), relying on PATH.
 # cicd_setup_go_toolchain exports $GO as an absolute path but prepends a

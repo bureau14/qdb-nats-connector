@@ -2,7 +2,7 @@
 
 Loads step templates from `steps/*.yml`, substitutes `{placeholder}`
 vars, overlays env, the Docker plugin, and qdb-artifacts options
-(variant + git-ref) per platform. Produces an 11-step graph: one lint
+(variant + git_ref) per platform. Produces an 11-step graph: one lint
 step plus one docker step in parallel with eight per-platform combined
 steps, then an aggregate test-report step; each combined step runs
 build, unit, integration, and e2e scripts in sequence.
@@ -171,7 +171,7 @@ def _lint_step() -> dict:
     _lint.yml) are both visible inside the container -- the same container
     the build steps use.  Only one plugin (qdb-artifacts) is declared in
     _lint.yml; the docker plugin is injected here.  Lint runs in parallel
-    with the per-platform combined steps.  Variant + git-ref for the
+    with the per-platform combined steps.  Variant + git_ref for the
     qdb-artifacts download block are injected later in generate_pipeline().
     """
     step = load_template(STEPS_DIR / "_lint.yml")
@@ -228,7 +228,7 @@ def _per_platform_step(p: Platform) -> dict:
     The queue template var is `"{queue_os}-{arch}"` (no prefix);
     the template spells `default-{queue}`. `apply_docker` is a
     no-op when `p.docker_image` is empty (non-linux platforms) so
-    the same call works uniformly across all OSes. Variant + git-ref
+    the same call works uniformly across all OSes. Variant + git_ref
     for the qdb-artifacts download block are injected later in
     `generate_pipeline()`.
     """
@@ -270,7 +270,7 @@ def generate_pipeline() -> Pipeline:
     and the per-platform combined steps and has no depends_on.
 
     Each per-platform step's qdb-artifacts plugin entry receives the same
-    ``variant`` + ``git-ref`` defaults injected into its ``download``,
+    ``variant`` + ``git_ref`` defaults injected into its ``download``,
     ``upload``, and ``promote`` blocks; ``files`` for upload stays
     declared in the step template ``.buildkite/steps/_build.yml`` so the
     file pattern lives next to the step it belongs to.
@@ -284,7 +284,7 @@ def generate_pipeline() -> Pipeline:
     # though a linux-core2-release variant now exists.
     set_artifact_plugin_options(
         lint,
-        {"download": {"variant": "linux-haswell-release", "git-ref": git_ref}},
+        {"download": {"variant": "linux-haswell-release", "git_ref": git_ref}},
     )
     pipeline.add_step(CommandStep.from_dict(lint))
 
@@ -302,9 +302,9 @@ def generate_pipeline() -> Pipeline:
         set_artifact_plugin_options(
             step,
             {
-                "download": {"variant": variant, "git-ref": git_ref},
-                "upload": {"variant": variant, "git-ref": git_ref},
-                "promote": {"variant": variant, "git-ref": git_ref},
+                "download": {"variant": variant, "git_ref": git_ref},
+                "upload": {"variant": variant, "git_ref": git_ref},
+                "promote": {"variant": variant, "git_ref": git_ref},
             },
         )
         pipeline.add_step(CommandStep.from_dict(step))

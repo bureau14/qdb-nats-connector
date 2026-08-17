@@ -3,10 +3,13 @@
 # Invoked by .buildkite/steps/_docker.yml on the default-debian-amd64
 # bare-host agent (NOT inside a docker plugin wrapper).
 #
-# Builds bureau14/qdb-nats-connector from the Dockerfile at the repo root,
-# tags it as both ${VERSION} and latest, then runs `docker run --rm
-# <image>:<version> --version` as a smoke test that the binary launches
-# and libqdb_api.so loads via the baked rpath.
+# Builds bureau14/qdb-nats-connector from the Dockerfile at the repo root
+# with docker-context/ as build context -- the qdb-artifacts plugin declared
+# in _docker.yml has extracted this build's linux-haswell connector archive
+# there, so docker-context/bin/qdb-nats-connector is the statically linked
+# binary CI just built and tested. Tags the image as both ${VERSION} and
+# latest, then runs `docker run --rm <image>:<version> --version` as a
+# smoke test that the binary launches on the runtime base image.
 #
 # On master builds, the :latest tag is pushed to Docker Hub using the
 # read-write credential pair from SSM; branch and local runs build and
@@ -26,26 +29,32 @@ cd "${BASE_DIR}"
 # --- metadata extraction ---
 
 VERSION="$(cat VERSION)"
-GIT_SHA="$(git rev-parse HEAD)"
-BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 IMAGE="bureau14/qdb-nats-connector"
+
+# The build context only holds the binary; the repo itself is not sent to
+# the docker daemon. Locally, populate it from a `make build` on Linux:
+#   mkdir -p docker-context/bin && cp bin/qdb-nats-connector docker-context/bin/
+CONTEXT_DIR="${BASE_DIR}/docker-context"
+
+if [[ ! -f "${CONTEXT_DIR}/bin/qdb-nats-connector" ]]; then
+    echo "ERROR: expected ${CONTEXT_DIR}/bin/qdb-nats-connector (extracted from the linux-haswell connector archive)." >&2
+    exit 1
+fi
 
 # --- build ---
 
 docker build \
     --build-arg "VERSION=${VERSION}" \
-    --build-arg "GIT_SHA=${GIT_SHA}" \
-    --build-arg "BUILD_TIME=${BUILD_TIME}" \
     -t "${IMAGE}:${VERSION}" \
     -t "${IMAGE}:latest" \
-    -f Dockerfile \
-    .
+    -f "${BASE_DIR}/Dockerfile" \
+    "${CONTEXT_DIR}"
 
 # --- validate ---
 
-# Smoke test: the binary must run, libqdb_api.so must load via rpath,
-# and --version must exit 0.
+# Smoke test: the binary must run on the runtime base image and --version
+# must exit 0.
 docker run --rm "${IMAGE}:${VERSION}" --version
 
 echo "Built and validated: ${IMAGE}:${VERSION} (also tagged :latest)"

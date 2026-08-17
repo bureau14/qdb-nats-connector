@@ -16,7 +16,7 @@ github.com/bufbuild/protocompile/protoutil
 github.com/bufbuild/protocompile/reporter
 github.com/bufbuild/protocompile/sourceinfo
 github.com/bufbuild/protocompile/walk
-# github.com/bureau14/qdb-api-go/v3 v3.14.3-0.20260729111830-61e4f36a1bd3
+# github.com/bureau14/qdb-api-go/v3 v3.14.3-0.20260817085001-b19c17b72fb7
 ## explicit; go 1.23.0
 github.com/bureau14/qdb-api-go/v3
 # github.com/cespare/xxhash/v2 v2.3.0

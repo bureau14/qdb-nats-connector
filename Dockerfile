@@ -15,8 +15,16 @@
 # Build-time ARGs (top-of-file defaults; CI overrides via --build-arg):
 #   QDB_VERSION  -- QuasarDB ecosystem version (currently 3.14.2;
 #                   bump in one place when 3.14.3 ships).
-#   GO_VERSION   -- Go toolchain version to download from go.dev;
-#                   keep aligned with the `go` directive in go.mod.
+#   GO_VERSION   -- Go toolchain version, fetched from the QuasarDB CI
+#                   build-deps mirror (the same bucket the Buildkite agents
+#                   are provisioned from, see qdb-cloud-deployments
+#                   cloud/aws/cicd/packer/buildkite/agents/common/include.sh);
+#                   keep aligned with the `go` directive in go.mod and with
+#                   the versions mirrored there.
+#   GO_MIRROR    -- Base URL of that mirror; never fetch toolchains from
+#                   go.dev or other third-party hosts, builds must not
+#                   depend on external availability and must stay
+#                   deterministic.
 #   VERSION      -- Connector version string, from the repo VERSION
 #                   file; injected into the binary via -ldflags.
 #   GIT_SHA      -- Full 40-char git SHA of the source commit;
@@ -39,7 +47,8 @@
 # image, the builder base must match (or be older).
 
 ARG QDB_VERSION=3.14.2
-ARG GO_VERSION=1.25.0
+ARG GO_VERSION=1.25.10
+ARG GO_MIRROR=https://qdb-cicd-builddeps-20260226074339625300000001.s3.eu-west-1.amazonaws.com/golang
 
 # ---------------------------------------------------------------------
 # Builder stage: vanilla debian:trixie + explicit Go + libqdb_api.
@@ -48,6 +57,7 @@ FROM debian:trixie AS builder
 
 ARG QDB_VERSION
 ARG GO_VERSION
+ARG GO_MIRROR
 ARG VERSION
 ARG GIT_SHA
 ARG BUILD_TIME
@@ -69,9 +79,11 @@ RUN apt-get update && \
         gzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go from go.dev (the explicit, "simple" way -- no apt drift).
-# Verifies via `go version` in the build log for diagnostic visibility.
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+# Install Go from the CI build-deps mirror (the explicit, "simple" way --
+# no apt drift, no dependency on go.dev being up or still serving a given
+# release). Verifies via `go version` in the build log for diagnostic
+# visibility.
+RUN curl -fsSL "${GO_MIRROR}/go${GO_VERSION}.linux-amd64.tar.gz" \
         -o /tmp/go.tar.gz && \
     tar -C /usr/local -xzf /tmp/go.tar.gz && \
     rm /tmp/go.tar.gz

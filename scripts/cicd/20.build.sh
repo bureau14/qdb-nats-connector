@@ -48,9 +48,10 @@ if [[ ! -d "qdb/lib" || ! -d "qdb/include" ]]; then
     exit 1
 fi
 
-# Linux links the static archive (.envrc); a c-api package without it means
-# a quasardb build that predates QDB-19063, which cgo would only report as a
-# bare "cannot find -lqdb_api" from the linker.
+# Linux links the static archive (vendored qdb-api-go library_link.go); a
+# c-api package without it means a quasardb build that predates QDB-19063,
+# which cgo would only report as a bare "cannot find -lqdb_api" from the
+# linker.
 if [[ "$(uname)" == "Linux" && ! -f "qdb/lib/libqdb_api.a" ]]; then
     echo "ERROR: expected qdb/lib/libqdb_api.a to be present for the static Linux link." >&2
     exit 1
@@ -300,10 +301,10 @@ if [[ ! -f "${CONNECTOR_BIN}" ]]; then
     exit 1
 fi
 
-# The static link in .envrc relies on cgo appending qdb-api-go's own
-# `-lqdb_api` after CGO_LDFLAGS, where --as-needed drops it; should that
-# ordering ever change, the binary would silently record libqdb_api.so as a
-# runtime dependency again and fail on hosts that do not ship it.
+# The vendored qdb-api-go decides the link mode (static on Linux); guard
+# that a future vendor bump or flag change does not silently record
+# libqdb_api.so as a runtime dependency again, which would fail on hosts
+# that do not ship it.
 if [[ "$(uname)" == "Linux" ]]; then
     for _bin in qdb-nats-connector qdb-data-gen qdb-data-loader; do
         if readelf -d "${BASE_DIR}/bin/${_bin}" | grep -q 'NEEDED.*libqdb_api'; then

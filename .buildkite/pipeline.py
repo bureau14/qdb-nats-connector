@@ -3,9 +3,10 @@
 Loads step templates from `steps/*.yml`, substitutes `{placeholder}`
 vars, overlays env, the Docker plugin, and qdb-artifacts options
 (variant + git_ref) per platform. Produces an 11-step graph: one lint
-step plus one docker step in parallel with eight per-platform combined
-steps, then an aggregate test-report step; each combined step runs
-build, unit, integration, and e2e scripts in sequence.
+step in parallel with eight per-platform combined steps, one docker step
+that wraps the linux-haswell binary once that step has finished, then an
+aggregate test-report step; each combined step runs build, unit,
+integration, and e2e scripts in sequence.
 
 Usage:
     python3 pipeline.py [generate|check]
@@ -187,8 +188,8 @@ def _lint_step() -> dict:
     return step
 
 
-def _docker_step() -> dict:
-    """Build the standalone docker-image step.
+def _docker_step(git_ref: str) -> dict:
+    """Build the docker-image step.
 
     Loads the `_docker.yml` template, layers the global env on top of any
     template-declared env using the canonical merge idiom, and returns
@@ -198,11 +199,11 @@ def _docker_step() -> dict:
     daemon is available for `docker build` / `docker run` invocations
     inside `scripts/cicd/60.docker.sh`.
 
-    Unlike the lint and per-platform steps this function does NOT inject
-    `qdb-artifacts` plugin options either -- the Dockerfile downloads
-    `libqdb_api` directly from `download.quasar.ai` (temporary
-    scaffolding; will be superseded once QuasarDB 3.14.3 ships an
-    official public artifact for the connector).
+    The image wraps the statically linked connector binary produced by
+    the linux-haswell step of the same build (the template declares the
+    depends_on): the qdb-artifacts download block receives the
+    linux-haswell-release variant and the current git_ref, which makes
+    the plugin resolve this build's own upload.
 
     On master builds the step's script pushes the `:latest` tag to
     Docker Hub; the branch gate and the SSM credential fetch both live
@@ -212,6 +213,10 @@ def _docker_step() -> dict:
     env = merge_env(GLOBAL_ENV, STEP_ENV.get("docker", {}))
     env.update(step.get("env") or {})
     step["env"] = env
+    set_artifact_plugin_options(
+        step,
+        {"download": {"variant": "linux-haswell-release", "git_ref": git_ref}},
+    )
     return step
 
 
@@ -288,11 +293,11 @@ def generate_pipeline() -> Pipeline:
     )
     pipeline.add_step(CommandStep.from_dict(lint))
 
-    # Standalone docker step: builds the bureau14/qdb-nats-connector image
-    # from the repo-root Dockerfile and runs a `--version` smoke test.
-    # No depends_on, no qdb-artifacts (Dockerfile is self-contained),
-    # no docker plugin wrapper (runs on the bare host).
-    pipeline.add_step(CommandStep.from_dict(_docker_step()))
+    # Docker step: wraps this build's linux-haswell connector binary into
+    # the bureau14/qdb-nats-connector image and runs a `--version` smoke
+    # test.  Depends on build-linux-haswell (declared in the template); no
+    # docker plugin wrapper (runs on the bare host).
+    pipeline.add_step(CommandStep.from_dict(_docker_step(git_ref)))
 
     variants = []
     for p in PLATFORMS:

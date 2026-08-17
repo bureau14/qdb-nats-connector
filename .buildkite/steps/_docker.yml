@@ -1,18 +1,34 @@
-# Standalone docker-image step. Runs on the bare default-debian-amd64
-# agent (no docker plugin wrapper) so the host's docker daemon is
-# available to scripts/cicd/60.docker.sh. No qdb-artifacts plugin --
-# the Dockerfile downloads libqdb_api directly from download.quasar.ai.
-# On master builds the script also pushes the :latest tag to Docker Hub
-# (credentials fetched from SSM inside the script).
+# Docker-image step. Runs on the bare default-debian-amd64 agent (no docker
+# plugin wrapper) so the host's docker daemon is available to
+# scripts/cicd/60.docker.sh. The image wraps the statically linked Linux
+# connector binary built by the linux-haswell step of this build: the
+# qdb-artifacts plugin downloads that archive into docker-context/ (variant
+# and git_ref are injected by pipeline.py), and the Dockerfile only copies
+# the binary onto a runtime base image -- no toolchain or C API is fetched
+# at image-build time. On master builds the script also pushes the :latest
+# tag to Docker Hub (credentials fetched from SSM inside the script).
 
 label: ":docker: build, smoke-test and push"
 key: docker
+
+depends_on:
+  - build-linux-haswell
 
 env:
   AWS_DEFAULT_REGION: "eu-west-1"
 
 commands:
   - bash scripts/cicd/60.docker.sh
+
+plugins:
+  - bureau14/qdb-artifacts#master:
+      download:
+        clean: true
+        projects:
+        - output-dir: "docker-context"
+          extract: true
+          files:
+            - "*-nats-connector.tar.zst!bin/qdb-nats-connector"
 
 timeout_in_minutes: 60
 

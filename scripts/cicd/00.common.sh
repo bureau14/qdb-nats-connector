@@ -38,7 +38,8 @@ mkdir -p "${TEST_REPORT_DIR}"
 #
 # Outputs: Exports a subset of the following env vars depending on OS
 #          (the full matrix is defined in .envrc):
-#   Linux / FreeBSD : LD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
+#   Linux           : CGO_CFLAGS, CGO_LDFLAGS (libqdb_api is linked statically)
+#   FreeBSD         : LD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
 #   Darwin          : DYLD_LIBRARY_PATH, CGO_CFLAGS, CGO_LDFLAGS
 #   MINGW (Windows) : PATH, CGO_CFLAGS, CGO_LDFLAGS
 cicd_setup_qdb_env() {
@@ -55,7 +56,11 @@ cicd_setup_qdb_env() {
     # match.  The variables being echoed are already exported by the source
     # call above.
     case "${os}" in
-        Linux|FreeBSD)
+        Linux)
+            echo "cicd_setup_qdb_env: CGO_CFLAGS=${CGO_CFLAGS}"
+            echo "cicd_setup_qdb_env: CGO_LDFLAGS=${CGO_LDFLAGS}"
+            ;;
+        FreeBSD)
             echo "cicd_setup_qdb_env: LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
             echo "cicd_setup_qdb_env: CGO_CFLAGS=${CGO_CFLAGS}"
             echo "cicd_setup_qdb_env: CGO_LDFLAGS=${CGO_LDFLAGS}"

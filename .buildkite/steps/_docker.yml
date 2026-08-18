@@ -2,8 +2,8 @@
 # plugin wrapper) so the host's docker daemon is available to
 # scripts/cicd/60.docker.sh. The image wraps the statically linked Linux
 # connector binary built by the linux-haswell step of this build: the
-# qdb-artifacts plugin downloads that archive into docker-context/ (variant
-# and git_ref are injected by pipeline.py), and the Dockerfile only copies
+# qdb-artifacts plugin extracts that archive's bin/ into docker-context/bin/
+# (variant and git_ref are injected by pipeline.py), and the Dockerfile only copies
 # the binary onto a runtime base image -- no toolchain or C API is fetched
 # at image-build time. On master builds the script also pushes the :latest
 # tag to Docker Hub (credentials fetched from SSM inside the script).
@@ -24,11 +24,13 @@ plugins:
   - bureau14/qdb-artifacts#master:
       download:
         clean: true
+        # The entry filter doubles as strip prefix (bin/ is removed), so
+        # bin/qdb-nats-connector lands at docker-context/bin/qdb-nats-connector.
         projects:
-        - output-dir: "docker-context"
+        - output-dir: "docker-context/bin"
           extract: true
           files:
-            - "*-nats-connector.tar.zst!bin/qdb-nats-connector"
+            - "*-nats-connector.tar.zst!bin/*"
 
 timeout_in_minutes: 60
 

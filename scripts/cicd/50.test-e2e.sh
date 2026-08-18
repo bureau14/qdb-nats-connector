@@ -31,10 +31,10 @@ if [[ ! -d "qdb/lib" || ! -d "qdb/include" ]]; then
     exit 1
 fi
 
-# Load the same CGO + Go-toolchain env as build/test so the qdb CLI tools
-# (qdb/bin/qdbsh, qdb/bin/qdb_export) and the connector -- all CGO binaries --
-# can locate libqdb_api.so at runtime, and so the examples Makefile's `go build`
-# of qdb-data-gen / qdb-data-loader resolves the toolchain.
+# Load the same CGO + Go-toolchain env as build/test so the connector can
+# locate libqdb_api at runtime where it is linked dynamically (not Linux),
+# and so the examples Makefile's `go build` of qdb-data-gen / qdb-data-loader
+# resolves the toolchain.
 cicd_setup_qdb_env
 cicd_setup_go_toolchain
 cicd_setup_cpu_baseline

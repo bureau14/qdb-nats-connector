@@ -12,6 +12,10 @@
 # The qdb-c-api fetch (populating qdb/lib and qdb/include) is the
 # user's responsibility and must run before this script.
 #
+# On Linux the C API is linked statically from qdb/lib/libqdb_api.a (see
+# .envrc), so the Linux archive ships the connector binary alone; the other
+# platforms co-locate the shared libqdb_api runtime next to it.
+#
 # Diagnostic instrumentation (2026-05-12):
 #   The Windows-only diagnostic dump and -x -v go-flag additions below are
 #   blast-radius debugging added after the GCC 7.1.0 -> 16.1.0 UCRT mingw
@@ -41,6 +45,15 @@ cd "${BASE_DIR}"
 if [[ ! -d "qdb/lib" || ! -d "qdb/include" ]]; then
     echo "ERROR: expected qdb/lib and qdb/include to be present." >&2
     echo "The qdb-c-api fetch is currently user-managed; run it before 20.build.sh." >&2
+    exit 1
+fi
+
+# Linux links the static archive (vendored qdb-api-go library_link.go); a
+# c-api package without it means a quasardb build that predates QDB-19063,
+# which cgo would only report as a bare "cannot find -lqdb_api" from the
+# linker.
+if [[ "$(uname)" == "Linux" && ! -f "qdb/lib/libqdb_api.a" ]]; then
+    echo "ERROR: expected qdb/lib/libqdb_api.a to be present for the static Linux link." >&2
     exit 1
 fi
 
@@ -288,12 +301,28 @@ if [[ ! -f "${CONNECTOR_BIN}" ]]; then
     exit 1
 fi
 
+# The vendored qdb-api-go decides the link mode (static on Linux); guard
+# that a future vendor bump or flag change does not silently record
+# libqdb_api.so as a runtime dependency again, which would fail on hosts
+# that do not ship it.
+if [[ "$(uname)" == "Linux" ]]; then
+    for _bin in qdb-nats-connector qdb-data-gen qdb-data-loader; do
+        if readelf -d "${BASE_DIR}/bin/${_bin}" | grep -q 'NEEDED.*libqdb_api'; then
+            echo "ERROR: ${_bin} links libqdb_api.so dynamically; expected the static archive." >&2
+            readelf -d "${BASE_DIR}/bin/${_bin}" | grep NEEDED >&2
+            exit 1
+        fi
+    done
+    unset _bin
+fi
+
 # --- package ---
 #
 # The archive is a self-contained, relocatable dependency artifact:
-#   bin/  connector binary + libqdb_api runtime co-located next to it
-#         (mirrors qdb-api-rest scripts/teamcity/30.package.sh); the binary
-#         resolves the library via the $ORIGIN/@loader_path rpath baked in
+#   bin/  connector binary; on Linux it carries libqdb_api statically, on
+#         the other platforms the libqdb_api runtime is co-located next to it
+#         (mirrors qdb-api-rest scripts/teamcity/30.package.sh) and the
+#         binary resolves it via the $ORIGIN/@loader_path rpath baked in
 #         .envrc, or exe-dir DLL search on Windows.
 #   etc/  example parser configs
 # qdb-pkg-archives repackages this .tar.zst into the external .tar.gz
@@ -309,18 +338,21 @@ cp "${CONNECTOR_BIN}" "${PKG_DIR}/bin/"
 
 shopt -s nullglob
 case "${OS}" in
+    linux )   QDB_RUNTIME_LIBS=() ;;
     windows ) QDB_RUNTIME_LIBS=("${BASE_DIR}/qdb/bin/qdb_api.dll") ;;
     darwin )  QDB_RUNTIME_LIBS=("${BASE_DIR}/qdb/lib/"libqdb_api*.dylib) ;;
     * )       QDB_RUNTIME_LIBS=("${BASE_DIR}/qdb/lib/"libqdb_api*.so*) ;;
 esac
 shopt -u nullglob
 
-if [[ ${#QDB_RUNTIME_LIBS[@]} -eq 0 || ! -f "${QDB_RUNTIME_LIBS[0]}" ]]; then
-    echo "ERROR: no libqdb_api runtime library found for packaging" >&2
-    exit 1
-fi
+if [[ "${OS}" != "linux" ]]; then
+    if [[ ${#QDB_RUNTIME_LIBS[@]} -eq 0 || ! -f "${QDB_RUNTIME_LIBS[0]}" ]]; then
+        echo "ERROR: no libqdb_api runtime library found for packaging" >&2
+        exit 1
+    fi
 
-cp "${QDB_RUNTIME_LIBS[@]}" "${PKG_DIR}/bin/"
+    cp "${QDB_RUNTIME_LIBS[@]}" "${PKG_DIR}/bin/"
+fi
 
 cp "${BASE_DIR}/examples/finance-ohlc.yaml" \
    "${BASE_DIR}/examples/industrial-sensor.yaml" \

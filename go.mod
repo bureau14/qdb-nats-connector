@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/bufbuild/protocompile v0.14.1
-	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260817084603-4bcb78f1d9a6
+	github.com/bureau14/qdb-api-go/v3 v3.9.1-0.20260908101131-e3f87c3e9b1a
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.52.0

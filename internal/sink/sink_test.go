@@ -5,8 +5,6 @@ package sink
 
 import (
 	"context"
-	stderrors "errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -29,10 +27,16 @@ func failNTimes(n int, err error, calls *int) func() error {
 	}
 }
 
+// qdbErr builds the error shape writer.Push returns, so the retry loop is
+// tested against the same chain it classifies in production.
+func qdbErr(code qdb.ErrorType) error {
+	return &qdb.Error{Code: code, Operation: "push"}
+}
+
 func TestRetryWithBackoffRetryableThenSuccess(t *testing.T) {
 	pushes, progress := 0, 0
-	// Plain errors are retryable by default per qdb.IsRetryable.
-	push := failNTimes(2, stderrors.New("transient"), &pushes)
+	// ErrTryAgain is retryable: the cluster asks for the same request later.
+	push := failNTimes(2, qdbErr(qdb.ErrTryAgain), &pushes)
 
 	err := retryWithBackoff(context.Background(), 3, time.Millisecond, 4*time.Millisecond,
 		func() { progress++ }, push)
@@ -45,7 +49,7 @@ func TestRetryWithBackoffRetryableThenSuccess(t *testing.T) {
 
 func TestRetryWithBackoffExhaustsAttempts(t *testing.T) {
 	pushes, progress := 0, 0
-	push := failNTimes(3, stderrors.New("transient"), &pushes)
+	push := failNTimes(3, qdbErr(qdb.ErrTimeout), &pushes)
 
 	err := retryWithBackoff(context.Background(), 3, time.Millisecond, 4*time.Millisecond,
 		func() { progress++ }, push)
@@ -61,7 +65,7 @@ func TestRetryWithBackoffExhaustsAttempts(t *testing.T) {
 
 func TestRetryWithBackoffNonRetryableFailsImmediately(t *testing.T) {
 	pushes, progress := 0, 0
-	push := failNTimes(3, fmt.Errorf("bad input: %w", qdb.ErrInvalidArgument), &pushes)
+	push := failNTimes(3, qdbErr(qdb.ErrInvalidArgument), &pushes)
 
 	err := retryWithBackoff(context.Background(), 3, time.Millisecond, 4*time.Millisecond,
 		func() { progress++ }, push)
@@ -76,7 +80,7 @@ func TestRetryWithBackoffNonRetryableFailsImmediately(t *testing.T) {
 
 func TestRetryWithBackoffNilProgressCallback(t *testing.T) {
 	pushes := 0
-	push := failNTimes(2, stderrors.New("transient"), &pushes)
+	push := failNTimes(2, qdbErr(qdb.ErrTryAgain), &pushes)
 
 	assert.NotPanics(t, func() {
 		err := retryWithBackoff(context.Background(), 3, time.Millisecond, 4*time.Millisecond, nil, push)
@@ -92,7 +96,7 @@ func TestRetryWithBackoffContextCancelledDuringBackoff(t *testing.T) {
 		pushes++
 		cancel() // cancellation lands while the loop sleeps before attempt 2
 
-		return stderrors.New("transient")
+		return qdbErr(qdb.ErrTimeout)
 	}
 
 	start := time.Now()

@@ -95,14 +95,21 @@ HALF-OPEN State:
 
 ### What Counts as a Failure
 
-The breaker guards the cluster, not the batch. An error counts as a failure
-only when `qdb.IsClusterUnavailable` holds: the cluster was unreachable or too
-busy to answer (timeout, connection refused or reset, not connected, unstable
-cluster, try again, async pipe full, remote out of memory). Any other outcome
-counts as a success, including a rejected request or a failure without a qdb
-code: the cluster answered. The sink's retry loop returns the qdb error of its
-last push unchanged, so an exhausted retry against a dead cluster is
-classified by that code.
+The breaker guards the cluster, not the batch, and it is shared by every
+worker on the resource. That sharing is what makes classification
+dangerous: one error misclassified as cluster-unavailable opens the circuit
+for all workers and halts ingestion while the cluster is healthy, a
+self-inflicted outage. Missing a real outage costs only a few more NACK
+redeliveries before it is recognised. Classification is therefore
+conservative: an error counts as a failure only when `qdb.IsClusterUnavailable`
+holds, an explicit allowlist of the codes that say the cluster was
+unreachable or too busy to answer (timeout, connection refused or reset, not
+connected, unstable cluster, try again, async pipe full, remote out of
+memory). Everything else counts as a success, including a rejected request,
+a code not on the list, or a failure without a qdb code: the cluster
+answered. The sink's retry loop returns the qdb error of its last push
+unchanged, so an exhausted retry against a dead cluster is classified by
+that code.
 
 ### Shared State Architecture
 

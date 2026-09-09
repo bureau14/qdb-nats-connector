@@ -396,7 +396,8 @@ func validateExplodeUnpackTrace(steps []TransformSpec, spec *explodeSpec) error 
 		if produced != spec.targetType {
 			return connectorErrors.NewInvalidConfigError("yaml_parser", fmt.Sprintf(
 				"explode 'target' column %q is %s but unpack %q produces %s",
-				spec.targetName, columnTypeName(spec.targetType), target, columnTypeName(produced)))
+				spec.targetName, columnTypeName(spec.targetType), target, columnTypeName(produced),
+			))
 		}
 	}
 
@@ -430,7 +431,8 @@ func validateArrayBindings(steps []TransformSpec, explode *explodeSpec, schema [
 		if explode == nil || explode.sourcePath != target {
 			return connectorErrors.NewInvalidConfigError("yaml_parser", fmt.Sprintf(
 				"unpack target %q is an output column but no explode binds it; array values cannot be written directly",
-				target))
+				target,
+			))
 		}
 	}
 
@@ -514,7 +516,8 @@ func (e *explodeSpec) resolveUntypedArray(v []interface{}) (explodeInputs, error
 			f, ok := elem.(float64)
 			if !ok {
 				return explodeInputs{}, fmt.Errorf(
-					"explode source '%s' element %d has type %T, want float64", e.sourcePath, i, elem)
+					"explode source '%s' element %d has type %T, want float64", e.sourcePath, i, elem,
+				)
 			}
 			out[i] = f
 		}
@@ -528,7 +531,8 @@ func (e *explodeSpec) resolveUntypedArray(v []interface{}) (explodeInputs, error
 		n, ok := elem.(int64)
 		if !ok {
 			return explodeInputs{}, fmt.Errorf(
-				"explode source '%s' element %d has type %T, want int64", e.sourcePath, i, elem)
+				"explode source '%s' element %d has type %T, want int64", e.sourcePath, i, elem,
+			)
 		}
 		out[i] = n
 	}
@@ -545,14 +549,16 @@ func (e *explodeSpec) resolveArray(value interface{}) (explodeInputs, error) {
 	case []float64:
 		if e.targetType != qdb.TsColumnDouble {
 			return explodeInputs{}, fmt.Errorf(
-				"explode source '%s' must be []int64 to match column %q, got %T", e.sourcePath, e.targetName, value)
+				"explode source '%s' must be []int64 to match column %q, got %T", e.sourcePath, e.targetName, value,
+			)
 		}
 
 		return explodeInputs{floats: v, n: len(v)}, nil
 	case []int64:
 		if e.targetType != qdb.TsColumnInt64 {
 			return explodeInputs{}, fmt.Errorf(
-				"explode source '%s' must be []float64 to match column %q, got %T", e.sourcePath, e.targetName, value)
+				"explode source '%s' must be []float64 to match column %q, got %T", e.sourcePath, e.targetName, value,
+			)
 		}
 
 		return explodeInputs{ints: v, n: len(v)}, nil
@@ -561,7 +567,8 @@ func (e *explodeSpec) resolveArray(value interface{}) (explodeInputs, error) {
 	}
 
 	return explodeInputs{}, fmt.Errorf(
-		"explode source '%s' has type %T, want a numeric array", e.sourcePath, value)
+		"explode source '%s' has type %T, want a numeric array", e.sourcePath, value,
+	)
 }
 
 // resolveStart looks up the time-axis anchor: a time.Time field, typically
@@ -570,13 +577,15 @@ func (e *explodeSpec) resolveStart(fields map[string]interface{}) (time.Time, er
 	value, ok := e.lookupStart(fields)
 	if !ok {
 		return time.Time{}, fmt.Errorf(
-			"explode index.start field '%s' not found", e.startPath)
+			"explode index.start field '%s' not found", e.startPath,
+		)
 	}
 
 	ts, ok := value.(time.Time)
 	if !ok {
 		return time.Time{}, fmt.Errorf(
-			"explode index.start '%s' must be a time.Time (use extract_timestamp), got %T", e.startPath, value)
+			"explode index.start '%s' must be a time.Time (use extract_timestamp), got %T", e.startPath, value,
+		)
 	}
 
 	return ts, nil
@@ -595,7 +604,8 @@ func (e *explodeSpec) resolveSourcedInterval(fields map[string]interface{}) (tim
 	case int64:
 		if v <= 0 || v > math.MaxInt64/int64(e.intervalUnit) {
 			return 0, fmt.Errorf(
-				"explode index.interval from '%s' must be a positive duration, got %d", e.intervalPath, v)
+				"explode index.interval from '%s' must be a positive duration, got %d", e.intervalPath, v,
+			)
 		}
 
 		return time.Duration(v) * e.intervalUnit, nil
@@ -603,20 +613,23 @@ func (e *explodeSpec) resolveSourcedInterval(fields map[string]interface{}) (tim
 		ns := v * float64(e.intervalUnit)
 		if math.IsNaN(ns) || ns <= 0 || ns >= float64(math.MaxInt64) {
 			return 0, fmt.Errorf(
-				"explode index.interval from '%s' must be a positive duration, got %v", e.intervalPath, v)
+				"explode index.interval from '%s' must be a positive duration, got %v", e.intervalPath, v,
+			)
 		}
 
 		d := time.Duration(math.Round(ns))
 		if d <= 0 {
 			return 0, fmt.Errorf(
-				"explode index.interval from '%s' rounds to a non-positive duration: %v", e.intervalPath, v)
+				"explode index.interval from '%s' rounds to a non-positive duration: %v", e.intervalPath, v,
+			)
 		}
 
 		return d, nil
 	}
 
 	return 0, fmt.Errorf(
-		"explode index.interval source '%s' must be int64 or float64, got %T", e.intervalPath, value)
+		"explode index.interval source '%s' must be int64 or float64, got %T", e.intervalPath, value,
+	)
 }
 
 // resolveInterval returns the per-message sample interval per the compiled
@@ -630,7 +643,8 @@ func (e *explodeSpec) resolveInterval(fields map[string]interface{}, n int) (tim
 		d, ok := e.intervalByLength[n]
 		if !ok {
 			return 0, fmt.Errorf(
-				"explode index.interval by_length has no entry for array length %d", n)
+				"explode index.interval by_length has no entry for array length %d", n,
+			)
 		}
 
 		return d, nil
@@ -648,7 +662,8 @@ func (e *explodeSpec) resolveInputs(fields map[string]interface{}) (explodeInput
 	value, ok := e.lookupSource(fields)
 	if !ok {
 		return explodeInputs{}, fmt.Errorf(
-			"explode source field '%s' not found", e.sourcePath)
+			"explode source field '%s' not found", e.sourcePath,
+		)
 	}
 
 	in, err := e.resolveArray(value)

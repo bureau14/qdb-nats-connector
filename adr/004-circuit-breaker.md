@@ -1,12 +1,15 @@
 # ADR-004: Circuit Breaker Pattern for Service Protection
 
 ## Status
+
 Proposed
 
 ## Context
+
 The NATS connector needs to handle failures when writing to QuasarDB. Currently, each worker independently retries failed operations, which can overwhelm a struggling service and delay recovery.
 
 ## Decision
+
 Implement the Circuit Breaker pattern with shared state across workers to provide coordinated failure handling and recovery. The circuit breaker will be located in `connector/resilience/` as it is inherently tied to worker coordination.
 
 ## Rationale
@@ -14,6 +17,7 @@ Implement the Circuit Breaker pattern with shared state across workers to provid
 ### Why Not Just Retry + Backoff?
 
 **Traditional Retry (Per-Worker):**
+
 ```
 Worker 1: [Fail]--1s-->[Retry]--2s-->[Retry]--4s-->[Retry]...
 Worker 2: [Fail]--1s-->[Retry]--2s-->[Retry]--4s-->[Retry]...
@@ -25,6 +29,7 @@ Result: N workers × M retries = N×M requests hitting failing service
 ```
 
 **Circuit Breaker (Shared State):**
+
 ```
 Worker 1-5: [Fail] [Fail] [Fail] [Fail] [Fail]
             |
@@ -79,13 +84,25 @@ Worker X: [Test Request]--Success-->[Allow More]
 ### Progressive Half-Open Recovery
 
 To prevent thundering herd when recovering:
+
 ```
 HALF-OPEN State:
   Allow 1 request → Success → Allow 2 → Success → Allow 4 → ...
-  
+
   Exponential increase until fully recovered (32 consecutive successes)
   Any failure → Back to OPEN state
 ```
+
+### What Counts as a Failure
+
+The breaker guards the cluster, not the batch. An error counts as a failure
+only when `qdb.IsClusterUnavailable` holds: the cluster was unreachable or too
+busy to answer (timeout, connection refused or reset, not connected, unstable
+cluster, try again, async pipe full, remote out of memory). Any other outcome
+counts as a success, including a rejected request or a failure without a qdb
+code: the cluster answered. The sink's retry loop returns the qdb error of its
+last push unchanged, so an exhausted retry against a dead cluster is
+classified by that code.
 
 ### Shared State Architecture
 
@@ -110,6 +127,7 @@ HALF-OPEN State:
 ### Hook Integration
 
 Circuit breaker state changes are observable via the existing hooks system:
+
 ```go
 type CircuitBreakerStateChange struct {
     WorkerID    string
@@ -118,7 +136,7 @@ type CircuitBreakerStateChange struct {
     NewState    string
     Reason      string    // "threshold exceeded", "recovery complete"
     Timestamp   time.Time
-    
+
     // Optional context
     FailureCount int      // For closed→open transitions
     SuccessCount int      // For half-open→closed transitions
@@ -127,6 +145,7 @@ type CircuitBreakerStateChange struct {
 ```
 
 Single hook design chosen for:
+
 - State transitions are inherently from→to events
 - Subscribers typically want all transitions with context
 - Simpler registration (1 hook vs 6+ state-specific hooks)
@@ -135,6 +154,7 @@ Single hook design chosen for:
 ## Implementation Location
 
 Circuit breakers will be implemented in `connector/resilience/` because:
+
 1. **Shared State Reality**: Workers must coordinate through shared state
 2. **Hook Integration**: Direct integration with connector's hook system
 3. **Worker-Specific Logic**: Jitter and recovery patterns are worker-specific
@@ -143,6 +163,7 @@ Circuit breakers will be implemented in `connector/resilience/` because:
 ## Consequences
 
 ### Positive
+
 - Prevents cascading failures
 - Reduces load on failing services
 - Provides predictable recovery windows
@@ -150,12 +171,14 @@ Circuit breakers will be implemented in `connector/resilience/` because:
 - Observable state changes via hooks
 
 ### Negative
+
 - Requires shared state management
 - May block some requests that could succeed
 - Adds complexity compared to simple retry
 - Needs careful tuning of thresholds
 
 ### Neutral
+
 - Changes failure behavior from gradual degradation to binary (working/not working)
 - Requires monitoring to understand circuit state (via hooks)
 - May need per-resource circuit breakers (QDB, NATS separately)

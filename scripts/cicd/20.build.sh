@@ -15,12 +15,6 @@
 # On Linux the C API is linked statically from qdb/lib/libqdb_api.a (see
 # .envrc), so the Linux archive ships the connector binary alone; the other
 # platforms co-locate the shared libqdb_api runtime next to it.
-#
-# Diagnostic instrumentation (2026-05-12):
-#   The Windows-only diagnostic dump and -x -v go-flag additions below are
-#   blast-radius debugging added after the GCC 7.1.0 -> 16.1.0 UCRT mingw
-#   upgrade caused a new cgo regression.  Search for "Windows diagnostic
-#   dump" markers to locate and (later) prune the block.
 
 set -euxo pipefail
 
@@ -64,14 +58,10 @@ cicd_setup_cpu_baseline
 # --- build ---
 
 # Detect platform-specific binary suffix (Windows under MINGW uses .exe).
-# Moved before the build block so SUFFIX is available for output path composition.
-# GO_EXTRA_FLAGS adds -x -v on Windows to capture full gcc/cgo subprocess output
-# (companion to the diagnostic dump above; remove together when pruning).
+# Defined before the build block so SUFFIX is available for output path composition.
 SUFFIX=""
-GO_EXTRA_FLAGS=()
 if [[ "$(uname)" == MINGW* ]]; then
     SUFFIX=".exe"
-    GO_EXTRA_FLAGS=(-x -v)
 fi
 
 # Inline the same flag composition the Makefile uses in BUILD_MODE=release.
@@ -107,15 +97,15 @@ mkdir -p "${BASE_DIR}/bin"
 # in the subprocess go-build spawns.  The commit SHA is already injected via
 # -X main.commit=${GIT_SHA}, so auto-stamping is redundant here.
 GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
-    "${GO}" build "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    "${GO}" build -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
     -o "${BASE_DIR}/bin/qdb-nats-connector${SUFFIX}" ./cmd/qdb-nats-connector
 
 GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
-    "${GO}" build "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    "${GO}" build -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
     -o "${BASE_DIR}/bin/qdb-data-gen${SUFFIX}" ./tools/generator
 
 GOFLAGS="${GOFLAGS}" GOAMD64="${GOAMD64:-}" \
-    "${GO}" build "${GO_EXTRA_FLAGS[@]+"${GO_EXTRA_FLAGS[@]}"}" -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
+    "${GO}" build -buildvcs=false -gcflags="${GCFLAGS}" -ldflags "${LDFLAGS}" \
     -o "${BASE_DIR}/bin/qdb-data-loader${SUFFIX}" ./tools/loader
 
 CONNECTOR_BIN="${BASE_DIR}/bin/qdb-nats-connector${SUFFIX}"

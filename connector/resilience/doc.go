@@ -8,4 +8,6 @@
 // Half-open state allows progressive recovery: 1→2→4→8→16→32 requests.
 // Jitter prevents thundering herd patterns during recovery.
 // Hooks provide visibility into state changes and request rejections.
+// Only errors for which qdb.IsClusterUnavailable holds count as failures;
+// any other outcome counts as a success because the cluster answered.
 package resilience

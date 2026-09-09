@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector/resilience"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/stretchr/testify/assert"
@@ -259,7 +260,7 @@ func TestHealthSummaryKeepsBreakerAndFetchSeparate(t *testing.T) {
 	// Open the breaker: overall unhealthy, but fetch side stays green
 	// and the summary shows exactly why.
 	err := breaker.Execute(func() error {
-		return connectorErrors.NewWriteFailedError("sink", nil)
+		return connectorErrors.NewWriteFailedError("sink", &qdb.Error{Code: qdb.ErrConnectionRefused, Operation: "push"})
 	})
 	require.Error(t, err)
 	require.True(t, breaker.IsOpen())

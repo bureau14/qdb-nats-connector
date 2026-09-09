@@ -96,7 +96,7 @@ func (s *Sink) Close() {
 
 // Write performs synchronous QDB write with retry logic.
 // In: ctx context.Context - cancellation context, tables []WriterTable - timeseries data
-// Out: error - nil or write/retry failure
+// Out: error - nil, WriteFailed (closed, empty, cancelled), or the qdb error of the last push
 // Ex: Write(ctx, tables) → nil (data written to QDB)
 func (s *Sink) Write(ctx context.Context, tables []qdb.WriterTable) error {
 	if s.closed.Load() {
@@ -152,7 +152,7 @@ func waitBackoff(ctx context.Context, backoff time.Duration, onProgress func()) 
 // in the instants between backoff expiry and the progress call may marginally
 // exceed its threshold -- edge-triggered health state clears it next tick.
 // In: ctx, attempts int, base/maxBackoff time.Duration, onProgress func() - nil ok, push func() error
-// Out: error - nil, WriteFailed (non-retryable/cancelled), or MaxRetriesExceeded
+// Out: error - nil, WriteFailed (cancelled), or the last push error unchanged
 // Ex: retryWithBackoff(ctx, 10, 3*time.Second, 300*time.Second, probe.Touch, pushFn) → nil
 func retryWithBackoff(ctx context.Context, attempts int, base, maxBackoff time.Duration, onProgress func(), push func() error) error {
 	if onProgress == nil {
@@ -160,6 +160,8 @@ func retryWithBackoff(ctx context.Context, attempts int, base, maxBackoff time.D
 	}
 
 	backoff := base
+
+	var err error
 	for attempt := range attempts {
 		if attempt > 0 {
 			waitErr := waitBackoff(ctx, backoff, onProgress)
@@ -170,37 +172,36 @@ func retryWithBackoff(ctx context.Context, attempts int, base, maxBackoff time.D
 			backoff = min(backoff*2, maxBackoff)
 		}
 
-		// Check context before attempting write
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return errors.NewWriteFailedError("sink", fmt.Errorf("context cancelled before write attempt: %w", ctx.Err()))
-		default:
-			// Continue with write
 		}
 
-		err := push()
+		err = push()
 		if err == nil {
 			return nil
 		}
 
-		// Check if error is retryable using qdb.IsRetryable()
+		// Only a code the cluster marks retryable can succeed on the same
+		// request later. Anything else, including an error without a qdb
+		// code, goes back to the caller unchanged so the batch is NACKed and
+		// the circuit breaker sees the real failure.
 		if !qdb.IsRetryable(err) {
-			slog.Error("Non-retryable error, failing immediately", "error", err, "retryable", false)
+			slog.Error("Write failed, not retrying", "error", err)
 
-			return errors.NewWriteFailedError("sink", fmt.Errorf("permanent failure: %w", err))
+			return err
 		}
 
 		if attempt < attempts-1 {
-			slog.Debug("Retryable error, backing off", "attempt", attempt+1, "backoff", backoff, "error", err, "retryable", true)
+			slog.Debug("Retryable write error, backing off", "attempt", attempt+1, "backoff", backoff, "error", err)
 			onProgress()
-
-			continue
 		}
-
-		slog.Error("Max retries exceeded for retryable error", "attempts", attempts, "error", err, "retryable", true)
 	}
 
-	return errors.NewMaxRetriesExceededError("sink", attempts)
+	// The last push error is the failure the caller acts on: its qdb code
+	// tells the circuit breaker whether the cluster was reachable.
+	slog.Error("Write failed after exhausting retries", "attempts", attempts, "error", err)
+
+	return err
 }
 
 // pushTables writes batch to QDB with mutex protection.

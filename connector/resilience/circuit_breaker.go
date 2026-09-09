@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 )
@@ -158,7 +159,8 @@ func WithHalfOpenProgression(base, maxAllowed int) Option {
 // Behavior:
 //   - Adds jitter when degraded (prevents thundering herd)
 //   - Rejects when open/admission control exceeded
-//   - Tracks success/failure for state transitions
+//   - Counts fn's error as a failure only when qdb.IsClusterUnavailable
+//     holds; any other outcome counts as a success
 //
 // Note: fn should be a substantial operation (e.g., batch DB write,
 // API call with multiple records). Don't use for individual message
@@ -367,7 +369,13 @@ func (cb *CircuitBreaker) recordResult(err error) {
 		cb.releaseHalfOpenSlotLocked()
 	}
 
-	if err != nil {
+	// The breaker guards the cluster, not the batch. Only an error that says
+	// the cluster was unreachable or too busy (timeout, connection refused or
+	// reset, not connected, unstable cluster, try again, async pipe full,
+	// remote out of memory) moves it toward open. A rejected request or an
+	// error without a qdb code proves the cluster answered, so it counts as a
+	// success exactly like nil; Execute still returns it to the caller.
+	if qdb.IsClusterUnavailable(err) {
 		cb.onFailureLocked(err)
 	} else {
 		cb.onSuccessLocked()

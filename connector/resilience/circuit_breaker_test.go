@@ -10,11 +10,24 @@ import (
 	"testing"
 	"time"
 
+	qdb "github.com/bureau14/qdb-api-go/v3"
 	"github.com/bureau14/qdb-nats-connector/connector/hooks"
 	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// clusterErr is the failure shape that must open the circuit: a qdb code
+// saying the cluster did not answer.
+func clusterErr() error {
+	return &qdb.Error{Code: qdb.ErrConnectionRefused, Operation: "push"}
+}
+
+// rejectedErr is a failure the cluster answered with: the request was
+// judged and refused, which says nothing about cluster availability.
+func rejectedErr() error {
+	return &qdb.Error{Code: qdb.ErrInvalidArgument, Operation: "push"}
+}
 
 // TestBasicCircuitBreakerCreation tests basic circuit breaker creation
 func TestBasicCircuitBreakerCreation(t *testing.T) {
@@ -32,16 +45,16 @@ func TestStateTransitions(t *testing.T) {
 		require.Equal(t, StateClosed, cb.GetState())
 
 		// First 2 failures should keep it closed
-		err := cb.Execute(func() error { return errors.New("fail1") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateClosed, cb.GetState())
 
-		err = cb.Execute(func() error { return errors.New("fail2") })
+		err = cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateClosed, cb.GetState())
 
 		// Third failure should open it
-		err = cb.Execute(func() error { return errors.New("fail3") })
+		err = cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 		assert.True(t, cb.IsOpen())
@@ -51,7 +64,7 @@ func TestStateTransitions(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0))
 
 		// Trigger circuit open
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 
@@ -76,7 +89,7 @@ func TestStateTransitions(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 
@@ -89,7 +102,7 @@ func TestStateTransitions(t *testing.T) {
 		assert.Equal(t, StateHalfOpen, cb.GetState())
 
 		// Any failure should reopen circuit
-		err = cb.Execute(func() error { return errors.New("fail_again") })
+		err = cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 	})
@@ -98,7 +111,7 @@ func TestStateTransitions(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond)
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 
@@ -119,7 +132,7 @@ func TestProgressiveRecovery(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 
@@ -165,7 +178,7 @@ func TestProgressiveRecovery(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0), WithHalfOpenProgression(1, 0))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 
 		// Wait for timeout
@@ -201,7 +214,7 @@ func TestProgressiveRecovery(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0), WithHalfOpenProgression(1, 16))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 
 		// Wait for timeout
@@ -225,7 +238,7 @@ func TestProgressiveRecovery(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 
 		// Wait for timeout
@@ -350,7 +363,7 @@ func TestJitterMechanism(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 100*time.Millisecond, WithJitter(50*time.Millisecond), WithHooks(hookRegistry, "test-worker", "test-resource"))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 
@@ -411,7 +424,7 @@ func TestHookIntegration(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0), WithHooks(hookRegistry, "test-worker", "test-resource"))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 
 		// Check state change hooks were fired
@@ -440,7 +453,7 @@ func TestHookIntegration(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, WithJitter(0), WithHooks(hookRegistry, "test-worker", "test-resource"))
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 
 		// Reset hook capture to focus on rejections
@@ -466,7 +479,7 @@ func TestErrorHandling(t *testing.T) {
 		cb := NewCircuitBreaker(1, 2, 500*time.Millisecond) // Longer timeout to stay open
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 
 		// Should return connection failed error when circuit is open (immediately, before timeout)
@@ -513,7 +526,7 @@ func TestEdgeCases(t *testing.T) {
 		cb := NewCircuitBreaker(1, 1, 50*time.Millisecond)
 
 		// Single failure should open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 		assert.Equal(t, StateOpen, cb.GetState())
 	})
@@ -525,7 +538,7 @@ func TestEdgeCases(t *testing.T) {
 		cb.LogStatus()
 
 		// Open circuit
-		err := cb.Execute(func() error { return errors.New("fail") })
+		err := cb.Execute(clusterErr)
 		require.Error(t, err)
 
 		// Should not panic in open state
@@ -557,7 +570,7 @@ func TestConcurrency(t *testing.T) {
 					// Simulate some work
 					time.Sleep(1 * time.Millisecond)
 					if i%10 == 0 {
-						return errors.New("simulated failure")
+						return clusterErr()
 					}
 
 					return nil
@@ -575,5 +588,54 @@ func TestConcurrency(t *testing.T) {
 
 		// Should have processed all requests
 		assert.Equal(t, int64(100), atomic.LoadInt64(&successCount)+atomic.LoadInt64(&failureCount))
+	})
+}
+
+// TestClusterAnsweredCountsAsSuccess: errors that prove the cluster answered
+// never move the circuit toward open, and reset the failure streak.
+func TestClusterAnsweredCountsAsSuccess(t *testing.T) {
+	t.Run("rejected_request_keeps_circuit_closed", func(t *testing.T) {
+		cb := NewCircuitBreaker(2, 1, time.Minute, WithJitter(0))
+
+		for range 3 {
+			err := cb.Execute(rejectedErr)
+			require.ErrorIs(t, err, qdb.ErrInvalidArgument)
+			assert.False(t, cb.IsOpen())
+		}
+	})
+
+	t.Run("plain_error_keeps_circuit_closed", func(t *testing.T) {
+		cb := NewCircuitBreaker(2, 1, time.Minute, WithJitter(0))
+		plain := errors.New("pin failure")
+
+		for range 3 {
+			err := cb.Execute(func() error { return plain })
+			require.ErrorIs(t, err, plain)
+			assert.False(t, cb.IsOpen())
+		}
+	})
+
+	t.Run("answer_resets_failure_streak", func(t *testing.T) {
+		cb := NewCircuitBreaker(2, 1, time.Minute, WithJitter(0))
+
+		require.Error(t, cb.Execute(clusterErr))
+		require.Error(t, cb.Execute(rejectedErr))
+		require.Error(t, cb.Execute(clusterErr))
+		assert.False(t, cb.IsOpen())
+
+		require.Error(t, cb.Execute(clusterErr))
+		assert.True(t, cb.IsOpen())
+	})
+
+	t.Run("half_open_answer_closes_circuit", func(t *testing.T) {
+		cb := NewCircuitBreaker(1, 1, 20*time.Millisecond, WithJitter(0), WithHalfOpenProgression(1, 1))
+
+		require.Error(t, cb.Execute(clusterErr))
+		require.True(t, cb.IsOpen())
+
+		time.Sleep(30 * time.Millisecond)
+
+		require.Error(t, cb.Execute(rejectedErr))
+		assert.Equal(t, StateClosed, cb.GetState())
 	})
 }

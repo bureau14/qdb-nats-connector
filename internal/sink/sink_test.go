@@ -9,7 +9,6 @@ import (
 	"time"
 
 	qdb "github.com/bureau14/qdb-api-go/v3"
-	connectorErrors "github.com/bureau14/qdb-nats-connector/internal/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -55,9 +54,8 @@ func TestRetryWithBackoffExhaustsAttempts(t *testing.T) {
 		func() { progress++ }, push)
 
 	require.Error(t, err)
-	var connErr *connectorErrors.ConnectorError
-	require.ErrorAs(t, err, &connErr)
-	assert.Equal(t, connectorErrors.ErrCodeMaxRetriesExceeded, connErr.Code)
+	assert.ErrorIs(t, err, qdb.ErrTimeout)
+	assert.True(t, qdb.IsClusterUnavailable(err))
 	assert.Equal(t, 3, pushes)
 	// No progress call after the final classification: 2 + 2.
 	assert.Equal(t, 4, progress)
@@ -71,9 +69,7 @@ func TestRetryWithBackoffNonRetryableFailsImmediately(t *testing.T) {
 		func() { progress++ }, push)
 
 	require.Error(t, err)
-	var connErr *connectorErrors.ConnectorError
-	require.ErrorAs(t, err, &connErr)
-	assert.Equal(t, connectorErrors.ErrCodeWriteFailed, connErr.Code)
+	assert.ErrorIs(t, err, qdb.ErrInvalidArgument)
 	assert.Equal(t, 1, pushes)
 	assert.Equal(t, 0, progress)
 }

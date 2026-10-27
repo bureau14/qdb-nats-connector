@@ -81,21 +81,27 @@ GLOBAL_ENV: dict[str, str] = {
 STEP_ENV: dict[str, dict[str, str]] = {}
 
 # Linux builds run inside bureau14/builder:rhel7, whose default /usr/bin/gcc
-# is 7.3.1 -- too old to provide the aarch64 outline-atomic libgcc helpers
-# (__aarch64_*_sync) that Go 1.25+ emits from its prebuilt -race (TSan)
-# runtime, so linking the race-enabled test binaries fails on linux-aarch64.
-# Pin CC/CXX to gcc15 (the compiler all QuasarDB artifacts are built with;
-# its libgcc has the helpers) for both linux arches -- amd64 never references
-# those symbols, so this is a harmless consistency win there.  The doubled $$
-# escapes Buildkite's upload-time interpolation so the literal
-# $QDB_CICD_AGENT_GCC15_* reaches the agent shell, which substitutes the
+# is 7.3.1.  Two reasons force a newer compiler:
+#
+# 1. The connector links libqdb_api.a statically together with libstdc++
+#    (-Wl,-Bstatic -lqdb_api -lstdc++).  The static libstdc++ therefore comes
+#    from whichever gcc Go's linker invokes, and it must match the gcc that
+#    built libqdb_api.a: libstdc++ internals such as the atomic wait/notify
+#    helpers (std::__detail::__wait_impl) change ABI between major releases,
+#    and a mismatch surfaces as undefined references at link time.  QuasarDB
+#    builds all artifacts with gcc16 since QDB-19972, so pin the same here.
+# 2. Go 1.25+ emits aarch64 outline-atomic libgcc helpers (__aarch64_*_sync)
+#    from its prebuilt -race (TSan) runtime, which gcc 7 lacks.
+#
+# The doubled $$ escapes Buildkite's upload-time interpolation so the literal
+# $QDB_CICD_AGENT_GCC16_* reaches the agent shell, which substitutes the
 # concrete path (written by qdb-cloud-deployments 36-write-agent-env.sh);
 # the docker plugin then propagates the resolved CC/CXX into the container.
 # Same idiom as _go_env_for_agent() below.
 OS_ENV: dict[str, dict[str, str]] = {
     "linux": {
-        "CC": "$$QDB_CICD_AGENT_GCC15_CC",
-        "CXX": "$$QDB_CICD_AGENT_GCC15_CXX",
+        "CC": "$$QDB_CICD_AGENT_GCC16_CC",
+        "CXX": "$$QDB_CICD_AGENT_GCC16_CXX",
     },
 }
 

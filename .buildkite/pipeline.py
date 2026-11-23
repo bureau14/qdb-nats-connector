@@ -270,7 +270,7 @@ def generate_pipeline() -> Pipeline:
         docker (1)
         build-{slug} x8   (each running build + unit + integration + e2e
                            in sequence, then uploading the archive and
-                           promoting the LATEST_SUCCESSFUL pointer)
+                           promoting it)
         test report (1)   (depends on every build-{slug})
 
     The first ten run in parallel; only the test-report step has

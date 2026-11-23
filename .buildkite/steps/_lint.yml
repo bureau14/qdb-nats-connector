@@ -14,13 +14,13 @@ plugins:
         clean: true
         projects:
         - project_id: "quasardb-build"
+          step: build
           output-dir: "qdb"
           extract: true
           files:
             - "*-c-api.tar.zst!*"
             - "*-server.tar.zst!*"
             - "*-utils.tar.zst!*"
-      promote: {}
 
 commands:
   - bash scripts/cicd/10.lint.sh

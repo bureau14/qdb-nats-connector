@@ -9,7 +9,7 @@ env:
 # is injected by pipeline.py::_lint_step via apply_docker so that the CGO env
 # and Go toolchain env propagate naturally into the container.
 plugins:
-  - bureau14/qdb-artifacts#sc-20192/snapshot-dependencies:
+  - bureau14/qdb-artifacts#master:
       download:
         clean: true
         projects:

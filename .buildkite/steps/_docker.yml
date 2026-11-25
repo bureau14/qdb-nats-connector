@@ -21,7 +21,7 @@ commands:
   - bash scripts/cicd/60.docker.sh
 
 plugins:
-  - bureau14/qdb-artifacts#sc-20192/snapshot-dependencies:
+  - bureau14/qdb-artifacts#master:
       download:
         clean: true
         # The entry filter doubles as strip prefix (bin/ is removed), so

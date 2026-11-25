@@ -1,8 +1,8 @@
 label: ":hammer: build ({slug})"
-key: build-{slug}
+step_id: build
 
-# key must remain build-{slug}: scripts/cicd/20.build.sh derives SLUG from
-# ${BUILDKITE_STEP_KEY#build-}. Renaming would silently break that derivation.
+# The key is build-{slug}, made from step_id: scripts/cicd/20.build.sh derives
+# SLUG from ${BUILDKITE_STEP_KEY#build-}. Renaming would silently break that derivation.
 
 commands:
   - echo \"+++ Start Services\"
@@ -22,6 +22,7 @@ plugins:
         clean: true
         projects:
         - project_id: "quasardb-build"
+          step: build
           output-dir: "qdb"
           extract: true
           files:
